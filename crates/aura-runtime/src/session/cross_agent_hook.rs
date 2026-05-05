@@ -273,8 +273,24 @@ impl AgentControlHook for AuraServerAgentHook {
 #[async_trait]
 impl AgentReadHook for AuraServerAgentHook {
     async fn list_agents(&self, org_id: Option<&str>) -> Result<Value, String> {
+        // Always request the slim view: aura-os-server returns
+        // `Vec<{agent_id, name, role}>` instead of full `Vec<Agent>`
+        // (which carries multi-KB base64 WebP icons + system_prompt
+        // + personality per row). The previous full payload routinely
+        // exceeded the runner's 8000-char per-tool-result cap
+        // (`MAX_COLLECTED_TOOL_RESULT_CHARS`), truncating the JSON
+        // mid-record before the model could read agent names past
+        // the first one or two. The aura-os-server `view=` knob is
+        // documented at `apps/aura-os-server/src/handlers/agents/crud/list.rs`
+        // (`AgentListView`); the cross-repo regression test in
+        // `cross_agent_hook::tests` pins this query string so a future
+        // refactor cannot silently re-bloat the tool result.
         let url = self.endpoint("/api/agents");
-        let mut request = self.client.get(url).bearer_auth(self.bearer()?);
+        let mut request = self
+            .client
+            .get(url)
+            .bearer_auth(self.bearer()?)
+            .query(&[("view", "slim")]);
         if let Some(org_id) = org_id {
             request = request.query(&[("org_id", org_id)]);
         }
@@ -335,7 +351,14 @@ struct AuraOsApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::Query;
+    use axum::routing::get;
+    use axum::Json;
     use reqwest::header::{HeaderMap, HeaderValue};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
 
     #[test]
     fn persisted_header_accepts_true() {
@@ -356,5 +379,76 @@ mod tests {
     fn persisted_header_rejects_missing() {
         let err = require_persisted_header(&HeaderMap::new()).unwrap_err();
         assert!(err.contains("missing"), "got: {err}");
+    }
+
+    /// Cross-repo regression: pin that `list_agents` always asks
+    /// aura-os-server for the slim shape via `?view=slim`. Without
+    /// this, the full `Vec<Agent>` payload (multi-KB icons +
+    /// system_prompt per row) overflows the runner's per-tool-result
+    /// cap and truncates the JSON before agent names are reachable —
+    /// which manifested as "every list_agents call gets truncated
+    /// before I reach the name fields" on the LLM side. The matching
+    /// server endpoint is documented at
+    /// `apps/aura-os-server/src/handlers/agents/crud/list.rs`
+    /// (`AgentListView`); if either side drifts, this test fails first.
+    async fn spawn_capturing_mock(
+        captured: Arc<Mutex<Option<HashMap<String, String>>>>,
+    ) -> String {
+        let captured_for_route = captured.clone();
+        let app = axum::Router::new().route(
+            "/api/agents",
+            get(move |Query(params): Query<HashMap<String, String>>| {
+                let captured = captured_for_route.clone();
+                async move {
+                    *captured.lock().await = Some(params);
+                    Json(serde_json::json!([]))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn list_agents_callback_always_requests_view_slim() {
+        let captured = Arc::new(Mutex::new(None::<HashMap<String, String>>));
+        let base_url = spawn_capturing_mock(captured.clone()).await;
+
+        let hook = AuraServerAgentHook::new(base_url, Some("test-jwt".into()));
+        hook.list_agents(None).await.expect("list_agents call");
+
+        let params = captured.lock().await.clone().expect("captured params");
+        assert_eq!(
+            params.get("view").map(String::as_str),
+            Some("slim"),
+            "list_agents must request view=slim from aura-os-server; got {params:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_agents_callback_combines_view_slim_with_org_id() {
+        let captured = Arc::new(Mutex::new(None::<HashMap<String, String>>));
+        let base_url = spawn_capturing_mock(captured.clone()).await;
+
+        let hook = AuraServerAgentHook::new(base_url, Some("test-jwt".into()));
+        hook.list_agents(Some("org-1"))
+            .await
+            .expect("list_agents call");
+
+        let params = captured.lock().await.clone().expect("captured params");
+        assert_eq!(
+            params.get("view").map(String::as_str),
+            Some("slim"),
+            "view=slim must accompany org_id; got {params:?}"
+        );
+        assert_eq!(
+            params.get("org_id").map(String::as_str),
+            Some("org-1"),
+            "org_id must be forwarded alongside view=slim; got {params:?}"
+        );
     }
 }
