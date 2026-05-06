@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use base64::Engine;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -435,11 +436,26 @@ async fn prepare_turn_context(
                 blocks.push(ContentBlock::text(&msg.content));
             }
             for att in &image_atts {
+                let image_data = if let Some(ref url) = att.source_url {
+                    if att.data.is_empty() {
+                        match fetch_attachment_data(url).await {
+                            Ok(data) => data,
+                            Err(e) => {
+                                warn!(url = %url, error = %e, "Failed to fetch attachment from URL, skipping");
+                                continue;
+                            }
+                        }
+                    } else {
+                        att.data.clone()
+                    }
+                } else {
+                    att.data.clone()
+                };
                 blocks.push(ContentBlock::Image {
                     source: ImageSource {
                         source_type: "base64".into(),
                         media_type: att.media_type.clone(),
-                        data: att.data.clone(),
+                        data: image_data,
                     },
                 });
             }
@@ -616,6 +632,22 @@ fn dispatch_turn_to_agent(
         stream_forward_handle,
         message_id,
     }
+}
+
+/// Fetch attachment content from a URL (e.g. S3) and return as base64.
+///
+/// Only HTTPS URLs are accepted to prevent fetching from arbitrary sources.
+async fn fetch_attachment_data(url: &str) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("Only HTTPS URLs are allowed".into());
+    }
+    let bytes = reqwest::get(url)
+        .await
+        .map_err(|e| format!("fetch failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 #[cfg(test)]
