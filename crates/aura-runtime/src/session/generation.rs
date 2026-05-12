@@ -183,6 +183,32 @@ fn build_router_request(
             }
             Ok((url, body))
         }
+        "video" => {
+            let url = format!("{router_url}/v1/generate-video/stream");
+            let mut body = serde_json::json!({});
+            if let Some(ref prompt) = req.prompt {
+                body["prompt"] = serde_json::json!(prompt);
+            }
+            if let Some(ref model) = req.model {
+                body["model"] = serde_json::json!(model);
+            }
+            if let Some(ref aspect_ratio) = req.aspect_ratio {
+                body["aspectRatio"] = serde_json::json!(aspect_ratio);
+            }
+            if let Some(duration) = req.duration_seconds {
+                body["durationSeconds"] = serde_json::json!(duration);
+            }
+            if let Some(ref resolution) = req.resolution {
+                body["resolution"] = serde_json::json!(resolution);
+            }
+            if let Some(audio) = req.generate_audio {
+                body["generateAudio"] = serde_json::json!(audio);
+            }
+            if let Some(ref pid) = req.project_id {
+                body["projectId"] = serde_json::json!(pid);
+            }
+            Ok((url, body))
+        }
         other => Err(format!("Unknown generation mode: {other}")),
     }
 }
