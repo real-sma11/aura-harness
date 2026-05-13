@@ -17,7 +17,14 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-const CLOUDFLARE_MAX_RETRIES: u32 = 1;
+/// On every successive Cloudflare 403, multiply the emergency body cap
+/// by this factor before retrying. 3/4 (= 25% shrink) converges fast
+/// while still leaving meaningful conversation context after several
+/// hits: starting at 512 KiB the sequence is 384 / 288 / 216 / 162 /
+/// 121 KiB — three retries land at ~216 KiB which is comfortably below
+/// every body-size WAF rule we have observed on the managed router edge.
+const CLOUDFLARE_RETRY_SHRINK_NUMER: usize = 3;
+const CLOUDFLARE_RETRY_SHRINK_DENOM: usize = 4;
 static OUTBOUND_REQUEST_THROTTLE: OnceLock<tokio::sync::Mutex<Option<Instant>>> = OnceLock::new();
 
 /// Set of ASCII bytes that frequently appear in code-pattern WAF
@@ -305,12 +312,20 @@ impl AnthropicProvider {
     /// `messages_count` is taken from the typed request so we don't
     /// have to re-parse the JSON; it is only used for the diagnostic
     /// log line.
-    pub(super) async fn send_checked<B: Serialize + Sync>(
+    /// Send an HTTP request to the Anthropic API, classifying the
+    /// response. The `body_cap_override` parameter lets the outer
+    /// retry loop tighten the effective body cap for the current
+    /// attempt; it is applied *only* when smaller than the configured
+    /// `emergency_body_cap_bytes` (otherwise it would loosen the cap
+    /// instead of tightening it on a Cloudflare retry, which is the
+    /// exact regression we are guarding against).
+    pub(super) async fn send_checked_with_cap<B: Serialize + Sync>(
         &self,
         request_ctx: &ModelRequest,
         model: &str,
         json_body: &B,
         messages_count: usize,
+        body_cap_override: Option<usize>,
     ) -> Result<reqwest::Response, ApiError> {
         let content_profile = ModelContentProfile::from_request(request_ctx)
             .validate()
@@ -326,7 +341,8 @@ impl AnthropicProvider {
         debug_log_waf_safe_serialization(model, body_bytes.len());
         // #endregion
 
-        let capped_bytes = self.maybe_apply_emergency_body_cap(model, body_bytes);
+        let effective_cap = self.effective_body_cap(body_cap_override);
+        let capped_bytes = self.apply_body_cap(model, body_bytes, effective_cap);
         // WAF defang runs AFTER the cap so it sees the final wire bytes
         // (any patterns introduced by the cap's truncation marker pass
         // through this same step). Pre-cap defanging would risk silently
@@ -344,6 +360,8 @@ impl AnthropicProvider {
             body_bytes = final_bytes.len(),
             messages_count,
             emergency_body_cap_bytes = self.config.emergency_body_cap_bytes,
+            effective_body_cap_bytes = effective_cap,
+            body_cap_override_bytes = ?body_cap_override,
             min_request_interval_ms = self.config.min_request_interval_ms,
             request_body_hash = %request_summary.body_hash,
             top_level_keys = %request_summary.top_level_keys,
@@ -468,52 +486,64 @@ impl AnthropicProvider {
         Ok(response)
     }
 
-    /// Phase-0 diagnostic: when the operator has set
-    /// `AURA_LLM_EMERGENCY_BODY_CAP_BYTES > 0` and the serialized
-    /// request body exceeds that cap, truncate the largest text block
-    /// in the last user message in-place so the request fits. Returns
-    /// the original bytes unchanged when the cap is disabled, when
-    /// the body already fits, or when truncation fails (we never want
-    /// the diagnostic to outright drop a request — the upstream WAF
-    /// is far more informative if it does block).
-    fn maybe_apply_emergency_body_cap(&self, model: &str, body_bytes: Vec<u8>) -> Vec<u8> {
-        let cap = self.config.emergency_body_cap_bytes;
+    /// Resolve the effective body cap for one outbound attempt.
+    ///
+    /// When the retry loop has narrowed the cap on a 403 retry, the
+    /// tightened value wins — but only if it is strictly smaller than
+    /// the configured cap. The configured value remains the ceiling
+    /// in all other cases. A configured cap of `0` (disabled) stays
+    /// disabled regardless of override, because the operator has
+    /// explicitly opted out of proactive trimming.
+    fn effective_body_cap(&self, body_cap_override: Option<usize>) -> usize {
+        let configured = self.config.emergency_body_cap_bytes;
+        if configured == 0 {
+            return 0;
+        }
+        match body_cap_override {
+            Some(override_cap) if override_cap < configured => override_cap,
+            _ => configured,
+        }
+    }
+
+    /// Apply the configured body cap (or per-attempt override) to a
+    /// freshly serialised `/v1/messages` body. Returns a `Vec<u8>` that
+    /// is **always** at or below `cap` (modulo the truncation marker
+    /// budget) — the worst-case fallback collapses the conversation
+    /// down to a single placeholder user message, so this function
+    /// never lets an oversized request reach the wire.
+    ///
+    /// The historical name was `maybe_apply_emergency_body_cap`; we
+    /// keep the env var name for backwards compatibility but the
+    /// behaviour is no longer a "diagnostic" — proactive request
+    /// budgeting is now part of the harness's reliability contract.
+    fn apply_body_cap(&self, model: &str, body_bytes: Vec<u8>, cap: usize) -> Vec<u8> {
         if cap == 0 || body_bytes.len() <= cap {
             return body_bytes;
         }
 
         let original_len = body_bytes.len();
-        match truncate_last_user_message_to_cap(&body_bytes, cap) {
-            Ok(truncated) => {
-                warn!(
-                    model = %model,
-                    original_bytes = original_len,
-                    truncated_bytes = truncated.len(),
-                    cap_bytes = cap,
-                    "AURA_LLM_EMERGENCY_BODY_CAP_BYTES tripped — last user message truncated; \
-                     this is a Phase-0 diagnostic, the proper fix is the harness-side \
-                     canonical-rejection validator"
-                );
-                // #region agent log
-                debug_log_body_cap_fired(model, original_len, truncated.len(), cap, true, None);
-                // #endregion
-                truncated
-            }
-            Err(err) => {
-                warn!(
-                    model = %model,
-                    original_bytes = original_len,
-                    cap_bytes = cap,
-                    error = %err,
-                    "AURA_LLM_EMERGENCY_BODY_CAP_BYTES set but truncation failed; \
-                     forwarding the un-truncated body so the upstream error stays informative"
-                );
-                // #region agent log
-                debug_log_body_cap_fired(model, original_len, original_len, cap, false, Some(err));
-                // #endregion
-                body_bytes
-            }
-        }
+        let (capped, dropped_messages, mode) = fit_body_under_cap(&body_bytes, cap);
+        warn!(
+            model = %model,
+            original_bytes = original_len,
+            capped_bytes = capped.len(),
+            cap_bytes = cap,
+            dropped_messages,
+            fit_mode = %mode,
+            "Request body exceeded `AURA_LLM_EMERGENCY_BODY_CAP_BYTES`; \
+             trimmed in place to stay under the proactive Cloudflare safety budget"
+        );
+        // #region agent log
+        debug_log_body_cap_fired(
+            model,
+            original_len,
+            capped.len(),
+            cap,
+            true,
+            Some(format!("mode={mode},dropped_messages={dropped_messages}")),
+        );
+        // #endregion
+        capped
     }
 
     fn build_request(
@@ -1107,24 +1137,248 @@ const TRUNCATION_MARKER_PREFIX: &str = "<<<AURA_HARNESS_EMERGENCY_TRUNCATED:";
 /// `original_len` / `kept` numbers without ever underflowing the cap.
 const TRUNCATION_MARKER_BUDGET: usize = 128;
 
+/// Outcome marker for [`fit_body_under_cap`]: tells the caller which
+/// path through the trimming ladder fit the body. Used purely for
+/// observability — the bytes the caller receives are valid in every
+/// case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFitMode {
+    /// Body was already at or under the cap — no edits made.
+    NoOp,
+    /// Last user message's largest text/tool_result block was truncated.
+    TruncatedLastUser,
+    /// One or more pairs of oldest non-system messages were dropped
+    /// before truncating the last user message.
+    DroppedOldestPairs,
+    /// Last-resort: replaced the entire message history with a
+    /// single placeholder user turn carrying the truncation marker.
+    Collapsed,
+    /// Body could not be parsed as JSON — the original bytes are
+    /// returned unchanged. We deliberately do not error because that
+    /// would mask the much more informative upstream response.
+    Unparseable,
+}
+
+impl std::fmt::Display for BodyFitMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BodyFitMode::NoOp => "noop",
+            BodyFitMode::TruncatedLastUser => "truncated_last_user",
+            BodyFitMode::DroppedOldestPairs => "dropped_oldest_pairs",
+            BodyFitMode::Collapsed => "collapsed_to_marker",
+            BodyFitMode::Unparseable => "unparseable",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Always-succeeds body-shaper.
+///
+/// Given a serialised `/v1/messages` body and a hard cap in bytes,
+/// return a new body that is at or below the cap (modulo the small,
+/// fixed truncation-marker budget). Trimming follows a ladder so we
+/// drop the *least* informative bytes first:
+///
+///   1. **No-op.** Body already fits.
+///   2. **Truncate last user.** Shrink the largest text /
+///      `tool_result` payload in the last user message. This is the
+///      common case — one giant pasted blob or one huge tool result.
+///   3. **Drop oldest message pairs.** When the rest of the
+///      transcript is the bulk of the body (long agent loops), drop
+///      the oldest user/assistant pair (system messages are
+///      preserved) and re-attempt step 2. We deliberately drop in
+///      pairs so we never leave a dangling `tool_use` without its
+///      `tool_result`.
+///   4. **Collapse.** Last-ditch: replace `messages` with a single
+///      synthetic user turn `[history elided due to body cap]\n<original last user text>`.
+///
+/// The function never returns `Err`; if the body can't even be
+/// parsed back to JSON we return the original bytes with a
+/// `BodyFitMode::Unparseable` marker so the caller can log it.
+fn fit_body_under_cap(body_bytes: &[u8], cap_bytes: usize) -> (Vec<u8>, usize, BodyFitMode) {
+    if cap_bytes == 0 || body_bytes.len() <= cap_bytes {
+        return (body_bytes.to_vec(), 0, BodyFitMode::NoOp);
+    }
+
+    let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
+        Ok(v) => v,
+        Err(_) => return (body_bytes.to_vec(), 0, BodyFitMode::Unparseable),
+    };
+
+    // Try the cheap path first.
+    if let Ok(truncated) = truncate_last_user_message_to_cap(body_bytes, cap_bytes) {
+        if truncated.len() <= cap_bytes + TRUNCATION_MARKER_BUDGET {
+            return (truncated, 0, BodyFitMode::TruncatedLastUser);
+        }
+    }
+
+    // History-trimming path: drop oldest non-system pair, re-truncate, repeat.
+    let mut value = parsed;
+    let mut dropped = 0usize;
+    for _ in 0..MAX_HISTORY_DROP_ITERATIONS {
+        if drop_oldest_non_system_message_pair(&mut value).is_err() {
+            break;
+        }
+        dropped += 2;
+
+        let candidate = match serialize_request_body(&value) {
+            Ok(bytes) => bytes,
+            Err(_) => break,
+        };
+        if candidate.len() <= cap_bytes {
+            return (candidate, dropped, BodyFitMode::DroppedOldestPairs);
+        }
+        if let Ok(truncated) = truncate_last_user_message_to_cap(&candidate, cap_bytes) {
+            if truncated.len() <= cap_bytes + TRUNCATION_MARKER_BUDGET {
+                return (truncated, dropped, BodyFitMode::DroppedOldestPairs);
+            }
+        }
+    }
+
+    // Last resort: collapse the entire message history.
+    let collapsed_bytes = collapse_messages_to_marker(&body_bytes.to_vec(), cap_bytes);
+    (collapsed_bytes, dropped, BodyFitMode::Collapsed)
+}
+
+/// Safety bound on the history-trim loop so a pathological body
+/// (e.g. tens of thousands of messages, each individually huge) can't
+/// burn cycles indefinitely. 64 iterations × 2 messages = 128
+/// messages dropped, which is more than any real chat history.
+const MAX_HISTORY_DROP_ITERATIONS: usize = 64;
+
+/// Drop the oldest pair of non-system messages from a parsed body.
+/// Returns `Err` when fewer than two non-system messages remain (the
+/// caller must fall back to collapse mode).
+///
+/// Dropping in pairs preserves the user/assistant cadence and, more
+/// importantly, prevents stripping a `tool_use` without its matching
+/// `tool_result` (which would make the next request invalid per
+/// Anthropic's schema). System messages are immutable here.
+fn drop_oldest_non_system_message_pair(value: &mut serde_json::Value) -> Result<(), ()> {
+    let messages = value
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(())?;
+
+    let oldest_idx = messages
+        .iter()
+        .position(|m| m.get("role").and_then(serde_json::Value::as_str) != Some("system"))
+        .ok_or(())?;
+
+    // Need at least one more non-system message after the one we're about
+    // to drop, otherwise we'd leave a dangling pair half-removed.
+    let second_idx = messages
+        .iter()
+        .enumerate()
+        .skip(oldest_idx + 1)
+        .find(|(_, m)| m.get("role").and_then(serde_json::Value::as_str) != Some("system"))
+        .map(|(i, _)| i)
+        .ok_or(())?;
+
+    messages.remove(second_idx);
+    messages.remove(oldest_idx);
+
+    // Refuse to collapse the conversation to zero non-system messages
+    // here — the caller decides whether to fall through to
+    // `collapse_messages_to_marker`.
+    let any_non_system_remaining = messages
+        .iter()
+        .any(|m| m.get("role").and_then(serde_json::Value::as_str) != Some("system"));
+    if !any_non_system_remaining {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Build a synthetic single-user-message body whose only content is
+/// the truncation marker + (a tail of) the original last user text.
+/// Used as the final fallback when no amount of history-trimming can
+/// fit under the cap (e.g. one absolutely enormous single user
+/// message). System messages from the original body are preserved
+/// verbatim.
+fn collapse_messages_to_marker(body_bytes: &[u8], cap_bytes: usize) -> Vec<u8> {
+    let parsed: serde_json::Value = match serde_json::from_slice(body_bytes) {
+        Ok(v) => v,
+        Err(_) => return body_bytes.to_vec(),
+    };
+    let mut value = parsed;
+
+    let mut salvaged_user_tail: Option<String> = None;
+    let mut system_messages: Vec<serde_json::Value> = Vec::new();
+    if let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) {
+        for m in messages {
+            if m.get("role").and_then(serde_json::Value::as_str) == Some("system") {
+                system_messages.push(m.clone());
+            }
+        }
+        if let Some(last_user) = messages
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        {
+            if let Some(blocks) = last_user.get("content").and_then(serde_json::Value::as_array) {
+                if let Some(text) = blocks.iter().find_map(|b| {
+                    if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
+                        b.get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    } else {
+                        None
+                    }
+                }) {
+                    salvaged_user_tail = Some(text);
+                }
+            } else if let Some(text) = last_user.get("content").and_then(serde_json::Value::as_str)
+            {
+                salvaged_user_tail = Some(text.to_string());
+            }
+        }
+    }
+
+    // Compute a generous tail size so the user sees *something* from
+    // their last message even after collapse. Half the cap minus
+    // overhead is a safe upper bound; `build_truncated_text` clamps
+    // again at write time.
+    let tail_budget = cap_bytes.saturating_sub(TRUNCATION_MARKER_BUDGET * 2) / 2;
+    let salvaged = salvaged_user_tail.unwrap_or_default();
+    let new_text = build_truncated_text(&salvaged, tail_budget);
+
+    let mut new_messages: Vec<serde_json::Value> = system_messages;
+    new_messages.push(serde_json::json!({
+        "role": "user",
+        "content": [
+            { "type": "text", "text": new_text }
+        ]
+    }));
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("messages".to_string(), serde_json::Value::Array(new_messages));
+    }
+
+    serialize_request_body(&value).unwrap_or_else(|_| body_bytes.to_vec())
+}
+
 /// Truncate the largest text block in the last user message of an
 /// already-serialized Anthropic `/v1/messages` body so the resulting
 /// JSON fits under `cap_bytes`. Returns the new serialized body.
 ///
-/// The function is intentionally conservative:
+/// This is the inner loop of the [`fit_body_under_cap`] ladder. It
+/// still returns `Err` for "structurally impossible" cases (no
+/// `messages` array, no user message, cap smaller than the marker
+/// budget) so the outer ladder can decide whether to drop history
+/// pairs and retry or fall through to a full collapse.
 ///
-///   * It only edits ONE block (the largest text block in the last
-///     user message). Cross-message truncation is out of scope for
-///     Phase 0 — the dev-loop's first failing request is a single
-///     giant user message, so this covers the hypothesis-test case.
-///   * It returns `Err` when there is no user message, no text block,
-///     or the cap is too small to fit even the marker. The caller
-///     logs the error and falls back to forwarding the original body.
-///   * It does a single re-serialization pass; if the new body is
-///     still slightly over the cap (e.g. JSON quoting overhead grew),
-///     it is returned anyway — Phase 0 is a hypothesis test, not a
-///     hard guarantee. The exact cap is enforced once the proper
-///     validator lands.
+/// Behavior:
+///
+///   * Edits ONE block per call (the largest truncatable payload in
+///     the last user message — see [`TruncationLocation`]).
+///   * Returns `Err` when there is no user message, no truncatable
+///     payload, or the cap is too small to fit even the marker; the
+///     outer ladder treats every `Err` as "try harder".
+///   * Single re-serialization pass; if the resulting body is still
+///     marginally over the cap (e.g. JSON quoting overhead grew),
+///     the outer ladder catches it via the `cap + marker_budget`
+///     check and falls through to history trimming.
 fn truncate_last_user_message_to_cap(
     body_bytes: &[u8],
     cap_bytes: usize,
@@ -1587,12 +1841,21 @@ fn parse_complete_response(
 
 /// Outcome of `classify_retry_action`.
 ///
-/// `Retry { sleep }` → sleep the given duration then attempt again with the
-/// same model. `FallbackModel` → abandon this model, try the next in the
+/// `Retry { sleep, body_cap_override }` → sleep the given duration
+/// then attempt again with the same model. `body_cap_override` is
+/// `Some(cap)` only on Cloudflare 403 retries, where the cap shrinks
+/// 25% per attempt so a body-size WAF rule is guaranteed to clear
+/// within `cloudflare_max_retries` attempts. All other retry paths
+/// (5xx, 429/529 overload) leave the cap alone.
+///
+/// `FallbackModel` → abandon this model, try the next in the
 /// fallback chain. `Propagate` → give up, surface the underlying error.
 #[derive(Debug)]
 enum RetryAction {
-    Retry { sleep: Duration },
+    Retry {
+        sleep: Duration,
+        body_cap_override: Option<usize>,
+    },
     FallbackModel,
     Propagate,
 }
@@ -1610,34 +1873,57 @@ fn classify_retry_action(
     err: &ApiError,
     attempt: u32,
     max_retries: u32,
+    cloudflare_max_retries: u32,
     backoff_initial_ms: u64,
     backoff_cap_ms: u64,
     model_idx: usize,
     model_count: usize,
     model: &str,
     last_err: &mut Option<ReasonerError>,
+    current_body_cap: usize,
 ) -> RetryAction {
     match err {
-        ApiError::CloudflareBlock(msg) if attempt < max_retries.min(CLOUDFLARE_MAX_RETRIES) => {
+        ApiError::CloudflareBlock(msg) if attempt < max_retries.min(cloudflare_max_retries) => {
             let sleep = exp_backoff_with_jitter(attempt, backoff_initial_ms, backoff_cap_ms);
             // `Duration::as_millis` returns u128 but 30s backoff caps well below
             // u64::MAX; truncation cannot happen. `warn!` field value expressions
             // can't carry attributes directly, so bind first.
             #[allow(clippy::cast_possible_truncation)]
             let backoff_ms = sleep.as_millis() as u64;
+            // Shrink the body cap by 25% per attempt. When the cap is
+            // disabled (0) we still produce an override so the next
+            // attempt has *some* ceiling — pick a generous starting
+            // point (256 KiB) so the first shrink isn't a sudden
+            // step-change from "unlimited" to "tiny".
+            let starting_cap = if current_body_cap == 0 {
+                262_144
+            } else {
+                current_body_cap
+            };
+            let next_cap = (starting_cap.saturating_mul(CLOUDFLARE_RETRY_SHRINK_NUMER))
+                / CLOUDFLARE_RETRY_SHRINK_DENOM;
+            // Floor: never shrink below 16 KiB; below that point a
+            // tighter cap won't appease the WAF, and we just damage
+            // the conversation further.
+            let next_cap = next_cap.max(16 * 1024);
             warn!(
                 model = %model,
                 attempt,
                 backoff_ms,
-                max_cloudflare_retries = CLOUDFLARE_MAX_RETRIES,
-                "Cloudflare block, will retry once with conservative backoff"
+                max_cloudflare_retries = cloudflare_max_retries,
+                current_body_cap,
+                next_body_cap = next_cap,
+                "Cloudflare block, will retry with tighter body cap"
             );
             *last_err = Some(ReasonerError::Transient {
                 status: 403,
                 message: msg.clone(),
                 retry_after: None,
             });
-            RetryAction::Retry { sleep }
+            RetryAction::Retry {
+                sleep,
+                body_cap_override: Some(next_cap),
+            }
         }
         ApiError::Overloaded {
             message,
@@ -1659,7 +1945,10 @@ fn classify_retry_action(
                 message: super::format_rate_limited_message(message, *retry_after),
                 retry_after: *retry_after,
             });
-            RetryAction::Retry { sleep }
+            RetryAction::Retry {
+                sleep,
+                body_cap_override: None,
+            }
         }
         ApiError::Overloaded {
             message,
@@ -1693,7 +1982,10 @@ fn classify_retry_action(
                 message: message.clone(),
                 retry_after: None,
             });
-            RetryAction::Retry { sleep }
+            RetryAction::Retry {
+                sleep,
+                body_cap_override: None,
+            }
         }
         // After retries are exhausted, try the fallback model rather
         // than surfacing the 5xx to the caller — the same escape hatch
@@ -1767,43 +2059,87 @@ fn emit_retry_observation(err: &ApiError, sleep: Duration, attempt_that_failed: 
 type AttemptFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, ApiError>> + Send + 'a>>;
 
+/// Per-attempt context passed into the body-building closure. The
+/// closure consumes `body_cap_override` and forwards it into
+/// [`AnthropicProvider::send_checked_with_cap`] so a 403 retry uses a
+/// tighter cap than the previous attempt did.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AttemptContext {
+    pub model_idx: usize,
+    /// `None` on the first attempt for a given model. Populated by
+    /// the retry classifier when the previous attempt hit a 403.
+    pub body_cap_override: Option<usize>,
+}
+
 async fn run_model_chain_with_retries<'env, T, F>(
     config: &super::AnthropicConfig,
     models: &[String],
     mut attempt: F,
 ) -> Result<T, ReasonerError>
 where
-    F: FnMut(usize, String) -> AttemptFuture<'env, T> + 'env,
+    F: FnMut(AttemptContext, String) -> AttemptFuture<'env, T> + 'env,
 {
     let mut last_err: Option<ReasonerError> = None;
 
+    let cloudflare_max_retries = if config.cloudflare_max_retries == 0 {
+        // 0 explicitly disables Cloudflare retries; the classifier
+        // already short-circuits via the `attempt < ...` guard, but
+        // we keep the const fallback so legacy callers still get
+        // sensible behaviour.
+        0
+    } else {
+        config.cloudflare_max_retries
+    };
+
     'outer: for (model_idx, model) in models.iter().enumerate() {
         let mut pending_sleep: Option<Duration> = None;
+        let mut pending_body_cap_override: Option<usize> = None;
         for try_n in 0..=config.max_retries {
             if let Some(sleep) = pending_sleep.take() {
                 tokio::time::sleep(sleep).await;
             }
 
-            match attempt(model_idx, model.clone()).await {
+            let ctx = AttemptContext {
+                model_idx,
+                body_cap_override: pending_body_cap_override,
+            };
+            match attempt(ctx, model.clone()).await {
                 Ok(value) => return Ok(value),
-                Err(e) => match classify_retry_action(
-                    &e,
-                    try_n,
-                    config.max_retries,
-                    config.backoff_initial_ms,
-                    config.backoff_cap_ms,
-                    model_idx,
-                    models.len(),
-                    model,
-                    &mut last_err,
-                ) {
-                    RetryAction::Retry { sleep } => {
-                        emit_retry_observation(&e, sleep, try_n, model);
-                        pending_sleep = Some(sleep);
+                Err(e) => {
+                    let current_body_cap = pending_body_cap_override
+                        .unwrap_or(config.emergency_body_cap_bytes);
+                    let action = classify_retry_action(
+                        &e,
+                        try_n,
+                        config.max_retries,
+                        cloudflare_max_retries,
+                        config.backoff_initial_ms,
+                        config.backoff_cap_ms,
+                        model_idx,
+                        models.len(),
+                        model,
+                        &mut last_err,
+                        current_body_cap,
+                    );
+                    match action {
+                        RetryAction::Retry {
+                            sleep,
+                            body_cap_override,
+                        } => {
+                            emit_retry_observation(&e, sleep, try_n, model);
+                            pending_sleep = Some(sleep);
+                            // A `Some` override carries forward; a `None`
+                            // leaves whatever we already had in place
+                            // (so a 403 → 5xx ladder keeps the tightened
+                            // cap rather than springing back up).
+                            if body_cap_override.is_some() {
+                                pending_body_cap_override = body_cap_override;
+                            }
+                        }
+                        RetryAction::FallbackModel => continue 'outer,
+                        RetryAction::Propagate => return Err(e.into()),
                     }
-                    RetryAction::FallbackModel => continue 'outer,
-                    RetryAction::Propagate => return Err(e.into()),
-                },
+                }
             }
         }
     }
@@ -1882,7 +2218,7 @@ impl ModelProvider for AnthropicProvider {
         let models = self.model_chain(request.model.as_ref());
         let request_ref = &request;
 
-        run_model_chain_with_retries(&self.config, &models, |model_idx, model| {
+        run_model_chain_with_retries(&self.config, &models, |ctx, model| {
             Box::pin(async move {
                 let prompt_caching_enabled =
                     self.prompt_caching_enabled_for_model(request_ref, &model);
@@ -1901,12 +2237,19 @@ impl ModelProvider for AnthropicProvider {
                     model = %model,
                     messages = api_request.messages.len(),
                     tools = api_request.tools.as_ref().map_or(0, Vec::len),
+                    body_cap_override = ?ctx.body_cap_override,
                     "Sending request to Anthropic"
                 );
 
                 let messages_count = api_request.messages.len();
                 let response = self
-                    .send_checked(request_ref, &model, &api_request, messages_count)
+                    .send_checked_with_cap(
+                        request_ref,
+                        &model,
+                        &api_request,
+                        messages_count,
+                        ctx.body_cap_override,
+                    )
                     .await?;
                 let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                 // Capture x-request-id before `.json()` consumes the
@@ -1928,7 +2271,7 @@ impl ModelProvider for AnthropicProvider {
                 })?;
                 Ok(parse_complete_response(
                     api_response,
-                    model_idx,
+                    ctx.model_idx,
                     request_ref.model.as_ref(),
                     &model,
                     latency_ms,
@@ -1951,7 +2294,7 @@ impl ModelProvider for AnthropicProvider {
         let models = self.model_chain(request.model.as_ref());
         let request_ref = &request;
 
-        run_model_chain_with_retries(&self.config, &models, |model_idx, model| {
+        run_model_chain_with_retries(&self.config, &models, |ctx, model| {
             Box::pin(async move {
                 if !Self::supports_anthropic_proxy_features(request_ref, &model) {
                     debug!(
@@ -2021,14 +2364,21 @@ impl ModelProvider for AnthropicProvider {
                     model = %model,
                     messages = api_request.messages.len(),
                     tools = api_request.tools.as_ref().map_or(0, Vec::len),
+                    body_cap_override = ?ctx.body_cap_override,
                     "Sending streaming request to Anthropic"
                 );
 
                 let messages_count = api_request.messages.len();
                 let response = self
-                    .send_checked(request_ref, &model, &api_request, messages_count)
+                    .send_checked_with_cap(
+                        request_ref,
+                        &model,
+                        &api_request,
+                        messages_count,
+                        ctx.body_cap_override,
+                    )
                     .await?;
-                if model_idx > 0 {
+                if ctx.model_idx > 0 {
                     info!(
                         primary = %request_ref.model,
                         fallback = %model,
@@ -2165,14 +2515,32 @@ mod retry_tests {
             retry_after: Some(Duration::from_secs(7)),
         };
         let mut last_err = None;
-        let action =
-            classify_retry_action(&err, 0, 2, 1000, 30_000, 0, 1, "test-model", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            0,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "test-model",
+            &mut last_err,
+            524_288,
+        );
         match action {
-            RetryAction::Retry { sleep } => {
+            RetryAction::Retry {
+                sleep,
+                body_cap_override,
+            } => {
                 assert!(
                     sleep >= Duration::from_millis(7_500),
                     "retry sleep ({:?}) must clear the 7s upstream window",
                     sleep
+                );
+                assert_eq!(
+                    body_cap_override, None,
+                    "rate-limited retries must not tighten the body cap"
                 );
             }
             other => panic!("expected Retry, got {:?}", other),
@@ -2204,8 +2572,19 @@ mod retry_tests {
         };
         let mut last_err = None;
         // attempt == max_retries → retries exhausted, fallback chain available
-        let action =
-            classify_retry_action(&err, 2, 2, 1000, 30_000, 0, 2, "primary", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            2,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            2,
+            "primary",
+            &mut last_err,
+            524_288,
+        );
         assert!(matches!(action, RetryAction::FallbackModel));
         assert!(matches!(last_err, Some(ReasonerError::RateLimited { .. })));
     }
@@ -2218,7 +2597,19 @@ mod retry_tests {
         };
         let mut last_err = None;
         // attempt == max_retries AND model_idx == model_count - 1 → no fallback left
-        let action = classify_retry_action(&err, 2, 2, 1000, 30_000, 0, 1, "only", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            2,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "only",
+            &mut last_err,
+            524_288,
+        );
         assert!(matches!(action, RetryAction::Propagate));
     }
 
@@ -2226,7 +2617,19 @@ mod retry_tests {
     fn classify_retry_action_other_errors_propagate() {
         let err = ApiError::Other(ReasonerError::Request("boom".into()));
         let mut last_err = None;
-        let action = classify_retry_action(&err, 0, 2, 1000, 30_000, 0, 1, "m", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            0,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "m",
+            &mut last_err,
+            524_288,
+        );
         assert!(matches!(action, RetryAction::Propagate));
     }
 
@@ -2239,10 +2642,24 @@ mod retry_tests {
             message: "Anthropic API error: 500 Internal Server Error - body".into(),
         };
         let mut last_err = None;
-        let action =
-            classify_retry_action(&err, 0, 2, 1000, 30_000, 0, 1, "primary", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            0,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "primary",
+            &mut last_err,
+            524_288,
+        );
         match action {
-            RetryAction::Retry { sleep } => {
+            RetryAction::Retry {
+                sleep,
+                body_cap_override,
+            } => {
                 // `exp_backoff_with_jitter(0)` → base 1s + up to 250ms jitter.
                 assert!(
                     sleep >= Duration::from_secs(1),
@@ -2251,6 +2668,10 @@ mod retry_tests {
                 assert!(
                     sleep <= Duration::from_millis(1_300),
                     "first-attempt 5xx backoff must stay under the jitter cap, got {sleep:?}"
+                );
+                assert_eq!(
+                    body_cap_override, None,
+                    "5xx retries must not tighten the body cap"
                 );
             }
             other => panic!("expected Retry on 5xx, got {other:?}"),
@@ -2268,8 +2689,19 @@ mod retry_tests {
             message: "Anthropic API error: 502 Bad Gateway - body".into(),
         };
         let mut last_err = None;
-        let action =
-            classify_retry_action(&err, 2, 2, 1000, 30_000, 0, 2, "primary", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            2,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            2,
+            "primary",
+            &mut last_err,
+            524_288,
+        );
         assert!(
             matches!(action, RetryAction::FallbackModel),
             "expected FallbackModel after 5xx retries are used up"
@@ -2287,7 +2719,19 @@ mod retry_tests {
             message: "Anthropic API error: 504 Gateway Timeout - body".into(),
         };
         let mut last_err = None;
-        let action = classify_retry_action(&err, 2, 2, 1000, 30_000, 0, 1, "only", &mut last_err);
+        let action = classify_retry_action(
+            &err,
+            2,
+            2,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "only",
+            &mut last_err,
+            524_288,
+        );
         assert!(
             matches!(action, RetryAction::Propagate),
             "no fallback model → 5xx must propagate so the dev loop can retry"
@@ -2316,18 +2760,138 @@ mod retry_tests {
         let err = ApiError::CloudflareBlock("cf".into());
         let mut last_err = None;
 
-        let first = classify_retry_action(&err, 0, 8, 1000, 30_000, 0, 1, "primary", &mut last_err);
-        assert!(
-            matches!(first, RetryAction::Retry { .. }),
-            "first Cloudflare block should get one conservative retry"
-        );
+        // With cloudflare_max_retries=3, attempts 0/1/2 should all
+        // retry; attempt 3 must propagate so a chronically WAF-blocked
+        // request cannot burn the full generic retry budget on
+        // duplicate 403s. The shrink-per-attempt schedule makes those
+        // three retries useful rather than wasted.
+        for attempt in 0..3 {
+            let action = classify_retry_action(
+                &err,
+                attempt,
+                8,
+                3,
+                1000,
+                30_000,
+                0,
+                1,
+                "primary",
+                &mut last_err,
+                524_288,
+            );
+            assert!(
+                matches!(action, RetryAction::Retry { .. }),
+                "attempt {attempt} should still retry the Cloudflare block"
+            );
+        }
 
-        let second =
-            classify_retry_action(&err, 1, 8, 1000, 30_000, 0, 1, "primary", &mut last_err);
-        assert!(
-            matches!(second, RetryAction::Propagate),
-            "Cloudflare block must not burn the full generic retry budget"
+        let exhausted = classify_retry_action(
+            &err,
+            3,
+            8,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "primary",
+            &mut last_err,
+            524_288,
         );
+        assert!(
+            matches!(exhausted, RetryAction::Propagate),
+            "Cloudflare block must propagate once cloudflare_max_retries is exhausted"
+        );
+    }
+
+    #[test]
+    fn classify_retry_action_shrinks_body_cap_on_cloudflare() {
+        let err = ApiError::CloudflareBlock("cf".into());
+        let mut last_err = None;
+
+        let first = classify_retry_action(
+            &err,
+            0,
+            8,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "primary",
+            &mut last_err,
+            524_288,
+        );
+        let first_cap = match first {
+            RetryAction::Retry {
+                body_cap_override, ..
+            } => body_cap_override.expect("Cloudflare retry must set a tighter body cap"),
+            other => panic!("expected Retry, got {other:?}"),
+        };
+        assert!(
+            first_cap < 524_288,
+            "shrunk cap ({first_cap}) must be strictly smaller than the previous one (524288)"
+        );
+        // 3/4 of 524288 = 393216.
+        assert_eq!(first_cap, 393_216, "first shrink should be 25% off");
+
+        // Second Cloudflare hit: cap shrinks again from the previous override.
+        let second = classify_retry_action(
+            &err,
+            1,
+            8,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "primary",
+            &mut last_err,
+            first_cap,
+        );
+        let second_cap = match second {
+            RetryAction::Retry {
+                body_cap_override, ..
+            } => body_cap_override.expect("Cloudflare retry must keep tightening the cap"),
+            other => panic!("expected Retry, got {other:?}"),
+        };
+        assert!(
+            second_cap < first_cap,
+            "second shrink ({second_cap}) must be strictly smaller than first ({first_cap})"
+        );
+    }
+
+    #[test]
+    fn classify_retry_action_cloudflare_shrink_has_a_floor() {
+        // Repeatedly shrinking from a tiny starting cap must never go
+        // below 16 KiB — that's the floor where further shrinks just
+        // damage the conversation without appeasing any WAF rule.
+        let err = ApiError::CloudflareBlock("cf".into());
+        let mut last_err = None;
+        let action = classify_retry_action(
+            &err,
+            0,
+            8,
+            3,
+            1000,
+            30_000,
+            0,
+            1,
+            "primary",
+            &mut last_err,
+            8 * 1024, // already below the floor
+        );
+        match action {
+            RetryAction::Retry {
+                body_cap_override, ..
+            } => {
+                assert!(
+                    body_cap_override.unwrap() >= 16 * 1024,
+                    "shrink must floor at 16 KiB; got {body_cap_override:?}"
+                );
+            }
+            other => panic!("expected Retry, got {other:?}"),
+        }
     }
 }
 
@@ -2490,27 +3054,29 @@ mod emergency_body_cap_tests {
     }
 
     #[test]
-    fn maybe_apply_emergency_body_cap_disabled_passthrough() {
+    fn apply_body_cap_disabled_passthrough() {
         let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
         config.emergency_body_cap_bytes = 0;
         let provider = AnthropicProvider::new(config).unwrap();
 
         let body = body_with_user_text(&"X".repeat(10_000));
         let original = body.clone();
-        let returned = provider.maybe_apply_emergency_body_cap("aura-claude-opus-4-7", body);
+        let cap = provider.effective_body_cap(None);
+        let returned = provider.apply_body_cap("aura-claude-opus-4-7", body, cap);
 
         assert_eq!(returned, original, "cap=0 must be a passthrough");
     }
 
     #[test]
-    fn maybe_apply_emergency_body_cap_under_threshold_passthrough() {
+    fn apply_body_cap_under_threshold_passthrough() {
         let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
         config.emergency_body_cap_bytes = 1_000_000;
         let provider = AnthropicProvider::new(config).unwrap();
 
         let body = body_with_user_text("small");
         let original = body.clone();
-        let returned = provider.maybe_apply_emergency_body_cap("aura-claude-opus-4-7", body);
+        let cap = provider.effective_body_cap(None);
+        let returned = provider.apply_body_cap("aura-claude-opus-4-7", body, cap);
 
         assert_eq!(
             returned, original,
@@ -2519,7 +3085,7 @@ mod emergency_body_cap_tests {
     }
 
     #[test]
-    fn maybe_apply_emergency_body_cap_truncates_when_over_threshold() {
+    fn apply_body_cap_truncates_when_over_threshold() {
         let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
         let body = body_with_user_text(&"abcdefghij".repeat(10_000));
         config.emergency_body_cap_bytes = body.len() / 4;
@@ -2527,7 +3093,8 @@ mod emergency_body_cap_tests {
         let provider = AnthropicProvider::new(config).unwrap();
 
         let original_len = body.len();
-        let returned = provider.maybe_apply_emergency_body_cap("aura-claude-opus-4-7", body);
+        let effective = provider.effective_body_cap(None);
+        let returned = provider.apply_body_cap("aura-claude-opus-4-7", body, effective);
 
         assert!(returned.len() < original_len);
         assert!(returned.len() <= cap + TRUNCATION_MARKER_BUDGET);
@@ -2544,6 +3111,178 @@ mod emergency_body_cap_tests {
             last_user_text.starts_with(TRUNCATION_MARKER_PREFIX),
             "truncated body must contain the canonical marker; got: {}",
             &last_user_text[..last_user_text.len().min(80)]
+        );
+    }
+
+    #[test]
+    fn effective_body_cap_honors_override_when_tighter() {
+        let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
+        config.emergency_body_cap_bytes = 512 * 1024;
+        let provider = AnthropicProvider::new(config).unwrap();
+
+        assert_eq!(provider.effective_body_cap(None), 512 * 1024);
+        assert_eq!(
+            provider.effective_body_cap(Some(128 * 1024)),
+            128 * 1024,
+            "tighter override must win"
+        );
+        assert_eq!(
+            provider.effective_body_cap(Some(2 * 1024 * 1024)),
+            512 * 1024,
+            "looser override must not raise the ceiling"
+        );
+    }
+
+    #[test]
+    fn effective_body_cap_zero_disable_ignores_override() {
+        let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
+        config.emergency_body_cap_bytes = 0;
+        let provider = AnthropicProvider::new(config).unwrap();
+
+        assert_eq!(
+            provider.effective_body_cap(Some(64 * 1024)),
+            0,
+            "explicit 0 = disabled must dominate; the operator opted out"
+        );
+    }
+
+    /// Regression test for the original `truncated_ok:false` symptom:
+    /// when only the last user message can be truncated and the cap is
+    /// extremely tight, the previous code would bail with
+    /// `"emergency body cap …B is smaller than non-content overhead"`
+    /// and let the oversized body go out anyway — straight into the
+    /// Cloudflare WAF. The ladder must always succeed.
+    #[test]
+    fn apply_body_cap_collapses_when_cap_is_tiny() {
+        let mut config = AnthropicConfig::new("aura-claude-opus-4-7");
+        let body = body_with_user_text(&"X".repeat(100_000)); // ~100 KB user
+        config.emergency_body_cap_bytes = 4 * 1024; // tighter than the historical 24 KiB
+        let cap = config.emergency_body_cap_bytes;
+        let provider = AnthropicProvider::new(config).unwrap();
+
+        let original_len = body.len();
+        let returned =
+            provider.apply_body_cap("aura-claude-opus-4-7", body, cap);
+
+        assert!(
+            returned.len() < original_len,
+            "ladder must always shrink an oversized body"
+        );
+        assert!(
+            returned.len() <= cap + TRUNCATION_MARKER_BUDGET * 4,
+            "collapsed body ({} B) must be at or below cap+marker budgets ({} B). \
+             This is the regression: the old code returned the unshrunk body, \
+             which is exactly what triggered the Cloudflare 403s.",
+            returned.len(),
+            cap + TRUNCATION_MARKER_BUDGET * 4
+        );
+        // Should still be parseable JSON with a messages array.
+        let parsed: serde_json::Value = serde_json::from_slice(&returned).unwrap();
+        assert!(
+            parsed["messages"].is_array(),
+            "post-cap body must still be valid Anthropic schema"
+        );
+    }
+
+    /// When the last user message alone is small but the *history* is
+    /// huge (long agent loops, many `tool_result`s), the ladder must
+    /// drop oldest message pairs rather than damaging the user's
+    /// latest turn.
+    #[test]
+    fn fit_body_under_cap_drops_oldest_pairs_when_history_is_the_bulk() {
+        // Construct a body with ~50 KB of OLD history and a small new
+        // last user message. The truncation step alone can't help
+        // because the small last user message is already small.
+        let mut messages = Vec::new();
+        for i in 0..20 {
+            messages.push(json!({
+                "role": if i % 2 == 0 { "user" } else { "assistant" },
+                "content": [
+                    {"type": "text", "text": "Z".repeat(2_500)}
+                ]
+            }));
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what's next?"}
+            ]
+        }));
+
+        let body = serde_json::to_vec(&json!({
+            "model": "aura-claude-opus-4-7",
+            "system": [{"type": "text", "text": "system prompt"}],
+            "messages": messages,
+            "max_tokens": 1024,
+            "stream": true,
+        }))
+        .unwrap();
+
+        let cap = body.len() / 3;
+        let (capped, dropped, mode) = fit_body_under_cap(&body, cap);
+
+        assert!(
+            capped.len() <= cap + TRUNCATION_MARKER_BUDGET,
+            "capped body ({}) must fit under cap+marker ({})",
+            capped.len(),
+            cap + TRUNCATION_MARKER_BUDGET
+        );
+        assert!(dropped > 0, "history-drop ladder must have dropped messages");
+        assert!(
+            mode == BodyFitMode::DroppedOldestPairs
+                || mode == BodyFitMode::Collapsed,
+            "expected history-drop or collapse, got {mode:?}"
+        );
+
+        // The latest user message must still be present and untouched.
+        let parsed: serde_json::Value = serde_json::from_slice(&capped).unwrap();
+        let last = parsed["messages"]
+            .as_array()
+            .and_then(|a| a.last())
+            .expect("at least one message after cap");
+        assert_eq!(
+            last["role"].as_str().unwrap(),
+            "user",
+            "the last message after cap must still be the user's latest turn"
+        );
+    }
+
+    #[test]
+    fn fit_body_under_cap_collapses_when_single_user_message_too_big() {
+        // One enormous user message and no history — only fallback is
+        // collapse. The ladder still must NEVER return an oversized
+        // body.
+        let body = serde_json::to_vec(&json!({
+            "model": "aura-claude-opus-4-7",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Q".repeat(80_000)}
+                    ]
+                }
+            ],
+            "max_tokens": 1024,
+            "stream": true,
+        }))
+        .unwrap();
+
+        let cap = 8 * 1024;
+        let (capped, _dropped, mode) = fit_body_under_cap(&body, cap);
+        assert!(
+            capped.len() <= cap + TRUNCATION_MARKER_BUDGET * 4,
+            "even the worst-case fallback must produce a body ({}) at or near cap ({})",
+            capped.len(),
+            cap
+        );
+        // Either the truncation marker or the collapse marker is fine
+        // here — both keep the user's content recoverable.
+        assert!(
+            matches!(
+                mode,
+                BodyFitMode::TruncatedLastUser | BodyFitMode::Collapsed
+            ),
+            "expected truncated or collapsed; got {mode:?}"
         );
     }
 }

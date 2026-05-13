@@ -329,6 +329,7 @@ async fn test_cloudflare_html_maps_to_typed_diagnostic_with_profile() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -498,6 +499,7 @@ async fn test_proxy_mode_sends_caching_beta_header() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -555,6 +557,7 @@ async fn test_proxy_mode_forwards_aura_routing_headers() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -605,6 +608,7 @@ async fn test_complete_timeout() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -658,6 +662,7 @@ async fn test_proxy_openai_models_fall_back_to_buffered_streaming() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -741,6 +746,7 @@ async fn test_cross_family_proxy_fallback_buffers_streaming_and_omits_anthropic_
         fallback_model: Some("aura-gpt-5-4".to_string()),
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -816,6 +822,7 @@ async fn test_proxy_openai_models_omit_prompt_caching_headers_and_fields() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -873,6 +880,7 @@ async fn test_proxy_deepseek_family_uses_provider_hint_and_usage_aliases() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -941,6 +949,7 @@ async fn test_proxy_hint_prefers_anthropic_family_over_model_heuristics() {
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -999,6 +1008,7 @@ async fn test_proxy_hint_prefers_non_anthropic_family_over_model_heuristics_for_
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();
@@ -1073,6 +1083,7 @@ async fn test_proxy_non_anthropic_family_omits_thinking_and_output_config_for_co
         fallback_model: None,
         prompt_caching_enabled: true,
         emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
     };
 
     let provider = AnthropicProvider::new(config).unwrap();

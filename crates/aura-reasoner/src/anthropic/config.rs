@@ -37,18 +37,38 @@ pub struct AnthropicConfig {
     pub fallback_model: Option<String>,
     /// Whether Anthropic prompt-caching directives should be attached.
     pub prompt_caching_enabled: bool,
-    /// Phase-0 diagnostic: temporary emergency cap on the serialized
-    /// `/v1/messages` request body, in bytes. When `> 0` and the body
-    /// exceeds the cap, the largest text block in the last user
-    /// message is truncated in-place (with a `<<<AURA_HARNESS_…>>>`
-    /// marker) so the request fits before it is forwarded to the
-    /// router. `0` disables the cap entirely (default).
+    /// Hard cap on the serialized `/v1/messages` request body, in
+    /// bytes. When `> 0` and the body exceeds the cap, the request
+    /// is shrunk in-place — first by truncating the largest text /
+    /// `tool_result` payload in the last user message, then by
+    /// dropping oldest non-system message pairs, then (last resort)
+    /// by collapsing the conversation down to the latest user turn —
+    /// so the body fits before it is forwarded to the router. `0`
+    /// disables the cap entirely.
     ///
-    /// Lives behind `AURA_LLM_EMERGENCY_BODY_CAP_BYTES` so operators
-    /// can flip the hypothesis test ("does Cloudflare stop blocking
-    /// once the body fits in N bytes?") without rebuilding. Removed /
-    /// replaced when the proper canonical-rejection validator lands.
+    /// **Default**: `524288` (512 KiB). This is a generous proactive
+    /// budget that sits well below Cloudflare's effective wire limit
+    /// for the managed router edge. Pre-emptive trimming here keeps
+    /// the harness from triggering body-size WAF rules in the first
+    /// place; the `403`-retry path then tightens the cap by 25% on
+    /// each successive attempt, so a Cloudflare block deterministically
+    /// converges on a body the edge will accept rather than burning
+    /// the retry budget on the same oversized payload.
+    ///
+    /// Overridable via `AURA_LLM_EMERGENCY_BODY_CAP_BYTES`. Set to
+    /// `0` to disable proactive trimming entirely (legacy behaviour).
     pub emergency_body_cap_bytes: usize,
+
+    /// Maximum number of times a Cloudflare 403 may be retried with
+    /// a progressively tighter body cap before the error is surfaced
+    /// to the caller. Each retry shrinks the effective cap by 25%
+    /// (multiplicatively) so a fixed-pattern WAF rule eventually
+    /// drops below whatever threshold the edge is enforcing.
+    ///
+    /// Default `3`. Overridable via `AURA_LLM_CLOUDFLARE_MAX_RETRIES`.
+    /// `0` disables 403 retries entirely (the first 403 surfaces as
+    /// a terminal error).
+    pub cloudflare_max_retries: u32,
 }
 
 impl AnthropicConfig {
@@ -64,7 +84,8 @@ impl AnthropicConfig {
     /// - `AURA_LLM_MIN_REQUEST_INTERVAL_MS` (default `0` = disabled)
     /// - `AURA_DEFAULT_FALLBACK_MODEL` (optional)
     /// - `AURA_DISABLE_PROMPT_CACHING` (`1`/`true`/`yes` disables caching)
-    /// - `AURA_LLM_EMERGENCY_BODY_CAP_BYTES` (default `0` = disabled)
+    /// - `AURA_LLM_EMERGENCY_BODY_CAP_BYTES` (default `524288` = 512 KiB; `0` disables)
+    /// - `AURA_LLM_CLOUDFLARE_MAX_RETRIES` (default `3`)
     ///
     /// Never errors — every field has a default.
     #[must_use]
@@ -110,14 +131,22 @@ impl AnthropicConfig {
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
 
-        // Phase-0 diagnostic. Reject negative / non-numeric values
-        // silently (fall back to disabled) so a typo in the env never
-        // wedges the harness — the operator sees the disabled state
-        // through the `body_bytes` info log that is emitted anyway.
+        // 512 KiB proactive default — generous enough to leave room
+        // for prompt-caching headers + a full transcript on long
+        // turns, tight enough to stay clear of the managed router's
+        // body-size WAF rules. Reject negative / non-numeric values
+        // silently (fall back to the default) so a typo in the env
+        // never wedges the harness. `0` is a valid explicit "disable"
+        // sentinel and is preserved as-is.
         let emergency_body_cap_bytes: usize = std::env::var("AURA_LLM_EMERGENCY_BODY_CAP_BYTES")
             .ok()
             .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(524_288);
+
+        let cloudflare_max_retries: u32 = std::env::var("AURA_LLM_CLOUDFLARE_MAX_RETRIES")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(3);
 
         Self {
             default_model,
@@ -130,6 +159,7 @@ impl AnthropicConfig {
             fallback_model,
             prompt_caching_enabled,
             emergency_body_cap_bytes,
+            cloudflare_max_retries,
         }
     }
 
@@ -147,7 +177,8 @@ impl AnthropicConfig {
             base_url: "https://aura-router.onrender.com".to_string(),
             fallback_model: None,
             prompt_caching_enabled: true,
-            emergency_body_cap_bytes: 0,
+            emergency_body_cap_bytes: 524_288,
+            cloudflare_max_retries: 3,
         }
     }
 }
@@ -233,29 +264,59 @@ mod env_backoff_tests {
     }
 
     #[test]
-    fn emergency_body_cap_defaults_to_zero() {
+    fn emergency_body_cap_defaults_to_512kib() {
         let cfg = with_env(|| {
             let _g = EnvGuard::unset("AURA_LLM_EMERGENCY_BODY_CAP_BYTES");
-            AnthropicConfig::from_env()
-        });
-        assert_eq!(cfg.emergency_body_cap_bytes, 0);
-    }
-
-    #[test]
-    fn emergency_body_cap_reads_env_value() {
-        let cfg = with_env(|| {
-            let _g = EnvGuard::set("AURA_LLM_EMERGENCY_BODY_CAP_BYTES", "524288");
             AnthropicConfig::from_env()
         });
         assert_eq!(cfg.emergency_body_cap_bytes, 524_288);
     }
 
     #[test]
-    fn emergency_body_cap_garbage_value_falls_back_to_disabled() {
+    fn emergency_body_cap_reads_env_value() {
+        let cfg = with_env(|| {
+            let _g = EnvGuard::set("AURA_LLM_EMERGENCY_BODY_CAP_BYTES", "1048576");
+            AnthropicConfig::from_env()
+        });
+        assert_eq!(cfg.emergency_body_cap_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn emergency_body_cap_zero_explicitly_disables() {
+        let cfg = with_env(|| {
+            let _g = EnvGuard::set("AURA_LLM_EMERGENCY_BODY_CAP_BYTES", "0");
+            AnthropicConfig::from_env()
+        });
+        assert_eq!(
+            cfg.emergency_body_cap_bytes, 0,
+            "explicit `0` must be honoured as a disable sentinel"
+        );
+    }
+
+    #[test]
+    fn emergency_body_cap_garbage_value_falls_back_to_default() {
         let cfg = with_env(|| {
             let _g = EnvGuard::set("AURA_LLM_EMERGENCY_BODY_CAP_BYTES", "not-a-number");
             AnthropicConfig::from_env()
         });
-        assert_eq!(cfg.emergency_body_cap_bytes, 0);
+        assert_eq!(cfg.emergency_body_cap_bytes, 524_288);
+    }
+
+    #[test]
+    fn cloudflare_max_retries_defaults_to_three() {
+        let cfg = with_env(|| {
+            let _g = EnvGuard::unset("AURA_LLM_CLOUDFLARE_MAX_RETRIES");
+            AnthropicConfig::from_env()
+        });
+        assert_eq!(cfg.cloudflare_max_retries, 3);
+    }
+
+    #[test]
+    fn cloudflare_max_retries_reads_env_value() {
+        let cfg = with_env(|| {
+            let _g = EnvGuard::set("AURA_LLM_CLOUDFLARE_MAX_RETRIES", "5");
+            AnthropicConfig::from_env()
+        });
+        assert_eq!(cfg.cloudflare_max_retries, 5);
     }
 }
