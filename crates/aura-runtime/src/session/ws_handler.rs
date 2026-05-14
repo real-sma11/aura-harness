@@ -148,8 +148,14 @@ async fn run_active_turn_select(
                 }
                 join_result = &mut agent.join_handle => {
                     let message_id = agent.message_id.clone();
-                    agent.stream_forward_handle.abort();
-                    helpers::finalize_turn(session, join_result, &message_id, outbound_tx);
+                    if let Err(e) = (&mut agent.stream_forward_handle).await {
+                        error!(
+                            session_id = %session.session_id,
+                            error = %e,
+                            "Stream forward task failed"
+                        );
+                    }
+                    helpers::finalize_turn(session, join_result, &message_id, outbound_tx).await;
                     TurnAction::TurnFinished
                 }
             }

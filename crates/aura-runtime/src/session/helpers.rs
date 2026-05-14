@@ -23,7 +23,10 @@ use aura_core::{
 use aura_kernel::{Kernel, KernelConfig, PolicyConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tokio::time::{timeout, Duration};
+use tracing::{error, info, warn};
+
+const OUTBOUND_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn summarize_files_changed(loop_result: &AgentLoopResult) -> FilesChanged {
     let mut files_changed = FilesChanged::default();
@@ -411,22 +414,42 @@ pub(super) async fn build_kernel_with_config(
 /// [`AgentLoopEvent`] variant is still a compile error until every
 /// consumer has handled it.
 ///
-/// The WS sink's send path is a best-effort `try_send`: when the
-/// outbound mpsc is full or closed we flip `closed` so the driver
-/// loop can drop out. This matches the pre-consolidation behaviour of
-/// `break`-ing on the first failed send.
+/// The WS sink awaits bounded mpsc capacity so transient saturation
+/// applies backpressure instead of dropping later terminal frames.
 struct OutboundMessageSink<'a> {
     outbound: &'a mpsc::Sender<OutboundMessage>,
     closed: bool,
 }
 
 impl OutboundMessageSink<'_> {
-    fn push(&mut self, msg: OutboundMessage) {
+    async fn push(&mut self, msg: OutboundMessage) {
         if self.closed {
             return;
         }
-        if self.outbound.try_send(msg).is_err() {
+        if !send_outbound_with_backpressure(self.outbound, msg, "turn_event").await {
             self.closed = true;
+        }
+    }
+}
+
+async fn send_outbound_with_backpressure(
+    outbound: &mpsc::Sender<OutboundMessage>,
+    msg: OutboundMessage,
+    context: &'static str,
+) -> bool {
+    match timeout(OUTBOUND_DELIVERY_TIMEOUT, outbound.send(msg)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => {
+            warn!(context, "Outbound channel closed while delivering message");
+            false
+        }
+        Err(_) => {
+            warn!(
+                context,
+                timeout_ms = OUTBOUND_DELIVERY_TIMEOUT.as_millis() as u64,
+                "Timed out delivering outbound message"
+            );
+            false
         }
     }
 }
@@ -434,15 +457,18 @@ impl OutboundMessageSink<'_> {
 #[async_trait]
 impl TurnEventSink for OutboundMessageSink<'_> {
     async fn on_text_delta(&mut self, text: String) {
-        self.push(OutboundMessage::TextDelta(TextDelta { text }));
+        self.push(OutboundMessage::TextDelta(TextDelta { text }))
+            .await;
     }
 
     async fn on_thinking_delta(&mut self, thinking: String) {
-        self.push(OutboundMessage::ThinkingDelta(ThinkingDelta { thinking }));
+        self.push(OutboundMessage::ThinkingDelta(ThinkingDelta { thinking }))
+            .await;
     }
 
     async fn on_tool_start(&mut self, id: String, name: String) {
-        self.push(OutboundMessage::ToolUseStart(ToolUseStart { id, name }));
+        self.push(OutboundMessage::ToolUseStart(ToolUseStart { id, name }))
+            .await;
     }
 
     async fn on_tool_result(
@@ -457,7 +483,8 @@ impl TurnEventSink for OutboundMessageSink<'_> {
             result: content,
             is_error,
             tool_use_id: Some(tool_use_id),
-        }));
+        }))
+        .await;
     }
 
     async fn on_tool_input_snapshot(&mut self, id: String, name: String, input: String) {
@@ -487,7 +514,8 @@ impl TurnEventSink for OutboundMessageSink<'_> {
             id,
             name,
             input: parsed,
-        }));
+        }))
+        .await;
     }
 
     async fn on_error(&mut self, code: String, message: String, recoverable: bool) {
@@ -495,7 +523,8 @@ impl TurnEventSink for OutboundMessageSink<'_> {
             code,
             message,
             recoverable,
-        }));
+        }))
+        .await;
     }
 
     // The following variants are intentional no-ops on the WS wire —
@@ -522,7 +551,7 @@ pub(super) async fn forward_events_to_ws(
     }
 }
 
-pub(super) fn finalize_turn(
+pub(super) async fn finalize_turn(
     session: &mut Session,
     join_result: Result<anyhow::Result<AgentLoopResult>, tokio::task::JoinError>,
     message_id: &str,
@@ -532,42 +561,57 @@ pub(super) fn finalize_turn(
         Ok(inner) => inner,
         Err(e) => {
             error!(session_id = %session.session_id, error = %e, "Turn task panicked");
-            send_turn_error(outbound_tx, message_id);
+            send_turn_error(outbound_tx, message_id).await;
             return;
         }
     };
 
     match result {
         Ok(loop_result) => {
-            apply_turn_result(session, &loop_result, message_id, outbound_tx);
+            apply_turn_result(session, &loop_result, message_id, outbound_tx).await;
         }
         Err(e) => {
             error!(session_id = %session.session_id, error = %e, "Turn processing failed");
-            let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                code: "turn_error".into(),
-                message: format!("Turn processing failed: {e}"),
-                recoverable: true,
-            }));
+            send_outbound_with_backpressure(
+                outbound_tx,
+                OutboundMessage::Error(ErrorMsg {
+                    code: "turn_error".into(),
+                    message: format!("Turn processing failed: {e}"),
+                    recoverable: true,
+                }),
+                "turn_error",
+            )
+            .await;
         }
     }
 }
 
-fn send_turn_error(outbound_tx: &mpsc::Sender<OutboundMessage>, message_id: &str) {
-    let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-        code: "internal_error".into(),
-        message: "Turn processing task panicked".into(),
-        recoverable: false,
-    }));
-    let _ = outbound_tx.try_send(OutboundMessage::AssistantMessageEnd(AssistantMessageEnd {
-        message_id: message_id.to_string(),
-        stop_reason: "error".into(),
-        usage: SessionUsage::default(),
-        files_changed: FilesChanged::default(),
-        originating_user_id: None,
-    }));
+async fn send_turn_error(outbound_tx: &mpsc::Sender<OutboundMessage>, message_id: &str) {
+    send_outbound_with_backpressure(
+        outbound_tx,
+        OutboundMessage::Error(ErrorMsg {
+            code: "internal_error".into(),
+            message: "Turn processing task panicked".into(),
+            recoverable: false,
+        }),
+        "turn_panic_error",
+    )
+    .await;
+    send_outbound_with_backpressure(
+        outbound_tx,
+        OutboundMessage::AssistantMessageEnd(AssistantMessageEnd {
+            message_id: message_id.to_string(),
+            stop_reason: "error".into(),
+            usage: SessionUsage::default(),
+            files_changed: FilesChanged::default(),
+            originating_user_id: None,
+        }),
+        "turn_panic_end",
+    )
+    .await;
 }
 
-pub(super) fn apply_turn_result(
+pub(super) async fn apply_turn_result(
     session: &mut Session,
     loop_result: &AgentLoopResult,
     message_id: &str,
@@ -612,26 +656,32 @@ pub(super) fn apply_turn_result(
         0.0
     };
 
-    let _ = outbound_tx.try_send(OutboundMessage::AssistantMessageEnd(AssistantMessageEnd {
-        message_id: message_id.to_string(),
-        stop_reason: stop_reason.into(),
-        usage: SessionUsage {
-            input_tokens,
-            output_tokens,
-            estimated_context_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-            cumulative_input_tokens: session.cumulative_input_tokens,
-            cumulative_output_tokens: session.cumulative_output_tokens,
-            cumulative_cache_creation_input_tokens: session.cumulative_cache_creation_input_tokens,
-            cumulative_cache_read_input_tokens: session.cumulative_cache_read_input_tokens,
-            context_utilization,
-            model: session.model.clone(),
-            provider: session.provider_name.clone(),
-        },
-        files_changed,
-        originating_user_id: None,
-    }));
+    send_outbound_with_backpressure(
+        outbound_tx,
+        OutboundMessage::AssistantMessageEnd(AssistantMessageEnd {
+            message_id: message_id.to_string(),
+            stop_reason: stop_reason.into(),
+            usage: SessionUsage {
+                input_tokens,
+                output_tokens,
+                estimated_context_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                cumulative_input_tokens: session.cumulative_input_tokens,
+                cumulative_output_tokens: session.cumulative_output_tokens,
+                cumulative_cache_creation_input_tokens: session
+                    .cumulative_cache_creation_input_tokens,
+                cumulative_cache_read_input_tokens: session.cumulative_cache_read_input_tokens,
+                context_utilization,
+                model: session.model.clone(),
+                provider: session.provider_name.clone(),
+            },
+            files_changed,
+            originating_user_id: None,
+        }),
+        "assistant_message_end",
+    )
+    .await;
 
     info!(
         session_id = %session.session_id,
@@ -645,13 +695,13 @@ pub(super) fn apply_turn_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_session_init, resolve_session_workspace, session_scoped_tool_config,
-        summarize_files_changed,
+        apply_turn_result, finalize_turn, forward_events_to_ws, handle_session_init,
+        resolve_session_workspace, session_scoped_tool_config, summarize_files_changed,
     };
-    use crate::protocol::OutboundMessage;
+    use crate::protocol::{OutboundMessage, TextDelta};
     use crate::scheduler::Scheduler;
     use crate::session::{Session, WsContext};
-    use aura_agent::{AgentLoopResult, FileChange, FileChangeKind};
+    use aura_agent::{AgentLoopEvent, AgentLoopResult, FileChange, FileChangeKind};
     use aura_core::{AgentToolPermissions, ToolState, UserToolDefaults};
     use aura_protocol::{AgentPermissionsWire, SessionInit, SessionModelOverrides};
     use aura_reasoner::MockProvider;
@@ -660,6 +710,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+    use tokio::time::Duration;
 
     fn test_context() -> WsContext {
         let workspace = tempfile::tempdir().expect("temp workspace");
@@ -813,6 +864,105 @@ mod tests {
         let narrowing_override = AgentToolPermissions::new().with("run_command", ToolState::Ask);
         let config = session_scoped_tool_config(&base, &full_access, Some(&narrowing_override));
         assert!(!config.command.bypass_allowlists);
+    }
+
+    #[tokio::test]
+    async fn streamed_text_and_assistant_end_wait_for_outbound_capacity() {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        outbound_tx
+            .send(OutboundMessage::TextDelta(TextDelta {
+                text: "backlog".to_string(),
+            }))
+            .await
+            .expect("fill outbound channel");
+
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let forward_handle = tokio::spawn(forward_events_to_ws(event_rx, outbound_tx.clone()));
+        event_tx
+            .send(AgentLoopEvent::TextDelta("hello".to_string()))
+            .await
+            .expect("queue text event");
+        drop(event_tx);
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            !forward_handle.is_finished(),
+            "stream forwarding should wait while outbound is full"
+        );
+
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::TextDelta(delta)) if delta.text == "backlog"
+        ));
+        forward_handle.await.expect("stream forward task joins");
+
+        let mut session = Session::new(PathBuf::from("/tmp/aura"));
+        let loop_result = AgentLoopResult::default();
+        let apply_tx = outbound_tx.clone();
+        let apply_handle = tokio::spawn(async move {
+            apply_turn_result(&mut session, &loop_result, "msg-1", &apply_tx).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            !apply_handle.is_finished(),
+            "assistant end should wait behind the streamed text"
+        );
+
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::TextDelta(delta)) if delta.text == "hello"
+        ));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::AssistantMessageEnd(end)) if end.message_id == "msg-1"
+        ));
+        apply_handle.await.expect("apply task joins");
+    }
+
+    #[tokio::test]
+    async fn finalize_turn_error_waits_for_outbound_capacity() {
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        outbound_tx
+            .send(OutboundMessage::TextDelta(TextDelta {
+                text: "backlog".to_string(),
+            }))
+            .await
+            .expect("fill outbound channel");
+
+        let panic_handle = tokio::spawn(async {
+            panic!("turn panic");
+            #[allow(unreachable_code)]
+            anyhow::Ok(AgentLoopResult::default())
+        });
+        let join_result = panic_handle.await;
+
+        let mut session = Session::new(PathBuf::from("/tmp/aura"));
+        let finalize_tx = outbound_tx.clone();
+        let finalize_handle = tokio::spawn(async move {
+            finalize_turn(&mut session, join_result, "msg-2", &finalize_tx).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            !finalize_handle.is_finished(),
+            "turn error should wait while outbound is full"
+        );
+
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::TextDelta(delta)) if delta.text == "backlog"
+        ));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::Error(err)) if err.code == "internal_error"
+        ));
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(OutboundMessage::AssistantMessageEnd(end))
+                if end.message_id == "msg-2" && end.stop_reason == "error"
+        ));
+        finalize_handle.await.expect("finalize task joins");
     }
 
     #[test]
