@@ -147,7 +147,11 @@ impl ModelContentProfile {
             self.messages_text_bytes,
             self.last_user_text_bytes,
             self.tool_count,
-            if self.has_aura_session_id { "present" } else { "missing" }
+            if self.has_aura_session_id {
+                "present"
+            } else {
+                "missing"
+            }
         )
     }
 

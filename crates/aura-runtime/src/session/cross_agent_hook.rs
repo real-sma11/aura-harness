@@ -391,9 +391,7 @@ mod tests {
     /// server endpoint is documented at
     /// `apps/aura-os-server/src/handlers/agents/crud/list.rs`
     /// (`AgentListView`); if either side drifts, this test fails first.
-    async fn spawn_capturing_mock(
-        captured: Arc<Mutex<Option<HashMap<String, String>>>>,
-    ) -> String {
+    async fn spawn_capturing_mock(captured: Arc<Mutex<Option<HashMap<String, String>>>>) -> String {
         let captured_for_route = captured.clone();
         let app = axum::Router::new().route(
             "/api/agents",

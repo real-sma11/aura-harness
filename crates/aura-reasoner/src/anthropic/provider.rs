@@ -1316,7 +1316,10 @@ fn collapse_messages_to_marker(body_bytes: &[u8], cap_bytes: usize) -> Vec<u8> {
             .rev()
             .find(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
         {
-            if let Some(blocks) = last_user.get("content").and_then(serde_json::Value::as_array) {
+            if let Some(blocks) = last_user
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+            {
                 if let Some(text) = blocks.iter().find_map(|b| {
                     if b.get("type").and_then(serde_json::Value::as_str) == Some("text") {
                         b.get("text")
@@ -1352,7 +1355,10 @@ fn collapse_messages_to_marker(body_bytes: &[u8], cap_bytes: usize) -> Vec<u8> {
     }));
 
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("messages".to_string(), serde_json::Value::Array(new_messages));
+        obj.insert(
+            "messages".to_string(),
+            serde_json::Value::Array(new_messages),
+        );
     }
 
     serialize_request_body(&value).unwrap_or_else(|_| body_bytes.to_vec())
@@ -2106,8 +2112,8 @@ where
             match attempt(ctx, model.clone()).await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
-                    let current_body_cap = pending_body_cap_override
-                        .unwrap_or(config.emergency_body_cap_bytes);
+                    let current_body_cap =
+                        pending_body_cap_override.unwrap_or(config.emergency_body_cap_bytes);
                     let action = classify_retry_action(
                         &e,
                         try_n,
@@ -3161,8 +3167,7 @@ mod emergency_body_cap_tests {
         let provider = AnthropicProvider::new(config).unwrap();
 
         let original_len = body.len();
-        let returned =
-            provider.apply_body_cap("aura-claude-opus-4-7", body, cap);
+        let returned = provider.apply_body_cap("aura-claude-opus-4-7", body, cap);
 
         assert!(
             returned.len() < original_len,
@@ -3227,10 +3232,12 @@ mod emergency_body_cap_tests {
             capped.len(),
             cap + TRUNCATION_MARKER_BUDGET
         );
-        assert!(dropped > 0, "history-drop ladder must have dropped messages");
         assert!(
-            mode == BodyFitMode::DroppedOldestPairs
-                || mode == BodyFitMode::Collapsed,
+            dropped > 0,
+            "history-drop ladder must have dropped messages"
+        );
+        assert!(
+            mode == BodyFitMode::DroppedOldestPairs || mode == BodyFitMode::Collapsed,
             "expected history-drop or collapse, got {mode:?}"
         );
 

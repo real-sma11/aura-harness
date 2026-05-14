@@ -98,7 +98,10 @@ fn test_project_tool_task_extract_missing_stable_session_id_is_blocked() {
         violation.reason,
         ModelContractViolationReason::MissingStableSessionId
     );
-    assert_eq!(violation.profile.kind, ModelRequestKind::ProjectToolTaskExtract);
+    assert_eq!(
+        violation.profile.kind,
+        ModelRequestKind::ProjectToolTaskExtract
+    );
 }
 
 #[test]
@@ -151,7 +154,10 @@ fn test_project_tool_task_extract_still_blocks_unbounded_context() {
         violation.reason,
         ModelContractViolationReason::EmergencyCapRequired
     );
-    assert_eq!(violation.profile.kind, ModelRequestKind::ProjectToolTaskExtract);
+    assert_eq!(
+        violation.profile.kind,
+        ModelRequestKind::ProjectToolTaskExtract
+    );
 }
 
 #[test]

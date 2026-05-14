@@ -549,7 +549,9 @@ mod tests {
         // 2 inserts, 2 deletes (same-position lines that differ become
         // a paired insert+delete in similar's line model).
         let result = fs_write(&sandbox, "lib.rs", "new1\nnew2\nold3\n", false).unwrap();
-        let line_diff = result.line_diff.expect("overwrite should report a line diff");
+        let line_diff = result
+            .line_diff
+            .expect("overwrite should report a line diff");
         assert_eq!(line_diff.lines_added, 2);
         assert_eq!(line_diff.lines_removed, 2);
     }
