@@ -700,14 +700,44 @@ impl LoopState {
                 "create_spec" | "update_spec" | "list_specs" | "get_spec" | "delete_spec"
             )
         });
+        // Narrow the project-tool override to dev-loop turns only.
+        //
+        // The `ProjectToolTaskExtract` / `ProjectToolSpecGen` request kinds
+        // carry a `PROJECT_TOOL_TOTAL_TEXT_MAX_BYTES = 48 KiB` cap in
+        // `aura-reasoner::content_profile`. The cap exists so the
+        // task-extraction phase of the dev loop can't blow up the model
+        // request with arbitrary chat history. The previous wildcard
+        // arm — `(true, _, _, _) => ProjectToolTaskExtract` — clobbered
+        // any explicit `config.request_kind` (including `Chat`) whenever
+        // the task tools happened to be visible. That makes every chat
+        // turn for an agent with `create_task`/etc. in scope hard-fail
+        // with `EmergencyCapRequired` once history accumulates past
+        // ~48 KiB, even though normal chat conversations should be
+        // governed by the much-larger chat budget instead.
+        //
+        // Restrict the override to `DevLoopBootstrap`/`Continuation`
+        // request kinds, where the task-extraction context invariant
+        // actually applies. Plain `Chat` / `Auxiliary` requests now keep
+        // their declared `config.request_kind` even when they happen to
+        // have task / spec tools available.
         let request_kind = match (
             has_task_tools,
             has_spec_tools,
             config.request_kind,
             iteration,
         ) {
-            (true, _, _, _) => ModelRequestKind::ProjectToolTaskExtract,
-            (_, true, _, _) => ModelRequestKind::ProjectToolSpecGen,
+            (
+                true,
+                _,
+                ModelRequestKind::DevLoopBootstrap | ModelRequestKind::DevLoopContinuation,
+                _,
+            ) => ModelRequestKind::ProjectToolTaskExtract,
+            (
+                _,
+                true,
+                ModelRequestKind::DevLoopBootstrap | ModelRequestKind::DevLoopContinuation,
+                _,
+            ) => ModelRequestKind::ProjectToolSpecGen,
             (_, _, ModelRequestKind::DevLoopBootstrap, 0) => ModelRequestKind::DevLoopBootstrap,
             (_, _, ModelRequestKind::DevLoopBootstrap, _) => ModelRequestKind::DevLoopContinuation,
             (_, _, kind, _) => kind,
@@ -918,5 +948,82 @@ mod intent_classifier_tests {
 
         assert_eq!(names, vec!["read_file", "create_task"]);
         assert!(matches!(req.tool_choice, aura_reasoner::ToolChoice::Auto));
+    }
+
+    /// Regression: a `Chat` request with `create_task` in scope must
+    /// keep `request_kind = Chat`, NOT silently get re-classified as
+    /// `ProjectToolTaskExtract`. The latter carries a 48 KiB total-text
+    /// budget in `aura-reasoner::content_profile`, so the old
+    /// reclassification turned every chat for an agent-with-task-tools
+    /// into a hard `EmergencyCapRequired` failure once history grew
+    /// past ~48 KiB. The fix narrows the override to dev-loop turns.
+    #[test]
+    fn build_request_keeps_chat_kind_when_task_tools_visible() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::Chat,
+            ..AgentLoopConfig::default()
+        };
+        let state = LoopState::new(&config, vec![Message::user("hi there")]);
+        let tools = vec![mk_tool("create_task"), mk_tool("read_file")];
+
+        let req = state.build_request(&config, &tools, 0).unwrap();
+        assert_eq!(
+            req.metadata.kind,
+            Some(ModelRequestKind::Chat),
+            "Chat must stay Chat even when task tools are visible (otherwise EmergencyCapRequired blocks chat at 48 KiB)"
+        );
+    }
+
+    /// Companion: same invariant for spec tools — `create_spec` etc.
+    /// in scope must not flip a `Chat` turn into `ProjectToolSpecGen`.
+    #[test]
+    fn build_request_keeps_chat_kind_when_spec_tools_visible() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::Chat,
+            ..AgentLoopConfig::default()
+        };
+        let state = LoopState::new(&config, vec![Message::user("hi")]);
+        let tools = vec![mk_tool("create_spec"), mk_tool("read_file")];
+
+        let req = state.build_request(&config, &tools, 0).unwrap();
+        assert_eq!(req.metadata.kind, Some(ModelRequestKind::Chat));
+    }
+
+    /// The dev-loop flow IS still subject to the project-tool override:
+    /// when the caller declares `DevLoopBootstrap` AND task tools are
+    /// available, the iteration after iteration `0` must report
+    /// `ProjectToolTaskExtract` (the existing extraction-phase guard).
+    /// Pins the narrowing didn't accidentally break the dev loop.
+    #[test]
+    fn build_request_promotes_devloop_to_project_tool_task_extract_when_task_tools_visible() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::DevLoopBootstrap,
+            ..AgentLoopConfig::default()
+        };
+        let state = LoopState::new(&config, vec![Message::user("extract tasks")]);
+        let tools = vec![mk_tool("create_task")];
+
+        let req = state.build_request(&config, &tools, 1).unwrap();
+        assert_eq!(
+            req.metadata.kind,
+            Some(ModelRequestKind::ProjectToolTaskExtract)
+        );
+    }
+
+    /// Mirror for the spec branch.
+    #[test]
+    fn build_request_promotes_devloop_to_project_tool_spec_gen_when_spec_tools_visible() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::DevLoopBootstrap,
+            ..AgentLoopConfig::default()
+        };
+        let state = LoopState::new(&config, vec![Message::user("extract specs")]);
+        let tools = vec![mk_tool("create_spec")];
+
+        let req = state.build_request(&config, &tools, 1).unwrap();
+        assert_eq!(
+            req.metadata.kind,
+            Some(ModelRequestKind::ProjectToolSpecGen)
+        );
     }
 }

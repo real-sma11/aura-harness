@@ -25,6 +25,26 @@ pub struct ToolContext {
     /// known. Cross-agent tools read this to populate parent-chain metadata
     /// on the resulting transaction.
     pub caller_agent_id: Option<AgentId>,
+    /// Caller's **external** agent id — the upstream OS UUID that the
+    /// outer system (aura-os-server) uses to identify this agent on its
+    /// REST surface. Distinct from [`Self::caller_agent_id`], which is the
+    /// harness's internal `aura_core::AgentId` (a 32-byte blake3 hash whose
+    /// `Display` impl truncates to 16 hex chars and is irreversible to the
+    /// upstream UUID).
+    ///
+    /// Cross-agent tools (`send_to_agent`, `delegate_task`,
+    /// `agent_lifecycle`) ship this value to aura-os-server as
+    /// `originating_agent_id` / `parent_agent_id` so the server-side
+    /// async-reply callback (`spawn_cross_agent_reply_callback` in
+    /// `apps/aura-os-server/src/handlers/agents/chat/cross_agent_reply.rs`)
+    /// can POST the recipient's reply back into the originator's session at
+    /// `/api/agents/{originating_agent_id}/events/stream`. The route is
+    /// declared `Path<AgentId>` where `AgentId` is a `Uuid`, so passing the
+    /// truncated harness hash here is a silent 400 — the reply is lost.
+    /// Populated by the runtime from `SessionState::skill_agent_id`
+    /// (which carries `template_agent_id` when set, otherwise the raw
+    /// `agent_id` string the OS server passes in `SessionInit`).
+    pub caller_external_agent_id: Option<String>,
     /// Phase 5: caller's scope + capability grants. Cross-agent tools (e.g.
     /// `spawn_agent`) enforce strict-subset semantics against this bundle.
     pub caller_permissions: Option<AgentPermissions>,
@@ -122,6 +142,7 @@ impl ToolContext {
             sandbox,
             config,
             caller_agent_id: None,
+            caller_external_agent_id: None,
             caller_permissions: None,
             caller_tool_permissions: None,
             user_tool_defaults: UserToolDefaults::default(),

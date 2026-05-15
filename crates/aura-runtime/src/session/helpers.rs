@@ -381,6 +381,23 @@ pub(super) async fn build_kernel_with_config(
         .with_tool_permission_context(user_default, session.tool_permissions.clone())
         .with_originating_user_id(session.user_id.clone());
 
+    // Thread the upstream OS UUID for this session into the tool context
+    // so cross-agent tools can ship a server-resolvable caller id as
+    // `originating_agent_id` / `parent_agent_id` instead of the truncated
+    // harness blake3 hash. `skill_agent_id` is populated from
+    // `SessionInit.template_agent_id` (the `aura-os-server` `agents.agent_id`
+    // UUID) when present, with a fallback to the raw `agent_id` string —
+    // see `SessionState::apply_init` in `state.rs`. Without this wire-up
+    // the server-side `spawn_cross_agent_reply_callback` POSTs to
+    // `/api/agents/{16_char_hex}/events/stream`, which the
+    // `Path<AgentId = Uuid>` extractor rejects with 400 and the async
+    // reply chain dies silently.
+    if let Some(external_id) = session.skill_agent_id.as_deref() {
+        if !external_id.trim().is_empty() {
+            resolver = resolver.with_caller_external_agent_id(external_id.to_string());
+        }
+    }
+
     let router = executor_factory::build_executor_router(resolver);
 
     let config = KernelConfig {

@@ -94,11 +94,38 @@ impl SendToAgentTool {
         evaluate_control_gate(ctx, &input.agent_id, "send_to_agent")?;
         Ok(SendToAgentOutcome {
             target_agent_id: input.agent_id.clone(),
-            parent_agent_id: ctx.caller_agent_id.map(|id| id.to_string()),
+            parent_agent_id: caller_external_id(ctx),
             originating_user_id: ctx.originating_user_id.clone(),
             delivered: false,
         })
     }
+}
+
+/// Resolve the caller's id for cross-agent server callbacks.
+///
+/// Always prefer the upstream OS UUID (`ctx.caller_external_agent_id`)
+/// because it is what `aura-os-server`'s
+/// `Path<AgentId = Uuid>` extractor on
+/// `/api/agents/{originating_agent_id}/events/stream` expects when the
+/// server-side `spawn_cross_agent_reply_callback` posts the recipient's
+/// reply back into the originator's session. Falling back to
+/// `ctx.caller_agent_id.to_string()` only preserves test scaffolding
+/// that constructs `ToolContext` directly without the runtime
+/// `with_caller_external_agent_id` wiring; in production the runtime
+/// always populates the external id from `SessionState::skill_agent_id`,
+/// so the fallback never fires for live chat. See the field doc on
+/// `ToolContext::caller_external_agent_id` for the cross-repo
+/// rationale.
+fn caller_external_id(ctx: &ToolContext) -> Option<String> {
+    if let Some(external) = ctx
+        .caller_external_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(external.to_string());
+    }
+    ctx.caller_agent_id.map(|id| id.to_string())
 }
 
 #[async_trait]
@@ -137,7 +164,7 @@ impl Tool for SendToAgentTool {
             return Ok(missing_runtime_hook(SEND_TO_AGENT_TOOL_NAME));
         };
 
-        let parent = ctx.caller_agent_id.map(|id| id.to_string());
+        let parent = caller_external_id(ctx);
         match hook
             .deliver_message(
                 &input.agent_id,
@@ -390,6 +417,181 @@ mod tests {
             Some("async_user_message"),
             "successful send_to_agent must announce async reply delivery; got: {:?}",
             result.metadata
+        );
+    }
+
+    /// Capturing hook that records the `parent_agent_id` value
+    /// `send_to_agent` actually shipped to the runtime side-effect
+    /// layer. Used by the cross-repo regression tests below to pin the
+    /// "ship the upstream OS UUID, not the truncated harness hash"
+    /// contract that lets the server's
+    /// `spawn_cross_agent_reply_callback` resolve the originating
+    /// agent's REST URL.
+    struct CapturingHook {
+        captured_parent: std::sync::Mutex<Option<String>>,
+    }
+
+    impl CapturingHook {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                captured_parent: std::sync::Mutex::new(None),
+            })
+        }
+        fn captured(&self) -> Option<String> {
+            self.captured_parent.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::tool::AgentControlHook for CapturingHook {
+        async fn deliver_message(
+            &self,
+            _target_agent_id: &str,
+            parent_agent_id: Option<&str>,
+            _originating_user_id: Option<&str>,
+            _content: &str,
+            _attachments: Option<serde_json::Value>,
+        ) -> Result<(), String> {
+            *self.captured_parent.lock().unwrap() = parent_agent_id.map(str::to_string);
+            Ok(())
+        }
+        async fn lifecycle(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delegate_task(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &str,
+            _: Option<&serde_json::Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Cross-repo regression: when the runtime has wired
+    /// `caller_external_agent_id` (the upstream OS UUID), `send_to_agent`
+    /// must ship THAT value as `parent_agent_id`, not the truncated
+    /// harness blake3 hex from `caller_agent_id.to_string()`. The
+    /// server-side `spawn_cross_agent_reply_callback` uses this id as
+    /// the path segment when posting the recipient's reply back into
+    /// the originator's session, and the route extractor parses it as
+    /// `Uuid` — so a 16-char hex hash silently fails with 400 and the
+    /// async-reply chain dies. See:
+    ///   * `aura-os-server/src/handlers/agents/chat/cross_agent_reply.rs`
+    ///   * `ToolContext::caller_external_agent_id` field doc.
+    #[tokio::test]
+    async fn send_to_agent_prefers_caller_external_agent_id_over_harness_hash() {
+        let caller = AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::ControlAgent],
+        };
+        let mut tctx = ctx(caller);
+        tctx.caller_external_agent_id = Some("550e8400-e29b-41d4-a716-446655440000".into());
+        let hook = CapturingHook::new();
+        tctx.agent_control_hook = Some(hook.clone() as Arc<dyn crate::tool::AgentControlHook>);
+
+        let result = SendToAgentTool
+            .execute(
+                &tctx,
+                serde_json::json!({
+                    "agent_id": "target-id",
+                    "content": "hi",
+                }),
+            )
+            .await
+            .expect("execute");
+        assert!(result.ok);
+
+        let captured = hook.captured();
+        assert_eq!(
+            captured.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            "send_to_agent must ship the upstream OS UUID as parent_agent_id, not the harness hash"
+        );
+
+        // The outcome body that the LLM observes must report the same
+        // server-resolvable id so a downstream tool that reads the
+        // outcome JSON also sees a valid UUID.
+        let outcome: SendToAgentOutcome = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            outcome.parent_agent_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    /// Companion test: when the runtime has NOT wired
+    /// `caller_external_agent_id` (legacy / in-process unit-test
+    /// scaffolding), the tool falls back to
+    /// `caller_agent_id.to_string()` so older code paths keep
+    /// observing some non-empty parent id rather than `None`. This
+    /// keeps backwards compatibility with existing integration tests
+    /// that build `ToolContext` by hand without going through the
+    /// runtime executor wiring.
+    #[tokio::test]
+    async fn send_to_agent_falls_back_to_caller_agent_id_when_external_missing() {
+        let caller = AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::ControlAgent],
+        };
+        let mut tctx = ctx(caller);
+        assert!(
+            tctx.caller_external_agent_id.is_none(),
+            "fixture must leave external id unset to exercise the fallback path"
+        );
+        let hook = CapturingHook::new();
+        tctx.agent_control_hook = Some(hook.clone() as Arc<dyn crate::tool::AgentControlHook>);
+
+        let result = SendToAgentTool
+            .execute(
+                &tctx,
+                serde_json::json!({ "agent_id": "target-id", "content": "hi" }),
+            )
+            .await
+            .expect("execute");
+        assert!(result.ok);
+
+        let captured = hook.captured().expect("captured parent must be Some");
+        // `AgentId`'s Display truncates to 16 hex chars — the legacy
+        // value we used to ship to the server.
+        assert_eq!(captured.len(), 16, "fallback must be the truncated hash");
+    }
+
+    /// A blank/whitespace `caller_external_agent_id` must NOT clobber
+    /// the fallback — defensive in case some upstream sets it to ""
+    /// instead of clearing the field.
+    #[tokio::test]
+    async fn send_to_agent_treats_blank_external_id_as_unset() {
+        let caller = AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::ControlAgent],
+        };
+        let mut tctx = ctx(caller);
+        tctx.caller_external_agent_id = Some("   ".into());
+        let hook = CapturingHook::new();
+        tctx.agent_control_hook = Some(hook.clone() as Arc<dyn crate::tool::AgentControlHook>);
+
+        let result = SendToAgentTool
+            .execute(
+                &tctx,
+                serde_json::json!({ "agent_id": "target-id", "content": "hi" }),
+            )
+            .await
+            .expect("execute");
+        assert!(result.ok);
+
+        let captured = hook.captured().expect("captured parent must be Some");
+        assert_eq!(
+            captured.len(),
+            16,
+            "blank external id must be ignored and the fallback used"
         );
     }
 }

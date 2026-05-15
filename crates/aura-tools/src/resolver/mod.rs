@@ -184,6 +184,17 @@ impl ToolResolver {
         self
     }
 
+    /// Attach the caller's upstream OS UUID so cross-agent tools can ship
+    /// it as `originating_agent_id` to aura-os-server (instead of the
+    /// truncated harness blake3 hash from `caller_agent_id.to_string()`).
+    /// See [`ToolExecutor::with_caller_external_agent_id`] for the full
+    /// rationale.
+    #[must_use]
+    pub fn with_caller_external_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        self.inner = self.inner.with_caller_external_agent_id(agent_id);
+        self
+    }
+
     /// Visible tools for a profile (delegates to the catalog + config).
     #[must_use]
     pub fn visible_tools(&self, profile: ToolProfile) -> Vec<ToolDefinition> {

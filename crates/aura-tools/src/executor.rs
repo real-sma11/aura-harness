@@ -38,6 +38,13 @@ pub struct ToolExecutor {
     user_tool_defaults: UserToolDefaults,
     parent_chain: Vec<AgentId>,
     originating_user_id: Option<String>,
+    /// Caller's upstream OS UUID (e.g. `aura-os-server`'s `agents.agent_id`).
+    /// Forwarded into [`ToolContext::caller_external_agent_id`] so the
+    /// cross-agent tools can ship a server-resolvable id as
+    /// `originating_agent_id` / `parent_agent_id` instead of the truncated
+    /// harness hash. See the field doc on `ToolContext` for the full
+    /// rationale and the matching server-side wiring.
+    caller_external_agent_id: Option<String>,
 }
 
 impl ToolExecutor {
@@ -63,6 +70,7 @@ impl ToolExecutor {
             user_tool_defaults: UserToolDefaults::default(),
             parent_chain: Vec::new(),
             originating_user_id: None,
+            caller_external_agent_id: None,
         }
     }
 
@@ -133,6 +141,29 @@ impl ToolExecutor {
         self
     }
 
+    /// Set the caller's **external** agent id — the upstream OS UUID
+    /// (`aura-os-server`'s `agents.agent_id`) that identifies this agent
+    /// on the OS REST surface. The harness's internal
+    /// [`aura_core::AgentId`] is a 32-byte blake3 hash of that UUID
+    /// (see `aura_core::AgentId::from_uuid` and the harness session-init
+    /// fallback in `crates/aura-runtime/src/session/state.rs`), and its
+    /// `Display` impl truncates to 16 hex chars — so passing
+    /// `caller_agent_id.to_string()` to `aura-os-server` as
+    /// `originating_agent_id` is unparseable as a UUID at the
+    /// `Path<AgentId>` extractor and silently fails the cross-agent
+    /// async-reply callback. Wire this with the un-hashed UUID
+    /// (typically `SessionState::skill_agent_id` /
+    /// `template_agent_id`) so `send_to_agent` ships a value the
+    /// server can route.
+    #[must_use]
+    pub fn with_caller_external_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        let value = agent_id.into();
+        if !value.trim().is_empty() {
+            self.caller_external_agent_id = Some(value);
+        }
+        self
+    }
+
     /// Create a tool executor with default config.
     ///
     /// **Phase 5 hardening note:** [`ToolConfig::default`] now yields a
@@ -195,6 +226,7 @@ impl ToolExecutor {
         .map_err(|e| ToolError::CommandFailed(format!("sandbox init task panicked: {e}")))??;
         let mut tool_ctx = ToolContext::new(sandbox, self.config.clone());
         tool_ctx.caller_agent_id = Some(ctx.agent_id);
+        tool_ctx.caller_external_agent_id = self.caller_external_agent_id.clone();
         tool_ctx.caller_permissions = self.caller_permissions.clone();
         tool_ctx.caller_tool_permissions = self.caller_tool_permissions.clone();
         tool_ctx.user_tool_defaults = self.user_tool_defaults.clone();
