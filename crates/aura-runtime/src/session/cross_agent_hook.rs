@@ -190,6 +190,19 @@ impl AgentControlHook for AuraServerAgentHook {
         // turn to react instead of having to block on the SSE body here.
         // Older servers ignore the field (Serde `#[serde(default)]` on
         // `SendChatRequest`), so the new field is forward-compatible.
+        //
+        // `from_agent_id` is the *display*-side companion: same sender id
+        // (the calling agent's UUID) but consumed by the recipient's
+        // chat panel rather than by the server's reply router. Setting
+        // it here makes the inbound row in B's chat render with a
+        // "↩ from <A>" badge instead of looking indistinguishable
+        // from a real user prompt; without it the operator can't tell
+        // whose turn produced which message in B's history. The pair
+        // intentionally carries the same id today (the originator IS
+        // the sender on the A→B leg) but the wire fields are kept
+        // distinct so the B→A reply leg can null out
+        // `originating_agent_id` (single-hop fall-off) while still
+        // setting `from_agent_id: <B>` for display.
         let response = self
             .client
             .post(url)
@@ -203,6 +216,7 @@ impl AgentControlHook for AuraServerAgentHook {
                 "attachments": attachments,
                 "new_session": false,
                 "originating_agent_id": parent_agent_id,
+                "from_agent_id": parent_agent_id,
             }))
             .send()
             .await
@@ -568,6 +582,61 @@ mod tests {
         assert!(
             body.get("originating_agent_id").is_some_and(Value::is_null),
             "missing parent_agent_id must serialize as a JSON null; got: {body}"
+        );
+        assert!(
+            body.get("from_agent_id").is_some_and(Value::is_null),
+            "missing parent_agent_id must also null out from_agent_id so the \
+             recipient's chat panel does not render a meaningless badge; got: {body}"
+        );
+    }
+
+    /// Cross-repo regression: when `parent_agent_id` is set, the
+    /// outbound POST must carry it on BOTH `originating_agent_id`
+    /// (server-side async-reply routing) AND `from_agent_id`
+    /// (display-side cross-agent provenance for the recipient's
+    /// chat panel). The two wire fields are kept distinct on
+    /// purpose — the server's B→A reply leg nulls out
+    /// `originating_agent_id` for the single-hop fall-off but still
+    /// sets `from_agent_id: <B>` so the badge UI works on both
+    /// directions of the round trip. Pairs with the server-side
+    /// pin in
+    /// `apps/aura-os-server/tests/cross_agent_reply_callback_test.rs`
+    /// (`from_agent_id` assertion in
+    /// `cross_agent_callback_posts_reply_*`).
+    #[tokio::test]
+    async fn deliver_message_forwards_parent_agent_id_as_from_agent_id() {
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let base_url = spawn_capturing_chat_stream_mock(captured.clone()).await;
+
+        let hook = AuraServerAgentHook::new(base_url, Some("test-jwt".into()));
+        hook.deliver_message(
+            "target-agent",
+            Some("caller-agent"),
+            Some("user-root"),
+            "hello",
+            None,
+        )
+        .await
+        .expect("deliver_message call");
+
+        let body = captured.lock().await.clone().expect("captured body");
+        assert_eq!(
+            body.get("from_agent_id").and_then(Value::as_str),
+            Some("caller-agent"),
+            "deliver_message must forward parent_agent_id on `from_agent_id` so \
+             the recipient's chat panel can render a `↩ from <agent>` badge \
+             on the inbound row instead of letting the message look like a \
+             real user prompt; got: {body}"
+        );
+        // Sanity: the legacy routing field still carries the same id.
+        // The server uses this to know where to POST the async reply
+        // back to; if either field drops while the other stays, the
+        // round-trip-display contract breaks asymmetrically.
+        assert_eq!(
+            body.get("originating_agent_id").and_then(Value::as_str),
+            Some("caller-agent"),
+            "originating_agent_id must continue to carry the same id for \
+             server-side async-reply routing; got: {body}"
         );
     }
 }
