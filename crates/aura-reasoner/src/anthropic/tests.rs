@@ -5,8 +5,8 @@ use super::convert::{
 };
 use super::{AnthropicConfig, AnthropicProvider, ApiError};
 use crate::{
-    Message, ModelProvider, ModelRequest, ModelRequestKind, ReasonerError, StopReason, StreamEvent,
-    ThinkingConfig, ToolChoice, ToolDefinition,
+    Message, ModelProvider, ModelRequest, ModelRequestKind, PromptCacheRetention, ReasonerError,
+    StopReason, StreamEvent, ThinkingConfig, ToolChoice, ToolDefinition,
 };
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -1105,5 +1105,173 @@ async fn test_proxy_non_anthropic_family_omits_thinking_and_output_config_for_co
     assert!(
         !captured.contains("output_config"),
         "Explicit non-Anthropic family hints should suppress Anthropic output config for complete requests.\nCaptured request:\n{captured}"
+    );
+}
+#[tokio::test]
+async fn test_proxy_openai_models_carry_prompt_cache_key_when_set() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = socket.read(&mut buf).await.unwrap();
+        let request_text = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        let body = r#"{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"aura-gpt-4.1","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+
+        request_text
+    });
+
+    let config = AnthropicConfig {
+        default_model: "aura-gpt-4.1".to_string(),
+        timeout_ms: 5000,
+        max_retries: 0,
+        backoff_initial_ms: 250,
+        backoff_cap_ms: 30_000,
+        min_request_interval_ms: 0,
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        fallback_model: None,
+        prompt_caching_enabled: true,
+        emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
+    };
+
+    let provider = AnthropicProvider::new(config).unwrap();
+    let request = ModelRequest::builder("aura-gpt-4.1", "system")
+        .message(Message::user("test"))
+        .auth_token(Some("test-jwt-token".to_string()))
+        .prompt_cache_key(Some("agent:abc-123".into()))
+        .prompt_cache_retention(Some(PromptCacheRetention::Hours24))
+        .try_build()
+        .unwrap();
+
+    let _ = provider.complete(request).await.unwrap();
+
+    let captured = server.await.unwrap();
+    assert!(
+        captured.contains(r#""prompt_cache_key":"agent:abc-123""#),
+        "Proxy OpenAI requests should carry prompt_cache_key in body.\nCaptured request:\n{captured}"
+    );
+    assert!(
+        captured.contains(r#""prompt_cache_retention":"24h""#),
+        "Proxy OpenAI requests should carry prompt_cache_retention in body.\nCaptured request:\n{captured}"
+    );
+    assert!(
+        captured
+            .to_ascii_lowercase()
+            .contains("x-aura-prompt-cache-key: agent:abc-123"),
+        "Proxy OpenAI requests should carry X-Aura-Prompt-Cache-Key header.\nCaptured request:\n{captured}"
+    );
+    assert!(
+        captured
+            .to_ascii_lowercase()
+            .contains("x-aura-prompt-cache-retention: 24h"),
+        "Proxy OpenAI requests should carry X-Aura-Prompt-Cache-Retention header.\nCaptured request:\n{captured}"
+    );
+    assert!(
+        !captured.contains("anthropic-beta"),
+        "Proxy OpenAI requests should still omit anthropic-beta even with cache key set.\nCaptured request:\n{captured}"
+    );
+    assert!(
+        !captured.contains("cache_control"),
+        "Proxy OpenAI requests should still omit cache_control even with cache key set.\nCaptured request:\n{captured}"
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_openai_response_cached_tokens_alias_maps_to_cache_read() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let _ = socket.read(&mut buf).await.unwrap();
+
+        // Anthropic-shape usage block emitted by the router after it
+        // flattens OpenAI's `prompt_tokens_details.cached_tokens`.
+        let body = r#"{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"aura-gpt-4.1","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":25,"cached_tokens":60}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let config = AnthropicConfig {
+        default_model: "aura-gpt-4.1".to_string(),
+        timeout_ms: 5000,
+        max_retries: 0,
+        backoff_initial_ms: 250,
+        backoff_cap_ms: 30_000,
+        min_request_interval_ms: 0,
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        fallback_model: None,
+        prompt_caching_enabled: true,
+        emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
+    };
+
+    let provider = AnthropicProvider::new(config).unwrap();
+    let request = ModelRequest::builder("aura-gpt-4.1", "system")
+        .message(Message::user("test"))
+        .auth_token(Some("test-jwt-token".to_string()))
+        .try_build()
+        .unwrap();
+
+    let response = provider.complete(request).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.usage.input_tokens, 100);
+    assert_eq!(response.usage.output_tokens, 25);
+    assert_eq!(response.usage.cache_read_input_tokens, Some(60));
+}
+
+#[test]
+fn test_anthropic_request_caches_last_tool_when_no_tool_cache_control_set() {
+    let tools = vec![
+        ToolDefinition::new(
+            "fs.read",
+            "Read a file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            }),
+        ),
+        ToolDefinition::new(
+            "fs.write",
+            "Write a file",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "contents": {"type": "string"}
+                }
+            }),
+        ),
+    ];
+
+    let api_tools = convert_tools_to_api(&tools, true);
+    assert_eq!(api_tools.len(), 2);
+    assert!(
+        api_tools[0].cache_control.is_none(),
+        "First tool should not be cached when no explicit cache_control is set"
+    );
+    assert_eq!(
+        api_tools[1].cache_control,
+        Some(serde_json::json!({"type": "ephemeral"})),
+        "Last tool should default to ephemeral cache_control when prompt caching is enabled"
     );
 }

@@ -96,9 +96,9 @@ pub use types::{
     AccumulatedToolUse, CacheControl, ContentBlock, ImageSource, MaxTokens, Message,
     ModelContentProfile, ModelContractVerdict, ModelContractViolationReason, ModelName,
     ModelRequest, ModelRequestContractViolation, ModelRequestKind, ModelRequestMetadata,
-    ModelResponse, PartialToolUse, ProviderTrace, Role, StopReason, StreamAccumulator,
-    StreamContentType, StreamEvent, Temperature, ThinkingConfig, ToolChoice, ToolDefinition,
-    ToolResultContent, Usage,
+    ModelResponse, PartialToolUse, PromptCacheRetention, ProviderTrace, Role, StopReason,
+    StreamAccumulator, StreamContentType, StreamEvent, Temperature, ThinkingConfig, ToolChoice,
+    ToolDefinition, ToolResultContent, Usage,
 };
 
 use futures_util::Stream;

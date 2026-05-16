@@ -20,6 +20,10 @@ pub(super) struct ApiRequest {
     pub thinking: Option<ApiThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<ApiOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,7 +113,7 @@ pub(super) struct ApiUsage {
     pub output_tokens: u64,
     #[serde(default, alias = "prompt_cache_miss_tokens")]
     pub cache_creation_input_tokens: Option<u64>,
-    #[serde(default, alias = "prompt_cache_hit_tokens")]
+    #[serde(default, alias = "prompt_cache_hit_tokens", alias = "cached_tokens")]
     pub cache_read_input_tokens: Option<u64>,
 }
 
@@ -135,6 +139,10 @@ pub(super) struct StreamingApiRequest {
     pub thinking: Option<ApiThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<ApiOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<&'static str>,
 }
 
 /// Internal API representation of the extended thinking configuration.
@@ -204,7 +212,7 @@ pub(super) struct SseUsageStart {
     pub input_tokens: u64,
     #[serde(default, alias = "prompt_cache_miss_tokens")]
     pub cache_creation_input_tokens: Option<u64>,
-    #[serde(default, alias = "prompt_cache_hit_tokens")]
+    #[serde(default, alias = "prompt_cache_hit_tokens", alias = "cached_tokens")]
     pub cache_read_input_tokens: Option<u64>,
 }
 

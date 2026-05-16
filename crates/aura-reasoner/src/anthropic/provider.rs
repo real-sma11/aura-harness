@@ -267,6 +267,28 @@ impl AnthropicProvider {
         Self::model_looks_like_anthropic(model)
     }
 
+    fn model_looks_like_openai(model: &str) -> bool {
+        let model = model.trim().to_ascii_lowercase();
+        model.starts_with("gpt-")
+            || model.starts_with("aura-gpt-")
+            || model.starts_with("o1-")
+            || model.starts_with("o3-")
+            || model.starts_with("o4-")
+            || model == "gpt"
+    }
+
+    fn supports_openai_proxy_features(request: &ModelRequest, model: &str) -> bool {
+        if let Some(family) = request
+            .upstream_provider_family
+            .as_deref()
+            .map(str::trim)
+            .filter(|family| !family.is_empty())
+        {
+            return family.eq_ignore_ascii_case("openai");
+        }
+        Self::model_looks_like_openai(model)
+    }
+
     fn prompt_caching_enabled_for_model(&self, request: &ModelRequest, model: &str) -> bool {
         self.config.prompt_caching_enabled
             && Self::supports_anthropic_proxy_features(request, model)
@@ -596,6 +618,16 @@ impl AnthropicProvider {
             let family = family.trim();
             if !family.is_empty() {
                 req_builder = req_builder.header("X-Aura-Upstream-Provider-Family", family);
+            }
+        }
+
+        if Self::supports_openai_proxy_features(request_ctx, model) {
+            if let Some(ref key) = request_ctx.prompt_cache_key {
+                req_builder = req_builder.header("X-Aura-Prompt-Cache-Key", key);
+            }
+            if let Some(retention) = request_ctx.prompt_cache_retention {
+                req_builder =
+                    req_builder.header("X-Aura-Prompt-Cache-Retention", retention.as_wire());
             }
         }
 
@@ -1767,6 +1799,8 @@ fn build_api_request(
     system: &serde_json::Value,
     prompt_caching_enabled: bool,
     anthropic_features_enabled: bool,
+    openai_cache_key: Option<String>,
+    openai_cache_retention: Option<&'static str>,
 ) -> ApiRequest {
     let thinking = anthropic_features_enabled
         .then(|| resolve_thinking(request, model))
@@ -1792,6 +1826,8 @@ fn build_api_request(
         },
         thinking,
         output_config,
+        prompt_cache_key: openai_cache_key,
+        prompt_cache_retention: openai_cache_retention,
     }
 }
 
@@ -2230,13 +2266,27 @@ impl ModelProvider for AnthropicProvider {
                     self.prompt_caching_enabled_for_model(request_ref, &model);
                 let anthropic_features_enabled =
                     self.anthropic_request_features_enabled(request_ref, &model);
+                let openai_features_enabled =
+                    Self::supports_openai_proxy_features(request_ref, &model);
                 let system = build_system_block(&request_ref.system, prompt_caching_enabled);
+                let (openai_cache_key, openai_cache_retention) = if openai_features_enabled {
+                    (
+                        request_ref.prompt_cache_key.clone(),
+                        request_ref
+                            .prompt_cache_retention
+                            .map(crate::types::PromptCacheRetention::as_wire),
+                    )
+                } else {
+                    (None, None)
+                };
                 let api_request = build_api_request(
                     request_ref,
                     &model,
                     &system,
                     prompt_caching_enabled,
                     anthropic_features_enabled,
+                    openai_cache_key,
+                    openai_cache_retention,
                 );
 
                 debug!(
@@ -2332,6 +2382,8 @@ impl ModelProvider for AnthropicProvider {
                     self.prompt_caching_enabled_for_model(request_ref, &model);
                 let anthropic_features_enabled =
                     self.anthropic_request_features_enabled(request_ref, &model);
+                let openai_features_enabled =
+                    Self::supports_openai_proxy_features(request_ref, &model);
                 let system = build_system_block(&request_ref.system, prompt_caching_enabled);
                 let thinking = anthropic_features_enabled
                     .then(|| resolve_thinking(request_ref, &model))
@@ -2339,6 +2391,16 @@ impl ModelProvider for AnthropicProvider {
                 let output_config = anthropic_features_enabled
                     .then(|| resolve_output_config(request_ref, &model))
                     .flatten();
+                let (openai_cache_key, openai_cache_retention) = if openai_features_enabled {
+                    (
+                        request_ref.prompt_cache_key.clone(),
+                        request_ref
+                            .prompt_cache_retention
+                            .map(crate::types::PromptCacheRetention::as_wire),
+                    )
+                } else {
+                    (None, None)
+                };
                 let api_request = StreamingApiRequest {
                     model: model.clone(),
                     system: system.clone(),
@@ -2364,6 +2426,8 @@ impl ModelProvider for AnthropicProvider {
                     stream: true,
                     thinking,
                     output_config,
+                    prompt_cache_key: openai_cache_key,
+                    prompt_cache_retention: openai_cache_retention,
                 };
 
                 debug!(

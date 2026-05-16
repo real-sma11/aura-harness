@@ -182,6 +182,28 @@ impl TryFrom<f32> for Temperature {
     }
 }
 
+/// Wire value for OpenAI's `prompt_cache_retention` field. `InMemory`
+/// maps to OpenAI's default 5-10 minute cache; `Hours24` requests
+/// the extended 24-hour retention available on newer OpenAI models.
+/// The router translates this into the OpenAI-native field when
+/// forwarding; aura-harness only carries the hint on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheRetention {
+    InMemory,
+    Hours24,
+}
+
+impl PromptCacheRetention {
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Hours24 => "24h",
+        }
+    }
+}
+
 // ============================================================================
 // Model Request
 // ============================================================================
@@ -219,6 +241,18 @@ pub struct ModelRequest {
     pub aura_session_id: Option<String>,
     /// Org UUID for X-Aura-Org-Id billing header.
     pub aura_org_id: Option<String>,
+    /// Optional stable cache key forwarded to the router so OpenAI-family
+    /// upstreams can pin identical prefixes to the same backend partition
+    /// (`prompt_cache_key` in the OpenAI API). The harness only carries
+    /// it on the wire; the router rewrites Anthropic-shape requests into
+    /// OpenAI-native ones and is responsible for actually attaching this
+    /// to the OpenAI Responses/Chat API call. Ignored for Anthropic
+    /// family because Anthropic's own prompt caching is opt-in via
+    /// `cache_control` blocks rather than a routing hint.
+    pub prompt_cache_key: Option<String>,
+    /// Optional retention hint paired with `prompt_cache_key`. See
+    /// [`PromptCacheRetention`] for the wire values.
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// Optional request-contract metadata used by provider-bound validation.
     pub metadata: ModelRequestMetadata,
 }
@@ -247,6 +281,8 @@ pub struct ModelRequestBuilder {
     aura_agent_id: Option<String>,
     aura_session_id: Option<String>,
     aura_org_id: Option<String>,
+    prompt_cache_key: Option<String>,
+    prompt_cache_retention: Option<PromptCacheRetention>,
     metadata: ModelRequestMetadata,
 }
 
@@ -269,6 +305,8 @@ impl ModelRequestBuilder {
             aura_agent_id: None,
             aura_session_id: None,
             aura_org_id: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
             metadata: ModelRequestMetadata::default(),
         }
     }
@@ -361,6 +399,18 @@ impl ModelRequestBuilder {
     }
 
     #[must_use]
+    pub fn prompt_cache_key(mut self, key: Option<String>) -> Self {
+        self.prompt_cache_key = key;
+        self
+    }
+
+    #[must_use]
+    pub fn prompt_cache_retention(mut self, retention: Option<PromptCacheRetention>) -> Self {
+        self.prompt_cache_retention = retention;
+        self
+    }
+
+    #[must_use]
     pub const fn request_kind(mut self, kind: ModelRequestKind) -> Self {
         self.metadata.kind = Some(kind);
         self
@@ -397,6 +447,8 @@ impl ModelRequestBuilder {
             aura_agent_id: self.aura_agent_id,
             aura_session_id: self.aura_session_id,
             aura_org_id: self.aura_org_id,
+            prompt_cache_key: self.prompt_cache_key,
+            prompt_cache_retention: self.prompt_cache_retention,
             metadata: self.metadata,
         })
     }
