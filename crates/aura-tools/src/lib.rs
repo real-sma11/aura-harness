@@ -255,7 +255,7 @@ impl ToolConfig {
     pub fn restricted() -> Self {
         Self {
             command: CommandPolicy::restricted(),
-            max_read_bytes: 5 * 1024 * 1024,
+            max_read_bytes: 64 * 1024,
             sync_threshold_ms: 5_000,
             max_async_timeout_ms: 600_000,
             git_push_timeout_ms: 300_000,
@@ -312,6 +312,18 @@ mod default_tests {
         assert!(
             !cfg.command.bypass_allowlists,
             "fresh ToolConfig must not bypass allowlists"
+        );
+    }
+
+    #[test]
+    fn default_max_read_bytes_is_64k() {
+        let cfg = ToolConfig::default();
+        assert_eq!(
+            cfg.max_read_bytes,
+            64 * 1024,
+            "default max_read_bytes must stay capped at 64 KB so a single read_file cannot \
+             dwarf the proxy per-message envelope; bumping this is a deliberate trade-off and \
+             should be paired with a matching change to the agent-loop compaction tier."
         );
     }
 

@@ -5,7 +5,16 @@ use async_trait::async_trait;
 use aura_core::ToolDefinition;
 use aura_core::ToolResult;
 use std::fs;
+use std::io::Read;
 use tracing::{debug, instrument};
+
+/// Build the standard truncation marker used by `fs_read` so the LLM gets a
+/// consistent, machine-readable hint about how to recover the missing bytes.
+fn truncation_marker(dropped: usize, total: usize) -> String {
+    format!(
+        "\n... [truncated {dropped} of {total} bytes; use start_line/end_line for slicing or pass max_bytes to read more.]"
+    )
+}
 
 /// Read file contents, optionally restricted to a line range.
 ///
@@ -35,19 +44,26 @@ pub fn fs_read(
     })?;
     let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
 
-    if size > max_bytes {
-        return Err(ToolError::SizeLimitExceeded {
-            actual: size,
-            limit: max_bytes,
-        });
-    }
-
-    let contents = fs::read(&resolved).map_err(|e| {
+    let truncated = size > max_bytes;
+    let read_len = size.min(max_bytes);
+    let file = fs::File::open(&resolved).map_err(|e| {
         ToolError::Io(std::io::Error::new(
             e.kind(),
-            format!("read({}): {e}", resolved.display()),
+            format!("open({}): {e}", resolved.display()),
         ))
     })?;
+    let mut contents = Vec::with_capacity(read_len);
+    file.take(read_len as u64)
+        .read_to_end(&mut contents)
+        .map_err(|e| {
+            ToolError::Io(std::io::Error::new(
+                e.kind(),
+                format!("read({}): {e}", resolved.display()),
+            ))
+        })?;
+    if truncated {
+        contents.extend_from_slice(truncation_marker(size - read_len, size).as_bytes());
+    }
 
     if start_line.is_some() || end_line.is_some() {
         let text = String::from_utf8_lossy(&contents);
@@ -69,14 +85,34 @@ pub fn fs_read(
             .enumerate()
             .map(|(i, line)| format!("{:>6}|{}", start + i, line))
             .collect();
-        let output = sliced.join("\n");
-        Ok(ToolResult::success("read_file", output)
+        let mut output = sliced.join("\n");
+        let mut output_truncated = false;
+        if output.len() > max_bytes {
+            let original_len = output.len();
+            let mut idx = max_bytes;
+            while idx > 0 && !output.is_char_boundary(idx) {
+                idx -= 1;
+            }
+            output.truncate(idx);
+            output.push_str(&truncation_marker(original_len - idx, original_len));
+            output_truncated = true;
+        }
+        let mut result = ToolResult::success("read_file", output)
             .with_metadata("size", size.to_string())
             .with_metadata("total_lines", total.to_string())
             .with_metadata("start_line", start.to_string())
-            .with_metadata("end_line", end.to_string()))
+            .with_metadata("end_line", end.to_string());
+        if truncated || output_truncated {
+            result = result.with_metadata("truncated", "true");
+        }
+        Ok(result)
     } else {
-        Ok(ToolResult::success("read_file", contents).with_metadata("size", size.to_string()))
+        let mut result = ToolResult::success("read_file", contents)
+            .with_metadata("size", size.to_string());
+        if truncated {
+            result = result.with_metadata("truncated", "true");
+        }
+        Ok(result)
     }
 }
 
@@ -92,7 +128,7 @@ impl Tool for FsReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file".into(),
-            description: "Read the contents of a file. Supports optional line range to avoid reading entire large files. When start_line/end_line are provided, output is prefixed with line numbers.".into(),
+            description: "Read a file's contents. Default returns up to 64 KB; larger files are truncated with a clear marker. Prefer start_line/end_line for slicing big files; only set max_bytes explicitly when a single call must exceed 64 KB.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -179,8 +215,119 @@ mod tests {
         let content = "Hello, Aura!";
         fs::write(dir.path().join("test.txt"), content).unwrap();
 
-        let result = fs_read(&sandbox, "test.txt", 5, None, None);
-        assert!(matches!(result, Err(ToolError::SizeLimitExceeded { .. })));
+        let max_bytes = 5usize;
+        let result = fs_read(&sandbox, "test.txt", max_bytes, None, None).unwrap();
+        assert!(result.ok, "truncation must surface as a successful result");
+        let expected_marker =
+            truncation_marker(content.len() - max_bytes, content.len());
+        let expected_len = max_bytes + expected_marker.as_bytes().len();
+        assert_eq!(
+            result.stdout.len(),
+            expected_len,
+            "body must equal max_bytes plus the truncation marker"
+        );
+        assert!(
+            result.stdout.starts_with(&content.as_bytes()[..max_bytes]),
+            "body must begin with the first max_bytes of the file"
+        );
+        assert!(
+            result.stdout.ends_with(expected_marker.as_bytes()),
+            "body must end with the standard truncation marker"
+        );
+        assert_eq!(
+            result.metadata.get("truncated").map(String::as_str),
+            Some("true"),
+            "truncation must be flagged in metadata"
+        );
+        assert_eq!(
+            result.metadata.get("size").map(String::as_str),
+            Some(content.len().to_string().as_str()),
+            "size metadata must report the full file size, not the truncated length"
+        );
+    }
+
+    #[test]
+    fn test_fs_read_default_cap_truncates_large_file() {
+        let (sandbox, dir) = create_test_sandbox();
+
+        let total = 200 * 1024;
+        let content = vec![b'a'; total];
+        fs::write(dir.path().join("big.txt"), &content).unwrap();
+
+        let max_bytes = 64 * 1024;
+        let result = fs_read(&sandbox, "big.txt", max_bytes, None, None).unwrap();
+        assert!(result.ok);
+        let expected_marker = truncation_marker(total - max_bytes, total);
+        let expected_len = max_bytes + expected_marker.as_bytes().len();
+        assert_eq!(
+            result.stdout.len(),
+            expected_len,
+            "body must be exactly max_bytes plus the truncation marker"
+        );
+        assert!(
+            result.stdout.ends_with(expected_marker.as_bytes()),
+            "body must end with the standard truncation marker"
+        );
+        assert_eq!(
+            result.metadata.get("truncated").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            result.metadata.get("size").map(String::as_str),
+            Some(total.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn test_fs_read_line_range_output_cap() {
+        let (sandbox, dir) = create_test_sandbox();
+
+        let line_count = 100usize;
+        let line_body_len = 10usize;
+        let line_body: String = "a".repeat(line_body_len);
+        let lines: Vec<String> = (0..line_count).map(|_| line_body.clone()).collect();
+        let content = lines.join("\n");
+        fs::write(dir.path().join("lines.txt"), &content).unwrap();
+
+        let file_size = content.len();
+        let line_numbered_len = line_count * (6 + 1 + line_body_len) + (line_count - 1);
+        let max_bytes = file_size + 100;
+        assert!(
+            max_bytes >= file_size,
+            "max_bytes must accommodate the raw file so the cap fires on the rendered output, not the file"
+        );
+        assert!(
+            line_numbered_len > max_bytes,
+            "line-numbered output must exceed max_bytes for this test to exercise the line-render cap"
+        );
+
+        let result = fs_read(
+            &sandbox,
+            "lines.txt",
+            max_bytes,
+            Some(1),
+            Some(line_count),
+        )
+        .unwrap();
+        assert!(result.ok);
+
+        let body = String::from_utf8(result.stdout.to_vec())
+            .expect("line-numbered output is always UTF-8");
+        let marker_prefix = "\n... [truncated";
+        assert!(
+            body.contains(marker_prefix),
+            "rendered output must carry the truncation marker"
+        );
+        let marker_offset = body.find(marker_prefix).unwrap();
+        assert!(
+            marker_offset <= max_bytes,
+            "kept body length must not exceed max_bytes (got {marker_offset}, cap {max_bytes})"
+        );
+        assert_eq!(
+            result.metadata.get("truncated").map(String::as_str),
+            Some("true"),
+            "line-render truncation must surface in metadata"
+        );
     }
 
     #[test]
