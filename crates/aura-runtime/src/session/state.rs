@@ -363,7 +363,7 @@ impl Session {
             system_prompt,
             max_tokens: self.max_tokens,
             max_context_tokens: Some(self.context_window_tokens),
-            stream_timeout: std::time::Duration::from_secs(180),
+            stream_timeout: agent_loop_stream_timeout(),
             auth_token: self.auth_token.clone(),
             // The wire-level `SessionModelOverrides` no longer carries
             // an upstream provider-family hint — proxy routing is the
@@ -382,6 +382,54 @@ impl Session {
             ..AgentLoopConfig::default()
         }
     }
+}
+
+/// Reasoner reqwest HTTP timeout, in milliseconds, when
+/// `AURA_MODEL_TIMEOUT_MS` is unset or unparsable. Mirrors the default
+/// in [`aura_reasoner::anthropic::config::AnthropicConfig::from_env`]
+/// (300_000ms / 300s) so the two layers stay numerically aligned even
+/// when the env var is not set.
+const REASONER_DEFAULT_TIMEOUT_MS: u64 = 300_000;
+
+/// Safety margin added on top of the reasoner's reqwest timeout when
+/// computing the agent-loop outer-guard `stream_timeout`. The outer
+/// guard at [`aura_agent::agent_loop::iteration::AgentLoop::call_model`]
+/// must be **strictly greater** than the HTTP-layer timeout, otherwise
+/// it preempts a still-healthy stream and the user sees a generic
+/// `code: "llm_error"` ("Model call timed out after Ns") instead of the
+/// typed `ReasonerError` the HTTP layer would have produced (network /
+/// 5xx / rate limit / context overflow).
+///
+/// 30s is large enough to cover scheduler jitter + any drift between
+/// the two timer subsystems; small enough that a genuinely deadlocked
+/// future still surfaces in well under a minute past the HTTP cap.
+const STREAM_TIMEOUT_MARGIN_SECS: u64 = 30;
+
+/// Outer-guard streaming timeout used by the chat-session
+/// [`AgentLoopConfig`].
+///
+/// Reads `AURA_MODEL_TIMEOUT_MS` (the same env var the reasoner reads
+/// for its reqwest request timeout — see
+/// [`aura_reasoner::anthropic::config::AnthropicConfig::from_env`]) and
+/// adds [`STREAM_TIMEOUT_MARGIN_SECS`] so the HTTP layer always wins
+/// the timeout race.
+///
+/// Pinned by the regression tests in `session::tests` to keep the
+/// "outer guard ≥ HTTP timeout" invariant the agent-loop module
+/// documents at [`AgentLoopConfig::stream_timeout`] from drifting
+/// again. The previous hardcoded `Duration::from_secs(180)` violated
+/// that invariant and caused long single LLM calls (e.g. a turn
+/// emitting several large `update_spec` tool blocks inline) to fire
+/// "Model call timed out after 180s" while the upstream stream was
+/// still happily delivering tokens.
+pub(crate) fn agent_loop_stream_timeout() -> std::time::Duration {
+    let reasoner_ms = std::env::var("AURA_MODEL_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(REASONER_DEFAULT_TIMEOUT_MS);
+    std::time::Duration::from_millis(reasoner_ms)
+        + std::time::Duration::from_secs(STREAM_TIMEOUT_MARGIN_SECS)
 }
 
 /// Hard upper bound on bytes-per-tool-blob kept in `Session.messages`
