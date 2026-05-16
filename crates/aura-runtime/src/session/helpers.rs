@@ -794,6 +794,8 @@ pub(super) async fn apply_turn_result(
         mcp_tokens: breakdown.mcp_tokens,
         subagents_tokens: breakdown.subagents_tokens,
         conversation_tokens: breakdown.conversation_tokens,
+        cache_read_tokens: breakdown.cache_read_tokens,
+        cache_creation_tokens: breakdown.cache_creation_tokens,
     };
 
     send_outbound_with_backpressure(

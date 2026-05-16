@@ -184,6 +184,16 @@ pub(super) fn accumulate_response(state: &mut LoopState, response: &ModelRespons
     state.result.total_cache_read_input_tokens +=
         response.usage.cache_read_input_tokens.unwrap_or_default();
 
+    // Record the *latest* iteration's cache hit/miss counts on the
+    // per-turn breakdown. The wire `ContextBreakdown` surfaces this
+    // so the UI can render a "Cached this turn" row. If the agent
+    // loop runs multiple iterations, the last one wins -- that's the
+    // freshest view of "what did the model just see from cache?".
+    state.result.context_breakdown.cache_read_tokens =
+        response.usage.cache_read_input_tokens.unwrap_or(0);
+    state.result.context_breakdown.cache_creation_tokens =
+        response.usage.cache_creation_input_tokens.unwrap_or(0);
+
     for block in &response.message.content {
         match block {
             ContentBlock::Text { text } => state.result.total_text.push_str(text),

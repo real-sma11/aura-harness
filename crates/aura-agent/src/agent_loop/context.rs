@@ -100,6 +100,11 @@ fn recompute_breakdown(
         mcp_tokens: 0,
         subagents_tokens: chars_to_tokens(config.subagents_chars),
         conversation_tokens: heuristic_context_tokens(&state.messages),
+        // Cache hit/miss numbers come from `accumulate_response`
+        // after each model reply; `recompute_breakdown` runs
+        // pre-call and has no usage data yet, so default to 0.
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
     };
 }
 

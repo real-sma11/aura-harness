@@ -103,6 +103,14 @@ pub struct AgentContextBreakdown {
     pub mcp_tokens: u64,
     pub subagents_tokens: u64,
     pub conversation_tokens: u64,
+    /// Cache-read tokens reported by the model provider for the most
+    /// recent successful iteration. Surfaced on `AgentLoopResult`'s
+    /// per-turn `context_breakdown` so the wire `ContextBreakdown`
+    /// can carry hit/miss counts to the UI's context-usage popover.
+    pub cache_read_tokens: u64,
+    /// Cache-creation tokens reported by the model provider for the
+    /// most recent successful iteration.
+    pub cache_creation_tokens: u64,
 }
 
 /// Result of an automatic build check.
