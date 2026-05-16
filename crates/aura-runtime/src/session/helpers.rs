@@ -125,6 +125,8 @@ pub(super) async fn handle_session_init(
             default_model: overrides.default_model.clone(),
             fallback_model: overrides.fallback_model.clone(),
             prompt_caching_enabled: overrides.prompt_caching_enabled,
+            prompt_cache_key: overrides.prompt_cache_key.clone(),
+            prompt_cache_retention: overrides.prompt_cache_retention.clone(),
         };
         match aura_reasoner::with_session_overrides(reasoner_overrides) {
             Ok(selection) => Some(selection.provider),
@@ -1255,6 +1257,8 @@ mod tests {
             default_model: Some("deepseek-v4-flash".to_string()),
             fallback_model: None,
             prompt_caching_enabled: Some(true),
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         });
 
         let config = session.agent_loop_config();
@@ -1299,6 +1303,8 @@ mod tests {
                 default_model: Some("claude-opus-4-6".to_string()),
                 fallback_model: None,
                 prompt_caching_enabled: Some(true),
+                prompt_cache_key: None,
+                prompt_cache_retention: None,
             }),
             intent_classifier: None,
             agent_permissions: AgentPermissionsWire::default(),

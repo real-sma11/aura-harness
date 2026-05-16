@@ -45,6 +45,10 @@ pub struct Session {
     pub(crate) provider_name: String,
     /// Optional per-session model overrides resolved from `session_init`.
     pub(crate) provider_overrides: Option<SessionModelOverrides>,
+    /// Stable OpenAI-family `prompt_cache_key` resolved from `SessionInit.provider_overrides`.
+    pub(crate) prompt_cache_key: Option<String>,
+    /// Optional OpenAI-family `prompt_cache_retention` paired with `prompt_cache_key`.
+    pub(crate) prompt_cache_retention: Option<String>,
     /// Optional concrete provider override built from `provider_overrides`.
     pub(crate) provider_override: Option<Arc<dyn ModelProvider + Send + Sync>>,
     /// Max tokens per response.
@@ -135,6 +139,8 @@ impl Session {
             model: aura_agent::DEFAULT_MODEL.to_string(),
             provider_name: String::new(),
             provider_overrides: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
             provider_override: None,
             max_tokens: 16384,
             temperature: None,
@@ -279,6 +285,8 @@ impl Session {
             self.aura_org_id = Some(id);
         }
         if let Some(provider_overrides) = init.provider_overrides {
+            self.prompt_cache_key = provider_overrides.prompt_cache_key.clone();
+            self.prompt_cache_retention = provider_overrides.prompt_cache_retention.clone();
             self.provider_overrides = Some(provider_overrides);
         }
         if let Some(spec) = init.intent_classifier {
@@ -369,6 +377,8 @@ impl Session {
             aura_org_id: self.aura_org_id.clone(),
             intent_classifier: self.intent_classifier.clone(),
             intent_classifier_manifest: self.intent_classifier_manifest.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            prompt_cache_retention: self.prompt_cache_retention.clone(),
             ..AgentLoopConfig::default()
         }
     }

@@ -37,6 +37,12 @@ pub struct SessionOverrides {
     pub default_model: Option<String>,
     pub fallback_model: Option<String>,
     pub prompt_caching_enabled: Option<bool>,
+    /// Stable cache key forwarded to OpenAI-family upstreams as
+    /// `prompt_cache_key`. See `aura_reasoner::ModelRequest::prompt_cache_key`.
+    pub prompt_cache_key: Option<String>,
+    /// Retention hint paired with `prompt_cache_key`. Wire values are
+    /// `"in_memory"` or `"24h"`.
+    pub prompt_cache_retention: Option<String>,
 }
 
 /// Build the default router-backed provider from environment variables.
@@ -131,6 +137,8 @@ mod tests {
             default_model: Some("aura-claude-sonnet-4-6".to_string()),
             fallback_model: None,
             prompt_caching_enabled: Some(true),
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         })
         .expect("with_session_overrides");
         assert_eq!(selection.provider.name(), "anthropic");
@@ -143,6 +151,8 @@ mod tests {
             default_model: Some("   ".to_string()),
             fallback_model: Some("".to_string()),
             prompt_caching_enabled: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
         })
         .expect("with_session_overrides");
         assert_eq!(selection.provider.name(), "anthropic");

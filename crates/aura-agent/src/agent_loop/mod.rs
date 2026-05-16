@@ -127,6 +127,12 @@ pub struct AgentLoopConfig {
     pub aura_session_id: Option<String>,
     /// Org UUID for X-Aura-Org-Id billing header.
     pub aura_org_id: Option<String>,
+    /// Stable `prompt_cache_key` forwarded to OpenAI-family routing. See
+    /// `aura_reasoner::ModelRequest::prompt_cache_key`.
+    pub prompt_cache_key: Option<String>,
+    /// Retention hint paired with `prompt_cache_key`. Wire values
+    /// `"in_memory"` / `"24h"`.
+    pub prompt_cache_retention: Option<String>,
     /// Request contract kind used when building provider-bound requests.
     ///
     /// Chat/session callers default to [`ModelRequestKind::Chat`]. Task
@@ -217,6 +223,8 @@ impl Default for AgentLoopConfig {
             aura_agent_id: None,
             aura_session_id: None,
             aura_org_id: None,
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
             request_kind: ModelRequestKind::Chat,
             observers: Vec::new(),
             intent_classifier: None,
@@ -754,6 +762,8 @@ impl LoopState {
             .aura_agent_id(config.aura_agent_id.clone())
             .aura_session_id(config.aura_session_id.clone())
             .aura_org_id(config.aura_org_id.clone())
+            .prompt_cache_key(config.prompt_cache_key.clone())
+            .prompt_cache_retention(parse_cache_retention(config.prompt_cache_retention.as_deref()))
             .request_kind(request_kind)
             .try_build()
             .map_err(crate::AgentError::from)
@@ -804,6 +814,19 @@ fn latest_user_text(messages: &[Message]) -> Option<&str> {
         }
     }
     None
+}
+
+/// Parse the wire-level `prompt_cache_retention` string forwarded by
+/// `aura-os` into a typed [`aura_reasoner::PromptCacheRetention`]. Unknown
+/// or blank values fall through as `None` so the reasoner falls back to
+/// the upstream provider default.
+fn parse_cache_retention(value: Option<&str>) -> Option<aura_reasoner::PromptCacheRetention> {
+    let v = value?.trim();
+    match v {
+        "24h" | "h24" | "hours_24" | "Hours24" => Some(aura_reasoner::PromptCacheRetention::Hours24),
+        "in_memory" | "InMemory" | "memory" => Some(aura_reasoner::PromptCacheRetention::InMemory),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
