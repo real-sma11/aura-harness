@@ -33,19 +33,67 @@ struct AgentTurn {
     message_id: String,
 }
 
+/// Why the WebSocket loop should tear down. Discriminating these three
+/// matters because they imply very different operator actions: a
+/// `PeerClose` is normal client disconnect, a `TransportError` usually
+/// indicates a protocol-level failure (e.g. malformed WS frame, oversized
+/// frame past tungstenite's default cap, axum extractor error) that the
+/// operator needs to see in the log, and a `StreamEnded` means the
+/// inbound half hit EOF without a close frame (often a half-closed TCP
+/// from the peer).
+#[derive(Debug)]
+enum CloseReason {
+    PeerClose,
+    TransportError(String),
+    StreamEnded,
+}
+
 /// Classification of a raw WebSocket frame.
 enum WsAction {
     Message(String),
-    Close,
+    Close(CloseReason),
     Continue,
 }
 
 /// Classify a raw WebSocket receive result.
+///
+/// Splits the three "we're done" cases (clean peer close, transport
+/// error, EOF) into distinct `CloseReason` variants so the loop can log
+/// each at the right level and emit a structured `OutboundMessage::Error`
+/// on transport failure. Folding all three into one variant (the prior
+/// shape of this function) caused a class of bugs where an oversized
+/// `SessionInit` exceeding a per-message cap produced a silent ~3ms
+/// open-then-close with no error on the wire.
 fn classify_ws_frame(msg_result: Option<Result<WsMessage, axum::Error>>) -> WsAction {
     match msg_result {
         Some(Ok(WsMessage::Text(text))) => WsAction::Message(text),
-        Some(Ok(WsMessage::Close(_)) | Err(_)) | None => WsAction::Close,
+        Some(Ok(WsMessage::Close(_))) => WsAction::Close(CloseReason::PeerClose),
+        Some(Err(err)) => WsAction::Close(CloseReason::TransportError(err.to_string())),
+        None => WsAction::Close(CloseReason::StreamEnded),
         Some(Ok(_)) => WsAction::Continue,
+    }
+}
+
+/// Emit a single appropriately-levelled log line describing why the WS
+/// loop is tearing down. `phase` is a short tag like "idle",
+/// "active_agent_turn", or "active_generation_turn" so the operator can
+/// see at a glance what the connection was doing when it died.
+fn log_ws_close_reason(session_id: &str, reason: &CloseReason, phase: &str) {
+    match reason {
+        CloseReason::PeerClose => {
+            debug!(%session_id, phase, "client sent close frame");
+        }
+        CloseReason::StreamEnded => {
+            debug!(%session_id, phase, "websocket inbound stream ended");
+        }
+        CloseReason::TransportError(err) => {
+            warn!(
+                %session_id,
+                phase,
+                error = %err,
+                "websocket transport error, tearing down connection"
+            );
+        }
     }
 }
 
@@ -138,8 +186,16 @@ async fn run_active_turn_select(
                             handle_msg_during_turn(&raw, &agent.cancel_token, session, outbound_tx);
                             TurnAction::Continue
                         }
-                        WsAction::Close => {
-                            debug!(session_id = %session.session_id, "Client closed during active turn");
+                        WsAction::Close(reason) => {
+                            log_ws_close_reason(&session.session_id, &reason, "active_agent_turn");
+                            if let CloseReason::TransportError(err) = &reason {
+                                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
+                                    code: "ws_transport_error".into(),
+                                    message: format!("WebSocket transport error during agent turn: {err}"),
+                                    recoverable: false,
+                                    support_id: None,
+                                }));
+                            }
                             agent.cancel_token.cancel();
                             TurnAction::Close
                         }
@@ -169,8 +225,16 @@ async fn run_active_turn_select(
                             handle_msg_during_turn(&raw, &gen.cancel_token, session, outbound_tx);
                             TurnAction::Continue
                         }
-                        WsAction::Close => {
-                            info!(session_id = %session.session_id, "Client closed during generation");
+                        WsAction::Close(reason) => {
+                            log_ws_close_reason(&session.session_id, &reason, "active_generation_turn");
+                            if let CloseReason::TransportError(err) = &reason {
+                                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
+                                    code: "ws_transport_error".into(),
+                                    message: format!("WebSocket transport error during generation: {err}"),
+                                    recoverable: false,
+                                    support_id: None,
+                                }));
+                            }
                             gen.cancel_token.cancel();
                             TurnAction::Close
                         }
@@ -256,8 +320,16 @@ async fn run_idle_select(
 ) -> IdleAction {
     match classify_ws_frame(ws_rx.next().await) {
         WsAction::Message(raw) => dispatch_idle_message(&raw, session, outbound_tx, ctx).await,
-        WsAction::Close => {
-            debug!(session_id = %session.session_id, "Client sent close frame");
+        WsAction::Close(reason) => {
+            log_ws_close_reason(&session.session_id, &reason, "idle");
+            if let CloseReason::TransportError(err) = &reason {
+                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
+                    code: "ws_transport_error".into(),
+                    message: format!("WebSocket transport error during idle: {err}"),
+                    recoverable: false,
+                    support_id: None,
+                }));
+            }
             IdleAction::Close
         }
         WsAction::Continue => IdleAction::Continue,

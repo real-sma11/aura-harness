@@ -419,9 +419,7 @@ async fn terminal_ws_handler(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    ws.max_frame_size(ws::WS_MAX_FRAME_BYTES)
-        .max_message_size(ws::WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |socket| async move {
             // `permit` is moved into the per-socket task so the slot
             // is only released when the socket task actually exits.
             terminal::handle_terminal_ws(socket).await;

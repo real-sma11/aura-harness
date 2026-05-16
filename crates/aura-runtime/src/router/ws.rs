@@ -2,16 +2,6 @@ use super::*;
 use axum::response::Response;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Maximum size of a single WebSocket frame. Hardens against memory
-/// amplification from oversized binary frames. 64 KiB matches typical
-/// browser defaults. (Wave 5 / T1.3.)
-pub(super) const WS_MAX_FRAME_BYTES: usize = 64 * 1024;
-
-/// Maximum size of a reassembled WebSocket message (all frames combined).
-/// Caps pathological large-message attacks while staying well above the
-/// largest legitimate session payload we expect. (Wave 5 / T1.3.)
-pub(super) const WS_MAX_MESSAGE_BYTES: usize = 256 * 1024;
-
 /// Maximum number of concurrent WebSocket connections this node will
 /// serve at once, across `/ws/terminal`, `/stream`, and
 /// `/stream/automaton/:id`. Each live socket holds a tokio task plus
@@ -76,9 +66,7 @@ pub(super) async fn ws_upgrade_handler(
         router_url: state.router_url.clone(),
         aura_os_server_url: state.config.aura_os_server_url.clone(),
     };
-    ws.max_frame_size(WS_MAX_FRAME_BYTES)
-        .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |socket| async move {
             // Hold the permit for the lifetime of the socket task so
             // the slot only frees up when the client actually leaves.
             handle_ws_connection(socket, ctx).await;
@@ -126,9 +114,7 @@ pub(super) async fn automaton_ws_handler(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    ws.max_frame_size(WS_MAX_FRAME_BYTES)
-        .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
+    ws.on_upgrade(move |socket| async move {
             handle_automaton_ws(socket, automaton_id, state.automaton_bridge).await;
             drop(permit);
         })
