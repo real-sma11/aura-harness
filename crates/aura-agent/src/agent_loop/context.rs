@@ -103,18 +103,73 @@ fn recompute_breakdown(
     };
 }
 
+/// Tiered selector keyed off raw message-character bytes, complementing
+/// [`compaction::select_tier`] which only fires once the request occupies
+/// a meaningful fraction of the model's `max_ctx`.
+///
+/// The upstream model proxy enforces an `EmergencyCapRequired` envelope
+/// far below the model context window, so we trim history before the
+/// proxy blocks us — independent of how big the model's window happens
+/// to be.
+///
+/// Tunables intentionally co-located with the existing % utilization
+/// thresholds so they are easy to find and adjust together.
+const ABSOLUTE_BYTE_LIGHT_AT: usize = 64 * 1024;
+const ABSOLUTE_BYTE_AGGRESSIVE_AT: usize = 96 * 1024;
+const ABSOLUTE_BYTE_MICRO_AT: usize = 128 * 1024;
+
+fn absolute_byte_tier(messages_chars: usize) -> Option<compaction::CompactionConfig> {
+    if messages_chars >= ABSOLUTE_BYTE_MICRO_AT {
+        Some(compaction::CompactionConfig::micro())
+    } else if messages_chars >= ABSOLUTE_BYTE_AGGRESSIVE_AT {
+        Some(compaction::CompactionConfig::aggressive())
+    } else if messages_chars >= ABSOLUTE_BYTE_LIGHT_AT {
+        Some(compaction::CompactionConfig::light())
+    } else {
+        None
+    }
+}
+
+/// Pick whichever tier trims more aggressively (smaller
+/// `tool_result_max_chars`). On ties the first argument wins so the
+/// caller can express precedence (we pass the utilization-based pick
+/// first, so utilization gets credit when neither arm is stricter).
+fn pick_stricter_tier(
+    a: Option<compaction::CompactionConfig>,
+    b: Option<compaction::CompactionConfig>,
+) -> Option<compaction::CompactionConfig> {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            if y.tool_result_max_chars < x.tool_result_max_chars {
+                Some(y)
+            } else {
+                Some(x)
+            }
+        }
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
 /// Sanitize messages and apply compaction if context utilization is high.
+///
+/// Returns the compaction tier that was applied, or `None` when neither
+/// the % utilization arm nor the absolute-byte arm asked for trimming.
+/// The return value is primarily a testability hook so callers can pin
+/// "which tier won" without inspecting log spans; production call sites
+/// can ignore it.
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn compact_if_needed(
     config: &AgentLoopConfig,
     state: &mut LoopState,
     tools: &[ToolDefinition],
-) {
+) -> Option<compaction::CompactionConfig> {
     sanitize::validate_and_repair(&mut state.messages);
 
     let Some(max_ctx) = config.max_context_tokens else {
         recompute_breakdown(config, state, tools);
-        return;
+        return None;
     };
 
     let estimated_tokens = current_context_tokens(state);
@@ -122,8 +177,34 @@ pub(super) fn compact_if_needed(
     let pressure_tokens = compaction_pressure_tokens(config, estimated_tokens, max_ctx);
     let utilization = pressure_tokens as f64 / max_ctx as f64;
 
-    if let Some(tier) = compaction::select_tier(utilization) {
+    let utilization_tier = compaction::select_tier(utilization);
+    let messages_chars = compaction::estimate_message_chars(&state.messages);
+    let absolute_tier = absolute_byte_tier(messages_chars);
+    let chosen = pick_stricter_tier(utilization_tier, absolute_tier);
+
+    if let Some(tier) = chosen {
         debug!(utilization, "Compacting context");
+
+        // Emit a structured info-level log when the absolute-byte arm
+        // is what triggered (or strictly tightened) compaction. This
+        // is the proxy-envelope guard — visible in
+        // `infra/evals/local-stack/.runtime/logs` so we can see it
+        // fire below the % utilization thresholds.
+        let absolute_won = match (utilization_tier, absolute_tier) {
+            (None, Some(_)) => true,
+            (Some(u), Some(a)) => a.tool_result_max_chars < u.tool_result_max_chars,
+            _ => false,
+        };
+        if absolute_won {
+            tracing::info!(
+                messages_chars,
+                tool_result_max_chars = tier.tool_result_max_chars,
+                text_max_chars = tier.text_max_chars,
+                preserve_recent = tier.preserve_recent,
+                "compaction triggered by absolute_bytes (proxy-envelope guard)",
+            );
+        }
+
         compaction::compact_older_messages(&mut state.messages, &tier);
         sanitize::validate_and_repair(&mut state.messages);
         let compacted_tokens = heuristic_context_tokens(&state.messages);
@@ -132,6 +213,7 @@ pub(super) fn compact_if_needed(
     }
 
     recompute_breakdown(config, state, tools);
+    chosen
 }
 
 /// Apply a specific compaction tier after a provider rejects the request for
@@ -256,11 +338,13 @@ pub(super) fn should_stop_for_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_for_overflow, compact_if_needed, compaction_pressure_tokens,
-        heuristic_context_tokens, reserved_output_tokens,
+        absolute_byte_tier, compact_for_overflow, compact_if_needed, compaction_pressure_tokens,
+        heuristic_context_tokens, pick_stricter_tier, reserved_output_tokens,
+        ABSOLUTE_BYTE_AGGRESSIVE_AT, ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT,
     };
     use crate::agent_loop::AgentLoopConfig;
     use crate::agent_loop::LoopState;
+    use crate::compaction::{estimate_message_chars, CompactionConfig};
     use aura_reasoner::{Message, ToolDefinition};
 
     fn dummy_tool(name: &str, description: &str) -> ToolDefinition {
@@ -405,5 +489,199 @@ mod tests {
         assert_eq!(b.skills_tokens, 0);
         assert_eq!(b.subagents_tokens, 0);
         assert_eq!(b.mcp_tokens, 0);
+    }
+
+    /// Build an alternating user/assistant transcript of `len` messages.
+    /// The first message is the cache anchor; the next `middle_count`
+    /// messages each carry `middle_chars` of text (and so are candidates
+    /// for older-message compaction); the remaining tail are short
+    /// "preserve" messages. Roles strictly alternate starting with
+    /// `user` so `sanitize::validate_and_repair` doesn't merge or
+    /// reorder anything when `compact_if_needed` calls it.
+    fn build_transcript(len: usize, middle_count: usize, middle_chars: usize) -> Vec<Message> {
+        let mut messages = Vec::with_capacity(len);
+        messages.push(Message::user("intro"));
+        for i in 0..(len - 1) {
+            let role_is_assistant = i % 2 == 0;
+            let body = if i < middle_count {
+                let ch = if role_is_assistant { 'A' } else { 'B' };
+                ch.to_string().repeat(middle_chars)
+            } else {
+                "tail".to_string()
+            };
+            if role_is_assistant {
+                messages.push(Message::assistant(body));
+            } else {
+                messages.push(Message::user(body));
+            }
+        }
+        messages
+    }
+
+    /// 80 KB of message text with a 200K-token context window resolves
+    /// to ~10% utilization — below every threshold in `select_tier`,
+    /// so the old % utilization-only trigger would have done nothing.
+    /// The absolute-byte arm must still fire and pick the light tier.
+    #[test]
+    fn absolute_byte_trigger_fires_below_utilization_threshold() {
+        let config = AgentLoopConfig {
+            max_context_tokens: Some(200_000),
+            // Drop max_tokens so `reserved_output_tokens` doesn't push
+            // utilization above the lowest `select_tier` threshold
+            // (0.15) and force a tier from the % arm.
+            max_tokens: 0,
+            ..AgentLoopConfig::default()
+        };
+        // 12 messages: index 0 anchor, indices 1..=3 compactable, last 8 preserved.
+        // 3 × 27_000 chars = 81K compactable + a few small tails ≈ 81 KB:
+        // above ABSOLUTE_BYTE_LIGHT_AT (64 KB) and below ABSOLUTE_BYTE_AGGRESSIVE_AT.
+        let messages = build_transcript(12, 3, 27_000);
+        let mut state = LoopState::new(&config, messages);
+
+        let before_chars = estimate_message_chars(&state.messages);
+        assert!(
+            before_chars >= ABSOLUTE_BYTE_LIGHT_AT,
+            "fixture should exceed light threshold; got {before_chars} bytes"
+        );
+
+        let chosen = compact_if_needed(&config, &mut state, &[]);
+
+        let light = CompactionConfig::light();
+        let tier = chosen.expect("absolute-byte arm should have triggered light tier");
+        assert_eq!(tier.tool_result_max_chars, light.tool_result_max_chars);
+        assert_eq!(tier.text_max_chars, light.text_max_chars);
+        assert_eq!(tier.preserve_recent, light.preserve_recent);
+
+        let after_chars = estimate_message_chars(&state.messages);
+        assert!(
+            after_chars < before_chars,
+            "compaction should have shrunk messages: {before_chars} -> {after_chars}"
+        );
+    }
+
+    /// When % utilization picks `moderate` but the absolute-byte arm
+    /// picks `aggressive`, the stricter pick (aggressive) must win.
+    #[test]
+    fn absolute_byte_trigger_picks_stricter_tier() {
+        // Tight window so 100 KB of chars (~25K tokens) lands in the
+        // moderate band (0.60..0.70) for `select_tier`, while still
+        // staying in [96 KB, 128 KB) for `absolute_byte_tier` →
+        // `aggressive`.
+        let config = AgentLoopConfig {
+            max_context_tokens: Some(40_000),
+            max_tokens: 0,
+            ..AgentLoopConfig::default()
+        };
+        // 12 messages: anchor + 7 large compactable + 4 preserved
+        // (aggressive's preserve_recent = 4). 7 × 14_500 ≈ 101.5 KB,
+        // which is ≥ 96 KB and < 128 KB.
+        let messages = build_transcript(12, 7, 14_500);
+        let mut state = LoopState::new(&config, messages);
+
+        let before_chars = estimate_message_chars(&state.messages);
+        assert!(
+            before_chars >= ABSOLUTE_BYTE_AGGRESSIVE_AT && before_chars < ABSOLUTE_BYTE_MICRO_AT,
+            "fixture should sit in the absolute-byte aggressive band; got {before_chars}"
+        );
+
+        let chosen = compact_if_needed(&config, &mut state, &[])
+            .expect("both arms should have triggered a tier");
+
+        let aggressive = CompactionConfig::aggressive();
+        assert_eq!(
+            chosen.tool_result_max_chars, aggressive.tool_result_max_chars,
+            "stricter (aggressive) tier should win over moderate"
+        );
+        assert_eq!(chosen.text_max_chars, aggressive.text_max_chars);
+        assert_eq!(chosen.preserve_recent, aggressive.preserve_recent);
+    }
+
+    /// Below the light threshold and below the lowest % utilization
+    /// threshold, `compact_if_needed` must leave the transcript alone.
+    #[test]
+    fn absolute_byte_trigger_no_op_below_light_threshold() {
+        let config = AgentLoopConfig {
+            max_context_tokens: Some(200_000),
+            max_tokens: 0,
+            ..AgentLoopConfig::default()
+        };
+        // ~30 KB total — comfortably under ABSOLUTE_BYTE_LIGHT_AT (64 KB)
+        // and well under the 15% utilization floor for select_tier.
+        let messages = build_transcript(12, 3, 8_000);
+        let mut state = LoopState::new(&config, messages);
+
+        let before_chars = estimate_message_chars(&state.messages);
+        assert!(
+            before_chars < ABSOLUTE_BYTE_LIGHT_AT,
+            "fixture must stay under the light threshold; got {before_chars}"
+        );
+
+        let chosen = compact_if_needed(&config, &mut state, &[]);
+        assert!(
+            chosen.is_none(),
+            "neither arm should trigger; got {chosen:?}"
+        );
+
+        let after_chars = estimate_message_chars(&state.messages);
+        assert_eq!(
+            after_chars, before_chars,
+            "no compaction should have changed message bytes"
+        );
+    }
+
+    #[test]
+    fn absolute_byte_tier_thresholds_pick_the_right_config() {
+        assert!(absolute_byte_tier(0).is_none());
+        assert!(absolute_byte_tier(ABSOLUTE_BYTE_LIGHT_AT - 1).is_none());
+        assert_eq!(
+            absolute_byte_tier(ABSOLUTE_BYTE_LIGHT_AT)
+                .unwrap()
+                .tool_result_max_chars,
+            CompactionConfig::light().tool_result_max_chars
+        );
+        assert_eq!(
+            absolute_byte_tier(ABSOLUTE_BYTE_AGGRESSIVE_AT)
+                .unwrap()
+                .tool_result_max_chars,
+            CompactionConfig::aggressive().tool_result_max_chars
+        );
+        assert_eq!(
+            absolute_byte_tier(ABSOLUTE_BYTE_MICRO_AT)
+                .unwrap()
+                .tool_result_max_chars,
+            CompactionConfig::micro().tool_result_max_chars
+        );
+    }
+
+    #[test]
+    fn pick_stricter_tier_prefers_smaller_tool_result_cap() {
+        let light = CompactionConfig::light();
+        let aggressive = CompactionConfig::aggressive();
+
+        assert_eq!(
+            pick_stricter_tier(Some(light), Some(aggressive))
+                .unwrap()
+                .tool_result_max_chars,
+            aggressive.tool_result_max_chars
+        );
+        assert_eq!(
+            pick_stricter_tier(Some(aggressive), Some(light))
+                .unwrap()
+                .tool_result_max_chars,
+            aggressive.tool_result_max_chars
+        );
+        assert_eq!(
+            pick_stricter_tier(Some(light), None)
+                .unwrap()
+                .tool_result_max_chars,
+            light.tool_result_max_chars
+        );
+        assert_eq!(
+            pick_stricter_tier(None, Some(aggressive))
+                .unwrap()
+                .tool_result_max_chars,
+            aggressive.tool_result_max_chars
+        );
+        assert!(pick_stricter_tier(None, None).is_none());
     }
 }
