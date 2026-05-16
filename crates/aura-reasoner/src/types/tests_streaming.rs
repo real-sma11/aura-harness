@@ -505,7 +505,11 @@ fn test_stream_accumulator_into_response_propagates_error_even_with_partial_cont
 fn test_stream_accumulator_into_response_error_without_message_start() {
     // If the SSE error arrives before `message_start` we still fail
     // cleanly and just omit the context fragment (no trailing empty
-    // parentheses in the rendered message).
+    // parentheses in the rendered reason). With no in-flight tool,
+    // the variant is `ReasonerError::Transient` (status 502) -- so
+    // the surface error message is wrapped with the standard API-error
+    // prefix from the `Display` impl. The inner `reason` must still
+    // omit the empty parens.
     let mut acc = StreamAccumulator::new();
     acc.process(&StreamEvent::Error {
         message: "connection reset by peer".to_string(),
@@ -513,11 +517,18 @@ fn test_stream_accumulator_into_response_error_without_message_start() {
     });
 
     let err = acc.into_response(0, 100).unwrap_err();
-    let msg = err.to_string();
-    assert_eq!(
-        msg, "stream terminated with error: connection reset by peer",
-        "no empty context parentheses when metadata unavailable"
-    );
+    match err {
+        crate::ReasonerError::Transient {
+            status, message, ..
+        } => {
+            assert_eq!(status, 502);
+            assert_eq!(
+                message, "stream terminated with error: connection reset by peer",
+                "no empty context parentheses when metadata unavailable"
+            );
+        }
+        other => panic!("expected Transient, got: {other:?}"),
+    }
 }
 
 #[test]
@@ -901,11 +912,19 @@ fn stream_aborted_with_partial_preserves_tool_use() {
 }
 
 #[test]
-fn stream_aborted_without_tool_use_returns_none() {
+fn stream_aborted_without_tool_use_returns_transient() {
     // When the SSE error arrives before any `tool_use` content-block
-    // started, the partial_tool_use must be None -- we still want the
-    // new variant (so the retry loop kicks in) but there is nothing
-    // meaningful to preserve.
+    // started, the no-partial branch must surface as a plain
+    // `ReasonerError::Transient` (status 502) so the agent loop's
+    // `stream_error_is_retryable` classifier routes the failure
+    // through `complete_and_emit_as_deltas` (which has tracing + a
+    // proper non-streaming fallback) instead of the silent
+    // per-tool-call streaming retry loop in
+    // `retry_streaming_for_partial_tool_use`. See the
+    // `fix-silent-stream-retry-storm` plan for why this routing
+    // matters: without it, a single Anthropic 5xx blip with no tool
+    // in flight wedges chat in an invisible 28-second silent-retry
+    // storm.
     let mut acc = StreamAccumulator::new();
     acc.process(&StreamEvent::MessageStart {
         message_id: "msg_abort2".to_string(),
@@ -924,19 +943,22 @@ fn stream_aborted_without_tool_use_returns_none() {
         .expect_err("aborted stream must be an error");
 
     match err {
-        crate::ReasonerError::StreamAbortedWithPartial {
-            reason,
-            partial_tool_use,
+        crate::ReasonerError::Transient {
+            status,
+            message,
+            retry_after,
         } => {
+            assert_eq!(status, 502, "expected synthetic 502 for stream-error abort");
             assert!(
-                reason.contains("api_error"),
-                "reason should carry upstream message, got: {reason}"
+                message.contains("api_error"),
+                "message should carry upstream error type, got: {message}"
             );
             assert!(
-                partial_tool_use.is_none(),
-                "no in-flight tool use; expected None"
+                message.contains("stream terminated with error"),
+                "message should carry the canonical prefix, got: {message}"
             );
+            assert!(retry_after.is_none());
         }
-        other => panic!("expected StreamAbortedWithPartial, got: {other:?}"),
+        other => panic!("expected Transient, got: {other:?}"),
     }
 }

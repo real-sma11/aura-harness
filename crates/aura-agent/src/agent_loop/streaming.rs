@@ -13,7 +13,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{error, warn};
 
 use crate::events::{AgentLoopEvent, DebugEvent};
 
@@ -295,7 +295,12 @@ impl AgentLoop {
         match drain_remaining_stream(stream, event_tx, cancellation_token).await {
             DrainOutcome::Cancelled => Err(LlmCallError::Fatal("Cancelled".to_string())),
             DrainOutcome::Transport(e) => {
-                debug!("Stream error, falling back to non-streaming: {e}");
+                warn!(
+                    error = %e,
+                    provider = %provider_name,
+                    model = %model_name,
+                    "Stream transport error; falling back to non-streaming complete()"
+                );
                 emit(
                     event_tx,
                     AgentLoopEvent::StreamReset {
@@ -523,6 +528,22 @@ impl super::AgentLoop {
             let delay = exp_backoff_with_jitter(attempt - 1, backoff_initial_ms, backoff_cap_ms);
             let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
 
+            // Emit a tracing record per retry so operators see the
+            // storm in `aura-node` logs. Without this, a flaky
+            // upstream looks like N identical request bodies with no
+            // context between them (see `fix-silent-stream-retry-storm`
+            // plan: the original UX bug was a ~28 second invisible
+            // wait while 7 paid streaming requests fired).
+            warn!(
+                attempt,
+                max_attempts = max_retries,
+                delay_ms,
+                tool_use_id = %tool_use_id,
+                tool_name = %tool_name,
+                reason = %last_reason,
+                "Per-tool-call streaming retry scheduled after mid-stream abort"
+            );
+
             emit(
                 event_tx,
                 AgentLoopEvent::ToolCallRetrying {
@@ -570,6 +591,14 @@ impl super::AgentLoop {
                 }
             }
         }
+
+        error!(
+            attempts = max_retries,
+            tool_use_id = %tool_use_id,
+            tool_name = %tool_name,
+            reason = %last_reason,
+            "Per-tool-call streaming retry budget exhausted; giving up"
+        );
 
         emit(
             event_tx,

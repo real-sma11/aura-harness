@@ -330,13 +330,24 @@ impl StreamAccumulator {
             // the stream had finished cleanly -- a correctness bug that
             // could trigger malformed tool calls on the next iteration.
             //
-            // NOTE: the caller (`complete_with_streaming`) relies on the
-            // `StreamAbortedWithPartial` variant to drive a per-tool-call
-            // retry that re-issues a fresh streaming request. Because we
-            // now preserve the in-flight tool_use separately via
-            // `partial_tool_use`, it is NOT pushed into `self.tool_uses`
-            // on this path (unlike the clean-finish path above) -- the
-            // caller is responsible for discarding / replaying it.
+            // NOTE: the caller (`complete_with_streaming`) only relies
+            // on the `StreamAbortedWithPartial` variant for the narrow
+            // case where a `tool_use` was in flight when the stream
+            // died, so it can drive a per-tool-call retry that
+            // re-issues a fresh streaming request and preserves the
+            // partial input_json (preventing a dropped Write/Edit).
+            // When there is NO in-flight tool, that retry loop adds
+            // nothing — it just re-fires the identical request with
+            // zero tracing output. We instead surface a generic
+            // `Transient` so the existing
+            // `stream_error_is_retryable` classifier routes the call
+            // through `complete_and_emit_as_deltas`, which emits a
+            // `StreamReset` to the UI and falls back to non-streaming
+            // `provider.complete()` (whose retry loop has proper
+            // tracing + body-cap shrink + provider fallback). Without
+            // this branch a single Anthropic 5xx blip wedges chat in
+            // an invisible 28-second silent-retry storm — see the
+            // `fix-silent-stream-retry-storm` plan.
             //
             // Include model + message_id when known so the operator-visible
             // failure string is actionable (operators can correlate
@@ -376,10 +387,17 @@ impl StreamAccumulator {
                 partial_json: pending.input_json,
             });
 
-            return Err(ReasonerError::StreamAbortedWithPartial {
-                reason,
-                partial_tool_use,
-            });
+            return match partial_tool_use {
+                Some(partial) => Err(ReasonerError::StreamAbortedWithPartial {
+                    reason,
+                    partial_tool_use: Some(partial),
+                }),
+                None => Err(ReasonerError::Transient {
+                    status: 502,
+                    message: reason,
+                    retry_after: None,
+                }),
+            };
         }
 
         let mut content_blocks = Vec::new();
