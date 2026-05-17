@@ -270,6 +270,84 @@ fn apply_init_falls_back_to_agent_id_for_skill_lookup() {
     assert_eq!(session.skill_agent_id.as_deref(), Some("legacy-agent-id"));
 }
 
+/// Phase 2 of the cross-repo `parallel-session-chats` plan: two
+/// `SessionInit`s that differ only in the trailing `session` segment
+/// of the partition string `"{template}::{instance}::{session}"` must
+/// yield **distinct** `Session.agent_id`s — so each session gets its
+/// own `aura-store` record-log keyspace, its own `Kernel::next_seq`
+/// chain, and its own per-(template, instance, session) turn lock.
+/// Memory, on the other hand, is keyed by `memory_agent_id()` which
+/// prefers the explicit template UUID via `aura_agent_id`, so both
+/// sessions still resolve to the **same** template id for memory
+/// reads/writes — that's the desired behavior (memory shared at the
+/// template level, record log partitioned per logical session).
+///
+/// `apply_init` parses `agent_id` with `AgentId::from_hex(...)` first
+/// and falls back to `blake3(agent_id_string)` when the hex parse
+/// fails. Three-segment partition strings always contain `::` and
+/// therefore always go down the blake3 path, where two distinct
+/// strings hash to two distinct 32-byte digests. This test pins that
+/// behavior; if `apply_init` ever started ignoring the session
+/// segment (e.g. by re-deriving the agent id from `template_agent_id`
+/// only) we'd lose per-session record-log isolation and the
+/// concurrent-turns guarantee the plan rests on.
+///
+/// TODO(parallel-sessions): integration-level WS test once a
+/// stub-model test scaffold is available — the only existing file
+/// under `crates/aura-runtime/tests/` is a static-source regression
+/// guard, not a runtime WS harness, so this unit-level assertion is
+/// the load-bearing test for the harness side of the plan.
+#[test]
+fn apply_init_partitions_session_id_per_session_segment() {
+    use aura_core::AgentId;
+
+    let template_uuid = "f74bc868-0a34-4195-9718-bf5ce7f67a55";
+    let instance = "abcdef01-2345-6789-abcd-ef0123456789";
+
+    let mut session_a = test_session(None);
+    let mut init_a = blank_session_init();
+    init_a.agent_id = Some(format!("{template_uuid}::{instance}::sess-A"));
+    init_a.template_agent_id = Some(template_uuid.to_string());
+    init_a.aura_agent_id = Some(template_uuid.to_string());
+    session_a.apply_init(init_a).unwrap();
+
+    let mut session_b = test_session(None);
+    let mut init_b = blank_session_init();
+    init_b.agent_id = Some(format!("{template_uuid}::{instance}::sess-B"));
+    init_b.template_agent_id = Some(template_uuid.to_string());
+    init_b.aura_agent_id = Some(template_uuid.to_string());
+    session_b.apply_init(init_b).unwrap();
+
+    assert_ne!(
+        session_a.agent_id, session_b.agent_id,
+        "sessions differing only in the trailing session segment must \
+         yield distinct Session.agent_ids so they get distinct record \
+         logs and turn locks",
+    );
+
+    let template_agent_id = AgentId::from_uuid(
+        uuid::Uuid::parse_str(template_uuid).expect("static template uuid is valid"),
+    );
+    assert_eq!(
+        session_a.memory_agent_id(),
+        template_agent_id,
+        "memory_agent_id must resolve to the template uuid so memory \
+         is shared across sessions of the same template+instance",
+    );
+    assert_eq!(
+        session_b.memory_agent_id(),
+        template_agent_id,
+        "memory_agent_id must resolve to the template uuid so memory \
+         is shared across sessions of the same template+instance",
+    );
+    assert_eq!(
+        session_a.memory_agent_id(),
+        session_b.memory_agent_id(),
+        "both sessions must share the same memory keyspace even \
+         though their record-log AgentIds diverge",
+    );
+}
+
 #[test]
 fn apply_init_applies_explicit_agent_permissions() {
     use aura_protocol::{AgentPermissionsWire, AgentScopeWire, CapabilityWire};
