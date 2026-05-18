@@ -182,6 +182,7 @@ impl Session {
             self.system_prompt = prompt;
         }
         if let Some(model) = init.model {
+            self.context_window_tokens = context_window_for_model(&model);
             self.model = model;
         }
         if let Some(max_tokens) = init.max_tokens {
@@ -586,4 +587,124 @@ fn lexical_normalize(path: &std::path::Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Map a model identifier to its maximum context window in tokens.
+///
+/// Mirrors the authoritative values in aura-router's
+/// `providers::max_context_tokens` so the harness uses the full window
+/// each model supports instead of a blanket 200K cap.
+///
+/// Model names arrive as-is from `SessionInit.model`. The interface
+/// normalises to aura-prefixed aliases (e.g. `aura-gpt-5-5`) which use
+/// hyphens, while direct upstream names use dots (`gpt-5.5`). Both
+/// forms must resolve correctly, so every OpenAI arm checks both
+/// conventions.
+pub(crate) fn context_window_for_model(model: &str) -> u64 {
+    match model {
+        // Anthropic — substring handles bare (claude-opus-4-6) and
+        // aura-prefixed (aura-claude-opus-4-7) names.
+        m if m.contains("opus-4") => 1_000_000,
+        m if m.contains("sonnet-4") => 1_000_000,
+        m if m.contains("haiku-4") => 200_000,
+        m if m.starts_with("claude") => 200_000,
+        // OpenAI GPT 5.x — aliases use hyphens (aura-gpt-5-5), direct
+        // names use dots (gpt-5.5). Mini/nano checked before the base
+        // variant so "gpt-5-4" doesn't swallow them.
+        m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_000_000,
+        m if m.contains("gpt-5.4-mini") || m.contains("gpt-5-4-mini")
+            || m.contains("gpt-5.4-nano") || m.contains("gpt-5-4-nano") => 400_000,
+        m if m.contains("gpt-5.4") || m.contains("gpt-5-4") => 1_050_000,
+        // OpenAI GPT 4.x
+        m if m.contains("gpt-4.1") => 1_047_576,
+        m if m.contains("gpt-4o") || m.contains("gpt-4-turbo") => 128_000,
+        // OpenAI reasoning — substring handles aura- prefix (aura-o3).
+        m if m.ends_with("-o1") || m.starts_with("o1") => 200_000,
+        m if m.contains("-o3") || m.starts_with("o3") => 200_000,
+        m if m.contains("-o4") || m.starts_with("o4") => 200_000,
+        // DeepSeek
+        m if m.contains("deepseek") => 1_000_000,
+        // Fireworks OSS
+        m if m.contains("kimi") => 262_144,
+        // Safe default
+        _ => 200_000,
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::context_window_for_model;
+
+    #[test]
+    fn anthropic_aura_aliases() {
+        assert_eq!(context_window_for_model("aura-claude-opus-4-7"), 1_000_000);
+        assert_eq!(context_window_for_model("aura-claude-opus-4-6"), 1_000_000);
+        assert_eq!(
+            context_window_for_model("aura-claude-sonnet-4-6"),
+            1_000_000
+        );
+        assert_eq!(
+            context_window_for_model("aura-claude-haiku-4-5"),
+            200_000
+        );
+    }
+
+    #[test]
+    fn anthropic_bare_names() {
+        assert_eq!(context_window_for_model("claude-opus-4-6"), 1_000_000);
+        assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
+        assert_eq!(context_window_for_model("claude-haiku-4-5"), 200_000);
+        // Older Claude generations fall to the generic claude catch-all.
+        assert_eq!(context_window_for_model("claude-3-5-sonnet"), 200_000);
+    }
+
+    #[test]
+    fn openai_gpt5_aura_aliases() {
+        assert_eq!(context_window_for_model("aura-gpt-5-5"), 1_000_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-4"), 1_050_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-4-mini"), 400_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-4-nano"), 400_000);
+    }
+
+    #[test]
+    fn openai_gpt5_direct_names() {
+        assert_eq!(context_window_for_model("gpt-5.5"), 1_000_000);
+        assert_eq!(context_window_for_model("gpt-5.4"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.4-mini"), 400_000);
+        assert_eq!(context_window_for_model("gpt-5.4-nano"), 400_000);
+    }
+
+    #[test]
+    fn openai_gpt4_and_reasoning() {
+        assert_eq!(context_window_for_model("aura-gpt-4.1"), 1_047_576);
+        assert_eq!(context_window_for_model("gpt-4.1"), 1_047_576);
+        assert_eq!(context_window_for_model("gpt-4o"), 128_000);
+        assert_eq!(context_window_for_model("gpt-4-turbo"), 128_000);
+        // Reasoning models — both bare and aura-prefixed.
+        assert_eq!(context_window_for_model("o3"), 200_000);
+        assert_eq!(context_window_for_model("aura-o3"), 200_000);
+        assert_eq!(context_window_for_model("o4-mini"), 200_000);
+        assert_eq!(context_window_for_model("aura-o4-mini"), 200_000);
+        assert_eq!(context_window_for_model("o1"), 200_000);
+    }
+
+    #[test]
+    fn deepseek_and_fireworks() {
+        assert_eq!(
+            context_window_for_model("aura-deepseek-v4-pro"),
+            1_000_000
+        );
+        assert_eq!(
+            context_window_for_model("aura-deepseek-v4-flash"),
+            1_000_000
+        );
+        assert_eq!(context_window_for_model("deepseek-v4-pro"), 1_000_000);
+        assert_eq!(context_window_for_model("aura-kimi-k2-5"), 262_144);
+        assert_eq!(context_window_for_model("aura-kimi-k2-6"), 262_144);
+    }
+
+    #[test]
+    fn unknown_model_gets_safe_default() {
+        assert_eq!(context_window_for_model("unknown-model-xyz"), 200_000);
+    }
 }
