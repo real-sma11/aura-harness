@@ -103,8 +103,8 @@ fn repeated_cached_reads_reduce_message_footprint_across_turns() {
         Vec::new(),
     );
 
-    let shaped_chars = crate::compaction::estimate_message_chars(&shaped_messages);
-    let unshaped_chars = crate::compaction::estimate_message_chars(&unshaped_messages);
+    let shaped_chars = aura_compaction::estimate_message_chars(&shaped_messages);
+    let unshaped_chars = aura_compaction::estimate_message_chars(&unshaped_messages);
     let saved_chars = unshaped_chars.saturating_sub(shaped_chars);
 
     assert!(shaped_chars < unshaped_chars);

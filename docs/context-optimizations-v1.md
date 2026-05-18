@@ -89,10 +89,22 @@ So downstream systems do not need to guess.
 
 ### 4. Safer compaction behavior
 
-We improved compaction in two ways:
+Compaction now lives in `aura-compaction`, which owns the pure policies and
+mutations for message history, storage payloads, write inputs, cached tool
+results, and tool surfaces. `aura-agent` decides when to invoke it and keeps the
+model call for summary escalation outside the pure crate.
+
+The implemented behavior is:
 
 - reserve output headroom before the prompt is too full
 - when overflow still happens, compact and retry instead of immediately failing
+- gate write-input redaction on pressure, then replace bulky fields with
+  structured `_redacted` metadata
+- surface attempts to execute redacted write/edit payloads as
+  `CompactionStructural` tool errors instead of writing placeholders to disk
+- compact persisted session tool blobs with the same storage-facing API
+- escalate to `SummaryInput` / `SummaryOutput` when local compaction is not
+  enough; `aura-agent` performs the model-backed summary handoff
 
 This is much closer to how strong production coding agents behave.
 
@@ -225,11 +237,12 @@ That is the foundation we need before smarter rollover, compaction, and cost con
 - Gives Aura OS better context fullness data.
 - Makes file-change reporting useful.
 - Makes overflow recovery safer.
+- Centralizes context and storage compaction in `aura-compaction`.
 - Gives us a direct benchmark path for harness validation.
 
 ## What Is Still V2
 
-- semantic compaction instead of mainly truncation-oriented compaction
+- broader semantic compaction beyond the current summary-escalation handoff
 - richer provider-specific token counting before request submission
 - more benchmark coverage across full Aura OS workflows
 - automatic session rollover driven by the richer context signal

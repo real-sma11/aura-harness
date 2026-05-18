@@ -588,11 +588,11 @@ impl AgentLoop {
     ) -> Result<aura_reasoner::ModelResponse, iteration::LlmCallError> {
         let recovery_steps = [
             (
-                crate::compaction::CompactionConfig::aggressive(),
+                aura_compaction::CompactionConfig::aggressive(),
                 "Context limit reached; compacting older context, trimming response budget, and retrying.",
             ),
             (
-                crate::compaction::CompactionConfig::micro(),
+                aura_compaction::CompactionConfig::micro(),
                 "Context is still too large; applying emergency compaction, trimming response budget again, and retrying.",
             ),
         ];

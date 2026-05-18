@@ -110,7 +110,7 @@ pub struct CompactionPolicy {
     pub preserve_recent_writes: usize,
     /// Pressure at which write-input redaction is allowed.
     pub redact_at: f64,
-    /// Reserved for Phase 4 summary escalation. Inert in Phase 2.
+    /// Pressure at which local compaction asks the caller for model-backed summary escalation.
     pub summary_at: f64,
     /// Disable write-input redaction while keeping other compaction behavior.
     pub disable_redact: bool,

@@ -16,6 +16,7 @@ What is solid right now:
 - richer cache-aware usage reporting is implemented end to end
 - Aura OS now consumes and persists the richer usage correctly
 - context occupancy, overflow recovery, and file-change reporting are improved
+- `aura-compaction` is the single owner for pure compaction behavior
 - clean same-system cache-on vs cache-off benchmarks now show real wins on the
   scenarios we trust most
 - the live Aura OS API benchmark lane is working again for full lifecycle
@@ -106,10 +107,22 @@ So Aura OS does not have to reconstruct or guess important session facts.
 
 ### 4. Safer compaction and overflow recovery
 
-We improved the loop in two ways:
+Compaction is centralized in `aura-compaction`: message-history tiers,
+pressure-gated write-input redaction, cached-result shaping, tool-surface
+compaction, and storage compaction all live in one pure crate. The agent loop
+passes context pressure into that crate and keeps model-backed summary
+escalation in `aura-agent`.
+
+The important runtime behavior is:
 
 - reserve output headroom before the context window is too full
 - when overflow still happens, compact and retry instead of failing immediately
+- replace bulky write/edit inputs with structured `_redacted` markers only once
+  pressure warrants it
+- reject accidental execution of redacted write/edit payloads as
+  `CompactionStructural`
+- request a summary escalation handoff when local compaction cannot hit the
+  target size
 
 This gives the harness a much stronger recovery path for long sessions.
 
@@ -227,6 +240,7 @@ We validate the local harness logic directly:
 - file-change tracking
 - overflow retry behavior
 - repeated cached-read shaping
+- structured redaction markers and storage compaction
 - workspace-root handling
 
 ### Layer 2: Fixture-backed harness evals
@@ -338,6 +352,7 @@ What is done:
 - provider and file-change reporting
 - safer compaction and overflow recovery
 - repeated cached-read shaping
+- unified `aura-compaction` ownership plus summary escalation handoff
 - repeatable benchmark and fixture validation paths
 
 What is still V2:

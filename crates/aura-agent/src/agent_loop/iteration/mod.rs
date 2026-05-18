@@ -8,7 +8,6 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::compaction;
 use crate::constants::{
     CHARS_PER_TOKEN, NARRATION_TOKEN_HARD_BUDGET, NARRATION_TOKEN_SOFT_BUDGET,
     WRITE_FILE_CHUNK_BYTES,
@@ -16,6 +15,7 @@ use crate::constants::{
 use crate::events::AgentLoopEvent;
 use crate::sanitize;
 use crate::types::AgentLoopResult;
+use aura_compaction as compaction;
 
 use super::streaming;
 use super::{AgentLoop, AgentLoopConfig, LoopState};

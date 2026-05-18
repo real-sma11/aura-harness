@@ -1,13 +1,13 @@
 //! Context management: compaction, checkpoints, and budget warnings.
 
 use aura_compaction::{
-    CompactionAction, CompactionInput, CompactionPolicy, SummaryInput, SummaryOutput,
+    self as compaction, CompactionAction, CompactionInput, CompactionPolicy, SummaryInput,
+    SummaryOutput,
 };
 use aura_reasoner::ToolDefinition;
 use tokio::sync::mpsc::Sender;
 
 use crate::budget;
-use crate::compaction;
 use crate::constants::CHARS_PER_TOKEN;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
@@ -308,10 +308,9 @@ mod tests {
     };
     use crate::agent_loop::AgentLoopConfig;
     use crate::agent_loop::LoopState;
-    use crate::compaction::{estimate_message_chars, CompactionConfig};
     use aura_compaction::{
-        absolute_byte_tier, pick_stricter_tier, ABSOLUTE_BYTE_AGGRESSIVE_AT,
-        ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT,
+        absolute_byte_tier, estimate_message_chars, pick_stricter_tier, CompactionConfig,
+        ABSOLUTE_BYTE_AGGRESSIVE_AT, ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT,
     };
     use aura_reasoner::{Message, ToolDefinition};
 
@@ -372,7 +371,7 @@ mod tests {
         assert!(compact_for_overflow(
             &config,
             &mut state,
-            crate::compaction::CompactionConfig::micro(),
+            aura_compaction::CompactionConfig::micro(),
             &[],
         ));
     }
@@ -386,7 +385,7 @@ mod tests {
         assert!(!compact_for_overflow(
             &config,
             &mut state,
-            crate::compaction::CompactionConfig::aggressive(),
+            aura_compaction::CompactionConfig::aggressive(),
             &[],
         ));
     }

@@ -178,8 +178,8 @@ fn agentic_prompt_includes_tool_call_discipline_section() {
         "two-turns-no-tool rule missing"
     );
     assert!(
-        prompt.contains("Never copy these placeholders verbatim into a new tool call"),
-        "elided write/edit placeholder rule missing"
+        prompt.contains("fields removed and replaced with `_redacted` metadata"),
+        "write/edit redaction metadata rule missing"
     );
 }
 
@@ -191,7 +191,6 @@ fn tool_call_discipline_constant_matches_golden_wording() {
     assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("alternation term"));
     assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("MUST be a single tool call"));
     assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("_redacted"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("<<<AURA_ELIDED_*::N_bytes>>>"));
 }
 
 #[test]

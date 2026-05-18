@@ -1,9 +1,9 @@
 //! Unified context compaction for the Aura agent loop.
 //!
-//! Phase 1 centralizes the existing message-history, storage, and tool-surface
-//! compaction routines without changing their behavior. Callers still own
-//! agent-loop state, sanitization, and intent/tool filtering; this crate owns
-//! the pure compaction policies and mutations.
+//! This crate is the single owner for pure message-history, storage, write-input,
+//! cached-tool-result, and tool-surface compaction. Callers still own agent-loop
+//! state, sanitization, intent/tool filtering, and any model calls needed for
+//! summary escalation.
 
 #![forbid(unsafe_code)]
 

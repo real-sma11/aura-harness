@@ -83,9 +83,10 @@ wire protocol has capability negotiation.
 | `aura-core` | Foundational domain types, IDs, hashing, time, shared subagent data shapes, and shared errors used across all crates. |
 | `aura-store` | Durable RocksDB-backed storage for agent records, metadata, and inbox queues. |
 | `aura-reasoner` | Model-provider abstraction for completion and streaming APIs. |
+| `aura-compaction` | Single owner for pure context and storage compaction: message-history tiers, pressure-gated write-input redaction, structured `_redacted` markers, cached-result shaping, tool-surface compaction, and summary handoff data. |
 | `aura-kernel` | Deterministic execution kernel with router, policies, sandboxing, and scheduler primitives. |
 | `aura-tools` | Tool catalog, built-in/external tool execution, sandboxed filesystem and command tools, plus the fail-closed `task` dispatch surface. |
-| `aura-agent` | Main agent orchestration loop: model calls, tool execution, streaming, budgets, and compaction. |
+| `aura-agent` | Main agent orchestration loop: model calls, tool execution, streaming, budgets, and compaction orchestration. It calls `aura-compaction` for pure mutations and performs the model-backed summary escalation call. |
 | `aura-protocol` | Wire-level request/response/event types for transport boundaries. |
 | `aura-auth` | Auth token extraction/validation utilities for node and agent startup. |
 | `aura-terminal` | Terminal UI layer: Ratatui-based TUI with themes, components, input, and rendering. |
@@ -141,10 +142,14 @@ additional cross-cutting dependencies.
  │          └────┬─────┘       └──────┬───────┘     │
  └───────────────┼────────────────────┼─────────────┘
                  │                    │
- L2  Kernel      ▼                    ▼
+ L2  Kernel / Context Utilities      ▼
  ┌──────────────────────────────────────────────────┐
- │                  aura-kernel                     │
- │  → core, store, reasoner                         │
+ │ ┌─────────────┐             ┌──────────────────┐ │
+ │ │ aura-kernel │             │ aura-compaction  │ │
+ │ │ → core,     │             │ → reasoner       │ │
+ │ │   store,    │             │                  │ │
+ │ │   reasoner  │             │                  │ │
+ │ └─────────────┘             └──────────────────┘ │
  └────────────────────────┬─────────────────────────┘
                           │
  L3  Tools                ▼
@@ -156,7 +161,8 @@ additional cross-cutting dependencies.
  L4  Agent                ▼
  ┌──────────────────────────────────────────────────┐
  │                  aura-agent                      │
- │  → core, kernel, reasoner, tools, store, auth    │
+ │  → core, kernel, reasoner, tools, store, auth,   │
+ │    compaction                                    │
  └────────────────────────┬─────────────────────────┘
                           │
  L4a Memory / Skills      ▼
@@ -308,6 +314,21 @@ Provider-agnostic interface for LLM completions. Defines normalized message type
 | `mock` | `MockProvider`, `MockResponse` |
 | `request` | `ProposeRequest`, `RecordSummary`, `ProposeLimits` (kernel propose flow) |
 | `error` | `ReasonerError` |
+
+---
+
+### Shared: `aura-compaction` — Pure Context Compaction
+
+`aura-compaction` owns compaction logic that can run without side effects:
+message-history tier selection, pressure-gated write/edit input redaction,
+structured `_redacted` metadata, cached tool-result summaries, tool-surface
+compaction, storage compaction, and the `SummaryInput` / `SummaryOutput` data
+used for summary escalation. It does not call models itself; `aura-agent`
+performs the model call and applies the summary output through the crate.
+
+`aura-tools` treats attempts to reuse redacted write/edit payloads as
+`CompactionStructural` errors, so redaction markers are never executed as real
+filesystem content.
 
 ---
 
@@ -542,7 +563,6 @@ The heart of the runtime. `AgentLoop` is the **sole orchestrator** — it drives
 | `blocking/` | `detection/` (write-failure tracking, read-guard), `stall.rs` (repeated-target detection) |
 | `budget.rs` | `BudgetState`, `ExplorationState` — token and exploration tracking |
 | `constants.rs` | Shared constants: model names, iteration limits, thresholds, tool categories |
-| `compaction/` | Context window compression when approaching token limits |
 | `build.rs` | Build output parsing and baseline annotation |
 | `prompts/` | `system/` (system prompt generation), `fix/` (error recovery prompts), `context.rs`, `turn_kernel_system.rs` |
 | `verify/` | Build verification runner, error signatures, test baseline capture |
