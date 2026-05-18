@@ -1,6 +1,8 @@
 //! Context management: compaction, checkpoints, and budget warnings.
 
-use aura_compaction::{CompactionAction, CompactionInput, CompactionPolicy};
+use aura_compaction::{
+    CompactionAction, CompactionInput, CompactionPolicy, SummaryInput, SummaryOutput,
+};
 use aura_reasoner::ToolDefinition;
 use tokio::sync::mpsc::Sender;
 
@@ -14,6 +16,23 @@ use crate::types::AgentContextBreakdown;
 
 use super::streaming;
 use super::{AgentLoopConfig, LoopState};
+
+#[derive(Debug)]
+pub(super) enum CompactionOutcome {
+    None,
+    Applied(compaction::CompactionConfig),
+    NeedsSummary(SummaryInput),
+}
+
+impl CompactionOutcome {
+    #[cfg(test)]
+    fn applied_tier(&self) -> Option<compaction::CompactionConfig> {
+        match self {
+            Self::Applied(tier) => Some(*tier),
+            Self::None | Self::NeedsSummary(_) => None,
+        }
+    }
+}
 
 fn reserved_output_tokens(config: &AgentLoopConfig, max_ctx: u64) -> u64 {
     u64::from(config.max_tokens).min(max_ctx)
@@ -95,22 +114,19 @@ fn recompute_breakdown(
 
 /// Sanitize messages and apply compaction if context utilization is high.
 ///
-/// Returns the compaction tier that was applied, or `None` when neither
-/// the % utilization arm nor the absolute-byte arm asked for trimming.
-/// The return value is primarily a testability hook so callers can pin
-/// "which tier won" without inspecting log spans; production call sites
-/// can ignore it.
+/// Returns the compaction outcome so the async loop can perform model-backed
+/// summary escalation outside the pure compaction crate.
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn compact_if_needed(
     config: &AgentLoopConfig,
     state: &mut LoopState,
     tools: &[ToolDefinition],
-) -> Option<compaction::CompactionConfig> {
+) -> CompactionOutcome {
     sanitize::validate_and_repair(&mut state.messages);
 
     let Some(max_ctx) = config.max_context_tokens else {
         recompute_breakdown(config, state, tools);
-        return None;
+        return CompactionOutcome::None;
     };
 
     let estimated_tokens = current_context_tokens(state);
@@ -126,12 +142,13 @@ pub(super) fn compact_if_needed(
             ..CompactionPolicy::new(Some(max_ctx), estimated_tokens, reserved_tokens)
         },
     });
-    let chosen = match report.action {
-        CompactionAction::Applied(tier) => Some(tier),
-        CompactionAction::None => None,
+    let outcome = match report.action {
+        CompactionAction::Applied(tier) => CompactionOutcome::Applied(tier),
+        CompactionAction::NeedsSummary(input) => CompactionOutcome::NeedsSummary(input),
+        CompactionAction::None => CompactionOutcome::None,
     };
 
-    if chosen.is_some() {
+    if !matches!(outcome, CompactionOutcome::None) {
         sanitize::validate_and_repair(&mut state.messages);
         let compacted_tokens = heuristic_context_tokens(&state.messages);
         state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -139,7 +156,27 @@ pub(super) fn compact_if_needed(
     }
 
     recompute_breakdown(config, state, tools);
-    chosen
+    outcome
+}
+
+pub(super) fn apply_summary_output(
+    config: &AgentLoopConfig,
+    state: &mut LoopState,
+    tools: &[ToolDefinition],
+    summary: SummaryOutput,
+) -> bool {
+    let report = compaction::Compactor::new().apply_summary(&mut state.messages, summary);
+    if !report.reduced() {
+        recompute_breakdown(config, state, tools);
+        return false;
+    }
+
+    sanitize::validate_and_repair(&mut state.messages);
+    let compacted_tokens = heuristic_context_tokens(&state.messages);
+    state.last_context_tokens_estimate = Some(compacted_tokens);
+    state.result.estimated_context_tokens = compacted_tokens;
+    recompute_breakdown(config, state, tools);
+    true
 }
 
 /// Apply a specific compaction tier after a provider rejects the request for
@@ -472,7 +509,7 @@ mod tests {
             "fixture should exceed light threshold; got {before_chars} bytes"
         );
 
-        let chosen = compact_if_needed(&config, &mut state, &[]);
+        let chosen = compact_if_needed(&config, &mut state, &[]).applied_tier();
 
         let light = CompactionConfig::light();
         let tier = chosen.expect("absolute-byte arm should have triggered light tier");
@@ -513,6 +550,7 @@ mod tests {
         );
 
         let chosen = compact_if_needed(&config, &mut state, &[])
+            .applied_tier()
             .expect("both arms should have triggered a tier");
 
         let aggressive = CompactionConfig::aggressive();
@@ -544,7 +582,7 @@ mod tests {
             "fixture must stay under the light threshold; got {before_chars}"
         );
 
-        let chosen = compact_if_needed(&config, &mut state, &[]);
+        let chosen = compact_if_needed(&config, &mut state, &[]).applied_tier();
         assert!(
             chosen.is_none(),
             "neither arm should trigger; got {chosen:?}"

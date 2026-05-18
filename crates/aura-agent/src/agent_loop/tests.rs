@@ -1,8 +1,9 @@
 //! Core agent loop tests: config defaults, simple runs, error handling, max-tokens.
 
 use aura_reasoner::{
-    ContentBlock, Message, MockProvider, MockResponse, ModelProvider, ModelRequest, ModelResponse,
-    ProviderTrace, ReasonerError, StopReason, ToolDefinition, Usage,
+    ContentBlock, Message, MockProvider, MockResponse, ModelProvider, ModelRequest,
+    ModelRequestKind, ModelResponse, ProviderTrace, ReasonerError, StopReason, ToolDefinition,
+    Usage,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -34,6 +35,41 @@ struct OverflowThenSuccessProvider {
     failures_before_success: usize,
     call_count: AtomicUsize,
     seen_max_tokens: Mutex<Vec<u32>>,
+}
+
+struct SummaryThenFinalProvider {
+    call_count: AtomicUsize,
+    request_kinds: Mutex<Vec<Option<ModelRequestKind>>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for SummaryThenFinalProvider {
+    fn name(&self) -> &'static str {
+        "summary-then-final"
+    }
+
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ReasonerError> {
+        self.request_kinds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.metadata.kind);
+        let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let text = if call == 0 {
+            "Summary: earlier turns explored large implementation details."
+        } else {
+            "Done after summary compaction."
+        };
+        Ok(ModelResponse::new(
+            StopReason::EndTurn,
+            Message::assistant(text),
+            Usage::new(100, 20),
+            ProviderTrace::new("summary-mock", 0),
+        ))
+    }
+
+    async fn health_check(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait::async_trait]
@@ -459,4 +495,50 @@ async fn test_prompt_overflow_retry_reduces_response_budget() {
     assert_eq!(seen_max_tokens.len(), 2);
     assert!(seen_max_tokens[1] < seen_max_tokens[0]);
     assert_eq!(seen_max_tokens[1], 8_192);
+}
+
+#[tokio::test]
+async fn test_agent_loop_handles_summary_compaction() {
+    let config = AgentLoopConfig {
+        max_context_tokens: Some(8_000),
+        max_tokens: 1,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let executor = MockExecutor { results: vec![] };
+    let provider = SummaryThenFinalProvider {
+        call_count: AtomicUsize::new(0),
+        request_kinds: Mutex::new(Vec::new()),
+    };
+    let mut messages = vec![Message::user("anchor")];
+    for i in 0..80 {
+        if i % 2 == 0 {
+            messages.push(Message::assistant("A".repeat(10_000)));
+        } else {
+            messages.push(Message::user("B".repeat(10_000)));
+        }
+    }
+    messages.push(Message::assistant("recent assistant tail"));
+    messages.push(Message::user("continue"));
+
+    let result = agent
+        .run(&provider, &executor, messages, vec![])
+        .await
+        .unwrap();
+
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 2);
+    let kinds = provider
+        .request_kinds
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        kinds.first().copied().flatten(),
+        Some(ModelRequestKind::Auxiliary)
+    );
+    assert!(result.total_text.contains("Done after summary compaction."));
+    assert!(result
+        .messages
+        .iter()
+        .any(|message| message.text_content().contains("earlier turns explored")));
 }

@@ -33,20 +33,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aura_reasoner::{
-    Message, ModelProvider, ModelRequest, ModelRequestKind, Role, StopReason, ToolDefinition,
+    ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, Role, StopReason,
+    ToolChoice, ToolDefinition, ToolResultContent,
 };
 use aura_tools::IntentClassifier;
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::blocking::detection::BlockingContext;
 use crate::blocking::stall::StallDetector;
 use crate::budget::{BudgetState, ExplorationState};
 use crate::constants::{
-    AUTO_BUILD_COOLDOWN, DEFAULT_EXPLORATION_ALLOWANCE, MAX_ITERATIONS, THINKING_MIN_BUDGET,
-    THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
+    AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, DEFAULT_EXPLORATION_ALLOWANCE, MAX_ITERATIONS,
+    THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
 use crate::events::{AgentLoopEvent, DebugEvent};
 use crate::read_guard::ReadGuardState;
@@ -362,7 +363,23 @@ impl AgentLoop {
             }
             state.begin_iteration(&self.config, iteration);
             let iteration_started_at = Instant::now();
-            context::compact_if_needed(&self.config, &mut state, &tools);
+            match context::compact_if_needed(&self.config, &mut state, &tools) {
+                context::CompactionOutcome::NeedsSummary(input) => {
+                    self.apply_summary_compaction(
+                        provider,
+                        &tools,
+                        event_tx.as_ref(),
+                        cancellation_token.as_ref(),
+                        &mut state,
+                        input,
+                    )
+                    .await;
+                }
+                context::CompactionOutcome::Applied(tier) => {
+                    debug!(?tier, "local compaction applied before model call");
+                }
+                context::CompactionOutcome::None => {}
+            }
 
             let request = state.build_request(&self.config, &tools, iteration)?;
             let response = match self
@@ -401,7 +418,18 @@ impl AgentLoop {
                 }
             };
 
-            iteration::accumulate_response(&self.config, &mut state, &response);
+            if let Some(input) = iteration::accumulate_response(&self.config, &mut state, &response)
+            {
+                self.apply_summary_compaction(
+                    provider,
+                    &tools,
+                    event_tx.as_ref(),
+                    cancellation_token.as_ref(),
+                    &mut state,
+                    input,
+                )
+                .await;
+            }
             state.result.iterations = iteration + 1;
             streaming::emit_iteration_complete(
                 event_tx.as_ref(),
@@ -431,6 +459,103 @@ impl AgentLoop {
         }
 
         Ok(state.result)
+    }
+
+    /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
+    async fn apply_summary_compaction(
+        &self,
+        provider: &dyn ModelProvider,
+        tools: &[ToolDefinition],
+        _event_tx: Option<&Sender<AgentLoopEvent>>,
+        cancellation_token: Option<&CancellationToken>,
+        state: &mut LoopState,
+        input: aura_compaction::SummaryInput,
+    ) {
+        if is_cancelled(cancellation_token) {
+            return;
+        }
+
+        let request = match self.build_summary_request(&input) {
+            Ok(request) => request,
+            Err(e) => {
+                warn!(error = %e, "failed to build compaction summary request");
+                return;
+            }
+        };
+
+        let response = match self
+            .call_model(provider, request, None, cancellation_token)
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                warn!(error = %summary_error_for_log(&e), "compaction summary generation failed; continuing with local compaction");
+                return;
+            }
+        };
+
+        let summary_text = response
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if summary_text.trim().is_empty() {
+            warn!(
+                "compaction summary generation returned no text; continuing with local compaction"
+            );
+            return;
+        }
+
+        context::apply_summary_output(
+            &self.config,
+            state,
+            tools,
+            aura_compaction::SummaryOutput::Messages {
+                text: summary_text,
+                compact_start: input.compact_start,
+                compact_end: input.compact_end,
+            },
+        );
+    }
+
+    fn build_summary_request(
+        &self,
+        input: &aura_compaction::SummaryInput,
+    ) -> Result<ModelRequest, crate::AgentError> {
+        let prompt = compact_summary_prompt(input);
+        let max_tokens = (input.max_summary_chars / CHARS_PER_TOKEN)
+            .clamp(256, 4_096)
+            .try_into()
+            .unwrap_or(4_096);
+
+        ModelRequest::builder(
+            &self.config.model,
+            "Summarize compacted conversation history for a coding agent. \
+             Preserve concrete decisions, files, tool outcomes, errors, and unresolved tasks. \
+             Do not invent facts.",
+        )
+        .messages(vec![Message::user(prompt)])
+        .tools(Vec::new())
+        .tool_choice(ToolChoice::None)
+        .max_tokens(max_tokens)
+        .auth_token(self.config.auth_token.clone())
+        .upstream_provider_family(self.config.upstream_provider_family.clone())
+        .aura_project_id(self.config.aura_project_id.clone())
+        .aura_agent_id(self.config.aura_agent_id.clone())
+        .aura_session_id(self.config.aura_session_id.clone())
+        .aura_org_id(self.config.aura_org_id.clone())
+        .prompt_cache_key(self.config.prompt_cache_key.clone())
+        .prompt_cache_retention(parse_cache_retention(
+            self.config.prompt_cache_retention.as_deref(),
+        ))
+        .request_kind(ModelRequestKind::Auxiliary)
+        .try_build()
+        .map_err(crate::AgentError::from)
     }
 
     /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
@@ -791,6 +916,97 @@ fn post_iteration_checks(
 
 fn is_cancelled(token: Option<&CancellationToken>) -> bool {
     token.is_some_and(CancellationToken::is_cancelled)
+}
+
+fn summary_error_for_log(error: &iteration::LlmCallError) -> &'static str {
+    match error {
+        iteration::LlmCallError::InsufficientCredits(_) => "insufficient_credits",
+        iteration::LlmCallError::PromptTooLong(_) => "prompt_too_long",
+        iteration::LlmCallError::RateLimited(_) => "rate_limited",
+        iteration::LlmCallError::Fatal(_) => "fatal",
+    }
+}
+
+fn compact_summary_prompt(input: &aura_compaction::SummaryInput) -> String {
+    let mut prompt = format!(
+        "Summarize the compactable middle history below into no more than about {} characters.\n\
+         The live transcript was {} chars before local compaction and {} chars after local compaction.\n\
+         Target total transcript chars after summary: {}.\n\
+         Keep exact file paths, tool names, important outputs, decisions, and unresolved errors.\n\n\
+         ## Compactable Middle History\n",
+        input.max_summary_chars,
+        input.original_chars,
+        input.local_chars,
+        input.target_total_chars,
+    );
+
+    for (idx, message) in input.compactable_messages.iter().enumerate() {
+        prompt.push_str(&render_summary_message(idx, message));
+    }
+
+    prompt.push_str("\n## Recent Tail Kept Verbatim\n");
+    for (idx, message) in input.recent_tail.iter().enumerate() {
+        prompt.push_str(&render_summary_message(idx, message));
+    }
+    prompt
+}
+
+fn render_summary_message(idx: usize, message: &Message) -> String {
+    let mut rendered = format!("\n### Message {idx} ({:?})\n", message.role);
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text } => {
+                rendered.push_str("text:\n");
+                rendered.push_str(&truncate_for_summary_prompt(text));
+                rendered.push('\n');
+            }
+            ContentBlock::Thinking { thinking, .. } => {
+                rendered.push_str("thinking:\n");
+                rendered.push_str(&truncate_for_summary_prompt(thinking));
+                rendered.push('\n');
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                rendered.push_str(&format!("tool_use id={id} name={name} input="));
+                rendered.push_str(
+                    &serde_json::to_string(input)
+                        .unwrap_or_else(|_| "<unserializable>".to_string()),
+                );
+                rendered.push('\n');
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                rendered.push_str(&format!(
+                    "tool_result id={tool_use_id} is_error={is_error}:\n"
+                ));
+                match content {
+                    ToolResultContent::Text(text) => {
+                        rendered.push_str(&truncate_for_summary_prompt(text));
+                    }
+                    ToolResultContent::Json(value) => rendered.push_str(
+                        &serde_json::to_string(value)
+                            .unwrap_or_else(|_| "<unserializable>".to_string()),
+                    ),
+                }
+                rendered.push('\n');
+            }
+            ContentBlock::Image { .. } => {
+                rendered.push_str("image: [omitted]\n");
+            }
+        }
+    }
+    rendered
+}
+
+fn truncate_for_summary_prompt(text: &str) -> String {
+    const MAX_BLOCK_CHARS: usize = 4_000;
+    if text.len() <= MAX_BLOCK_CHARS {
+        text.to_string()
+    } else {
+        aura_compaction::truncate_content(text, MAX_BLOCK_CHARS, Some(2_000), Some(1_000))
+    }
 }
 
 /// Return the text of the most recent user-role message whose content is

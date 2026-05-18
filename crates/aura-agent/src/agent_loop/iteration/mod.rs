@@ -177,7 +177,7 @@ pub(super) fn accumulate_response(
     config: &AgentLoopConfig,
     state: &mut LoopState,
     response: &ModelResponse,
-) {
+) -> Option<compaction::SummaryInput> {
     state.result.total_input_tokens += response.usage.input_tokens;
     state.result.total_output_tokens += response.usage.output_tokens;
     state.result.total_cache_creation_input_tokens += response
@@ -252,6 +252,11 @@ pub(super) fn accumulate_response(
         let updated_estimate = provider_tokens.max(compacted_tokens);
         state.last_context_tokens_estimate = Some(updated_estimate);
         state.result.estimated_context_tokens = updated_estimate;
+    }
+
+    match report.action {
+        compaction::CompactionAction::NeedsSummary(input) => Some(input),
+        compaction::CompactionAction::Applied(_) | compaction::CompactionAction::None => None,
     }
 }
 
