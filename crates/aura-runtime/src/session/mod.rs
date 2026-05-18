@@ -24,8 +24,8 @@ mod tests;
 mod tool_approval;
 mod ws_handler;
 
-pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;
+pub(crate) use state::{agent_permissions_from_wire, context_window_for_model};
 pub(crate) use tool_approval::ToolApprovalBroker;
 pub use ws_handler::handle_ws_connection;
 

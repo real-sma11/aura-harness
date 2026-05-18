@@ -220,6 +220,8 @@ impl AutomatonBridge {
     ) -> AgentRunnerConfig {
         let mut config = AgentRunnerConfig::default();
         if let Some(m) = model {
+            config.max_context_tokens =
+                crate::session::context_window_for_model(m);
             config.default_model = m.to_string();
         }
         config.auth_token = auth_token.map(String::from);

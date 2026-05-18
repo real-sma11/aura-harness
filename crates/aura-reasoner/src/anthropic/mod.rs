@@ -128,6 +128,7 @@ impl AnthropicProvider {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_millis(config.timeout_ms))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| ReasonerError::Internal(format!("HTTP client creation failed: {e}")))?;
         Ok(Self { client, config })
