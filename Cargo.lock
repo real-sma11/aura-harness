@@ -174,6 +174,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aura-auth",
+ "aura-compaction",
  "aura-core",
  "aura-kernel",
  "aura-reasoner",
@@ -219,6 +220,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aura-agent",
+ "aura-compaction",
  "aura-core",
  "aura-reasoner",
  "aura-tools",
@@ -232,6 +234,15 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aura-compaction"
+version = "0.1.0"
+dependencies = [
+ "aura-reasoner",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -325,6 +336,7 @@ dependencies = [
  "async-trait",
  "aura-agent",
  "aura-automaton",
+ "aura-compaction",
  "aura-core",
  "aura-kernel",
  "aura-memory",

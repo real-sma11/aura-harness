@@ -1,8 +1,8 @@
 //! Context management: compaction, checkpoints, and budget warnings.
 
+use aura_compaction::{CompactionAction, CompactionInput, CompactionPolicy};
 use aura_reasoner::ToolDefinition;
 use tokio::sync::mpsc::Sender;
-use tracing::debug;
 
 use crate::budget;
 use crate::compaction;
@@ -53,22 +53,6 @@ fn chars_to_tokens(chars: usize) -> u64 {
     }
 }
 
-/// Estimate the on-wire size of a `ToolDefinition` for the "Tools"
-/// bucket. Counts the name, the description, and the JSON-serialized
-/// schema — these are the only fields the provider sees in the request
-/// envelope, so they're the only ones that contribute to the token
-/// budget. Falls back to `0` for the schema when serialization fails so
-/// the breakdown never panics on a malformed schema.
-fn tool_definition_chars(tool: &ToolDefinition) -> usize {
-    let schema_chars = serde_json::to_string(&tool.input_schema).map_or(0, |s| s.len());
-    tool.name.len() + tool.description.len() + schema_chars
-}
-
-/// Sum the per-tool char estimate across an effective tool surface.
-fn tools_chars(tools: &[ToolDefinition]) -> usize {
-    tools.iter().map(tool_definition_chars).sum()
-}
-
 /// Recompute every per-bucket token estimate from the current loop
 /// state. Called after every compaction step (and after overflow
 /// recovery) so the value stays in sync with `estimated_context_tokens`.
@@ -95,7 +79,7 @@ fn recompute_breakdown(
         .saturating_sub(config.skills_chars);
     state.result.context_breakdown = AgentContextBreakdown {
         system_prompt_tokens: chars_to_tokens(system_prompt_chars),
-        tools_tokens: chars_to_tokens(tools_chars(effective_tools)),
+        tools_tokens: chars_to_tokens(compaction::tools_chars(effective_tools)),
         skills_tokens: chars_to_tokens(config.skills_chars),
         mcp_tokens: 0,
         subagents_tokens: chars_to_tokens(config.subagents_chars),
@@ -106,55 +90,6 @@ fn recompute_breakdown(
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
     };
-}
-
-/// Tiered selector keyed off raw message-character bytes, complementing
-/// [`compaction::select_tier`] which only fires once the request occupies
-/// a meaningful fraction of the model's `max_ctx`.
-///
-/// The upstream model proxy enforces an `EmergencyCapRequired` envelope
-/// far below the model context window, so we trim history before the
-/// proxy blocks us — independent of how big the model's window happens
-/// to be.
-///
-/// Tunables intentionally co-located with the existing % utilization
-/// thresholds so they are easy to find and adjust together.
-const ABSOLUTE_BYTE_LIGHT_AT: usize = 64 * 1024;
-const ABSOLUTE_BYTE_AGGRESSIVE_AT: usize = 96 * 1024;
-const ABSOLUTE_BYTE_MICRO_AT: usize = 128 * 1024;
-
-fn absolute_byte_tier(messages_chars: usize) -> Option<compaction::CompactionConfig> {
-    if messages_chars >= ABSOLUTE_BYTE_MICRO_AT {
-        Some(compaction::CompactionConfig::micro())
-    } else if messages_chars >= ABSOLUTE_BYTE_AGGRESSIVE_AT {
-        Some(compaction::CompactionConfig::aggressive())
-    } else if messages_chars >= ABSOLUTE_BYTE_LIGHT_AT {
-        Some(compaction::CompactionConfig::light())
-    } else {
-        None
-    }
-}
-
-/// Pick whichever tier trims more aggressively (smaller
-/// `tool_result_max_chars`). On ties the first argument wins so the
-/// caller can express precedence (we pass the utilization-based pick
-/// first, so utilization gets credit when neither arm is stricter).
-fn pick_stricter_tier(
-    a: Option<compaction::CompactionConfig>,
-    b: Option<compaction::CompactionConfig>,
-) -> Option<compaction::CompactionConfig> {
-    match (a, b) {
-        (Some(x), Some(y)) => {
-            if y.tool_result_max_chars < x.tool_result_max_chars {
-                Some(y)
-            } else {
-                Some(x)
-            }
-        }
-        (Some(x), None) => Some(x),
-        (None, Some(y)) => Some(y),
-        (None, None) => None,
-    }
 }
 
 /// Sanitize messages and apply compaction if context utilization is high.
@@ -180,37 +115,16 @@ pub(super) fn compact_if_needed(
     let estimated_tokens = current_context_tokens(state);
     state.result.estimated_context_tokens = estimated_tokens;
     let pressure_tokens = compaction_pressure_tokens(config, estimated_tokens, max_ctx);
-    let utilization = pressure_tokens as f64 / max_ctx as f64;
+    let report = compaction::compact_messages(CompactionInput {
+        messages: &mut state.messages,
+        policy: CompactionPolicy::new(Some(max_ctx), pressure_tokens, 0),
+    });
+    let chosen = match report.action {
+        CompactionAction::Applied(tier) => Some(tier),
+        CompactionAction::None => None,
+    };
 
-    let utilization_tier = compaction::select_tier(utilization);
-    let messages_chars = compaction::estimate_message_chars(&state.messages);
-    let absolute_tier = absolute_byte_tier(messages_chars);
-    let chosen = pick_stricter_tier(utilization_tier, absolute_tier);
-
-    if let Some(tier) = chosen {
-        debug!(utilization, "Compacting context");
-
-        // Emit a structured info-level log when the absolute-byte arm
-        // is what triggered (or strictly tightened) compaction. This
-        // is the proxy-envelope guard — visible in
-        // `infra/evals/local-stack/.runtime/logs` so we can see it
-        // fire below the % utilization thresholds.
-        let absolute_won = match (utilization_tier, absolute_tier) {
-            (None, Some(_)) => true,
-            (Some(u), Some(a)) => a.tool_result_max_chars < u.tool_result_max_chars,
-            _ => false,
-        };
-        if absolute_won {
-            tracing::info!(
-                messages_chars,
-                tool_result_max_chars = tier.tool_result_max_chars,
-                text_max_chars = tier.text_max_chars,
-                preserve_recent = tier.preserve_recent,
-                "compaction triggered by absolute_bytes (proxy-envelope guard)",
-            );
-        }
-
-        compaction::compact_older_messages(&mut state.messages, &tier);
+    if chosen.is_some() {
         sanitize::validate_and_repair(&mut state.messages);
         let compacted_tokens = heuristic_context_tokens(&state.messages);
         state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -233,10 +147,10 @@ pub(super) fn compact_for_overflow(
     let before_chars = compaction::estimate_message_chars(&state.messages);
     let before_tokens = current_context_tokens(state);
 
-    compaction::compact_older_messages(&mut state.messages, &tier);
+    let report = compaction::recover_overflow(&mut state.messages, tier);
     sanitize::validate_and_repair(&mut state.messages);
 
-    let after_chars = compaction::estimate_message_chars(&state.messages);
+    let after_chars = report.after_chars;
     let after_tokens = heuristic_context_tokens(&state.messages);
     state.last_context_tokens_estimate = Some(after_tokens);
     state.result.estimated_context_tokens = after_tokens;
@@ -276,14 +190,16 @@ pub(super) fn compact_exploration_if_needed(config: &AgentLoopConfig, state: &mu
         return;
     }
 
-    let tier = compaction::CompactionConfig::history();
-    compaction::compact_older_messages(&mut state.messages, &tier);
-    sanitize::validate_and_repair(&mut state.messages);
-    state.exploration_compaction_done = true;
-    debug!(
-        exploration_count = state.exploration_state.count,
-        threshold, "Proactive compaction triggered by exploration usage"
-    );
+    if compaction::compact_exploration_if_needed(
+        &mut state.messages,
+        state.exploration_state.count,
+        config.exploration_allowance,
+        config.max_context_tokens,
+        state.exploration_compaction_done,
+    ) {
+        sanitize::validate_and_repair(&mut state.messages);
+        state.exploration_compaction_done = true;
+    }
 }
 
 /// Check and emit budget and exploration warnings.
@@ -343,13 +259,16 @@ pub(super) fn should_stop_for_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        absolute_byte_tier, compact_for_overflow, compact_if_needed, compaction_pressure_tokens,
-        heuristic_context_tokens, pick_stricter_tier, reserved_output_tokens,
-        ABSOLUTE_BYTE_AGGRESSIVE_AT, ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT,
+        compact_for_overflow, compact_if_needed, compaction_pressure_tokens,
+        heuristic_context_tokens, reserved_output_tokens,
     };
     use crate::agent_loop::AgentLoopConfig;
     use crate::agent_loop::LoopState;
     use crate::compaction::{estimate_message_chars, CompactionConfig};
+    use aura_compaction::{
+        absolute_byte_tier, pick_stricter_tier, ABSOLUTE_BYTE_AGGRESSIVE_AT,
+        ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT,
+    };
     use aura_reasoner::{Message, ToolDefinition};
 
     fn dummy_tool(name: &str, description: &str) -> ToolDefinition {
@@ -446,10 +365,7 @@ mod tests {
         };
         let mut state = LoopState::new(
             &config,
-            vec![
-                Message::user("hello"),
-                Message::assistant("M".repeat(200)),
-            ],
+            vec![Message::user("hello"), Message::assistant("M".repeat(200))],
         );
         let tools = vec![
             dummy_tool("read_file", "Read a file from disk."),
@@ -585,7 +501,7 @@ mod tests {
 
         let before_chars = estimate_message_chars(&state.messages);
         assert!(
-            before_chars >= ABSOLUTE_BYTE_AGGRESSIVE_AT && before_chars < ABSOLUTE_BYTE_MICRO_AT,
+            (ABSOLUTE_BYTE_AGGRESSIVE_AT..ABSOLUTE_BYTE_MICRO_AT).contains(&before_chars),
             "fixture should sit in the absolute-byte aggressive band; got {before_chars}"
         );
 

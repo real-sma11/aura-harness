@@ -46,7 +46,7 @@ mod agent_loop;
 pub(crate) mod blocking;
 mod budget;
 pub(crate) mod build;
-pub(crate) mod compaction;
+pub mod compaction;
 pub mod constants;
 pub(crate) mod events;
 pub(crate) mod file_ops;

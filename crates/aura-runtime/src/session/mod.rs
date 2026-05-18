@@ -6,8 +6,7 @@
 //! ## Layout
 //!
 //! - [`state`] — the `Session` struct, its `new` / `apply_init` lifecycle,
-//!   the wire→core permission + intent-classifier conversions, and the
-//!   per-turn `truncate_messages_for_storage` maintenance helper. Split out
+//!   the wire→core permission + intent-classifier conversions. Split out
 //!   in Wave 6 / T3 so this file can stay a thin facade.
 //! - [`generation`] — SSE proxy for generation (images / 3D).
 //! - [`helpers`] — turn execution helpers shared by the WebSocket path.
@@ -25,8 +24,8 @@ mod tests;
 mod tool_approval;
 mod ws_handler;
 
+pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;
-pub(crate) use state::{agent_permissions_from_wire, truncate_messages_for_storage};
 pub(crate) use tool_approval::ToolApprovalBroker;
 pub use ws_handler::handle_ws_connection;
 

@@ -3,8 +3,8 @@
 //! This file owns the [`Session`] struct plus everything that maintains
 //! its per-connection state: `new`, `apply_init`, the wire→core permission
 //! translator, the intent-classifier builder, `AgentLoopConfig` derivation,
-//! and the message-buffer truncation that caps large tool blobs between
-//! turns. Split out of `session/mod.rs` in Wave 6 / T3 so `mod.rs` can stay
+//! and the agent loop configuration derived from session state. Split out of
+//! `session/mod.rs` in Wave 6 / T3 so `mod.rs` can stay
 //! tiny (declarations + `WsContext` + re-exports).
 
 use crate::protocol::{self, SessionInit};
@@ -430,76 +430,6 @@ pub(crate) fn agent_loop_stream_timeout() -> std::time::Duration {
         .unwrap_or(REASONER_DEFAULT_TIMEOUT_MS);
     std::time::Duration::from_millis(reasoner_ms)
         + std::time::Duration::from_secs(STREAM_TIMEOUT_MARGIN_SECS)
-}
-
-/// Hard upper bound on bytes-per-tool-blob kept in `Session.messages`
-/// between turns. Large tool results (e.g. a verbose `list_agents`
-/// dump) used to ride along with every subsequent turn because the
-/// session's message log is append-only, which could push the next
-/// cold-start prompt past the model's context window well before the
-/// existing compaction tier ever fires (`select_tier` keys off the
-/// *total* token estimate; a single 60KB blob can live happily under
-/// that floor and still blow up the wire payload).
-///
-/// `truncate_messages_for_storage` walks the message log after every
-/// completed turn and replaces any `ToolUse` input / `ToolResult`
-/// content that exceeds this cap with a "... [truncated N bytes]"
-/// marker. This runs in addition to — not instead of — the
-/// utilization-based compaction in `aura_agent::compaction`; the two
-/// are complementary (this bounds per-blob size, compaction bounds
-/// total size).
-pub(crate) const SESSION_TOOL_BLOB_MAX_BYTES: usize = 8 * 1024;
-
-/// Cap each `ToolUse` input / `ToolResult` content in `messages` at
-/// [`SESSION_TOOL_BLOB_MAX_BYTES`]. Mutates in place and is cheap when
-/// nothing exceeds the cap (no allocation). Run this after a turn
-/// completes so the next turn doesn't re-ship the full blob.
-pub(crate) fn truncate_messages_for_storage(messages: &mut [Message]) {
-    use aura_reasoner::{ContentBlock, ToolResultContent};
-
-    fn truncate_str(s: &str, max: usize) -> Option<String> {
-        if s.len() <= max {
-            return None;
-        }
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        Some(format!("{}... [truncated {} bytes]", &s[..end], s.len()))
-    }
-
-    for msg in messages.iter_mut() {
-        for block in msg.content.iter_mut() {
-            match block {
-                ContentBlock::ToolUse { input, .. } => {
-                    if let Ok(serialized) = serde_json::to_string(input) {
-                        if let Some(truncated) =
-                            truncate_str(&serialized, SESSION_TOOL_BLOB_MAX_BYTES)
-                        {
-                            *input = serde_json::Value::String(truncated);
-                        }
-                    }
-                }
-                ContentBlock::ToolResult { content, .. } => match content {
-                    ToolResultContent::Text(t) => {
-                        if let Some(truncated) = truncate_str(t, SESSION_TOOL_BLOB_MAX_BYTES) {
-                            *t = truncated;
-                        }
-                    }
-                    ToolResultContent::Json(v) => {
-                        if let Ok(serialized) = serde_json::to_string(v) {
-                            if let Some(truncated) =
-                                truncate_str(&serialized, SESSION_TOOL_BLOB_MAX_BYTES)
-                            {
-                                *content = ToolResultContent::Text(truncated);
-                            }
-                        }
-                    }
-                },
-                _ => {}
-            }
-        }
-    }
 }
 
 /// Translate an [`IntentClassifierSpec`] from the wire protocol into the

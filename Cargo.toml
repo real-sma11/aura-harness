@@ -45,6 +45,7 @@ members = [
     "crates/aura-core",
     "crates/aura-store",
     "crates/aura-tools",
+    "crates/aura-compaction",
     "crates/aura-reasoner",
     "crates/aura-kernel",
     "crates/aura-terminal",

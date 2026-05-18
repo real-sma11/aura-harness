@@ -27,7 +27,7 @@ pub struct DecompositionHint {
     /// Name of the most recent assistant-side tool_use block, if any.
     pub last_pending_tool_name: Option<String>,
     /// Short JSON summary of that tool_use's input (via
-    /// `aura_agent::helpers::summarize_write_input` when applicable).
+    /// `aura_compaction::summarize_write_input` when applicable).
     pub last_pending_tool_input_summary: Option<String>,
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn validate_execution(
 /// `last_pending_tool_name` = name of the last ToolUse in the most recent
 /// assistant message.
 /// `last_pending_tool_input_summary` = short summary via
-/// `aura_agent::helpers::summarize_write_input` (when it applies) or the
+/// `aura_compaction::summarize_write_input` (when it applies) or the
 /// raw JSON truncated to a reasonable length.
 pub(crate) fn build_decomposition_hint(messages: &[Message]) -> DecompositionHint {
     if messages.is_empty() {
@@ -139,7 +139,7 @@ fn last_pending_tool_use(messages: &[Message]) -> (Option<String>, Option<String
         return (None, None);
     };
 
-    let summary = aura_agent::helpers::summarize_write_input(&name, &input)
+    let summary = aura_compaction::summarize_write_input(&name, &input)
         .and_then(|v| serde_json::to_string(&v).ok())
         .or_else(|| serde_json::to_string(&input).ok())
         .map(|s| truncate_summary(&s, 240));

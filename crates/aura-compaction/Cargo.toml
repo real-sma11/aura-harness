@@ -1,0 +1,15 @@
+[package]
+name = "aura-compaction"
+description = "Unified context compaction for the Aura agent loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-reasoner = { path = "../aura-reasoner" }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

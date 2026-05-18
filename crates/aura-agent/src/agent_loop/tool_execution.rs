@@ -355,7 +355,7 @@ pub(super) fn split_cached(
 
         let exact_key = tool_result_cache_key(&tc.name, &tc.input);
         if let Some(hit) = cache.get(&exact_key) {
-            let content = helpers::summarize_cached_tool_result(&tc.name, &tc.input, hit)
+            let content = aura_compaction::summarize_cached_tool_result(&tc.name, &tc.input, hit)
                 .unwrap_or_else(|| hit.clone());
             info!(
                 tool_use_id = %tc.id,
@@ -373,8 +373,9 @@ pub(super) fn split_cached(
         // because their keys already describe a single resource.
         if let Some(fkey) = normalized_search_key(&tc.name, &tc.input) {
             if let Some(hit) = fuzzy_cache.get(&fkey) {
-                let content = helpers::summarize_cached_tool_result(&tc.name, &tc.input, hit)
-                    .unwrap_or_else(|| hit.clone());
+                let content =
+                    aura_compaction::summarize_cached_tool_result(&tc.name, &tc.input, hit)
+                        .unwrap_or_else(|| hit.clone());
                 info!(
                     tool_use_id = %tc.id,
                     tool_name = %tc.name,

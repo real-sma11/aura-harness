@@ -14,7 +14,6 @@ use crate::constants::{
     WRITE_FILE_CHUNK_BYTES,
 };
 use crate::events::AgentLoopEvent;
-use crate::helpers;
 use crate::sanitize;
 use crate::types::AgentLoopResult;
 
@@ -233,7 +232,7 @@ fn summarize_write_inputs(messages: &mut [Message]) {
     };
     for block in &mut last_msg.content {
         if let ContentBlock::ToolUse { name, input, .. } = block {
-            if let Some(summarized) = helpers::summarize_write_input(name, input) {
+            if let Some(summarized) = aura_compaction::summarize_write_input(name, input) {
                 *input = summarized;
             }
         }

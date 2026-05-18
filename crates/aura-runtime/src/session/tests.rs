@@ -4,10 +4,9 @@
 //! module-root file can stay tiny (declarations + `WsContext` + the
 //! `Session` re-export).
 
-use super::state::{
-    agent_loop_stream_timeout, truncate_messages_for_storage, SESSION_TOOL_BLOB_MAX_BYTES,
-};
+use super::state::agent_loop_stream_timeout;
 use super::Session;
+use aura_compaction::{compact_for_storage, SESSION_TOOL_BLOB_MAX_BYTES};
 use aura_core::{AgentPermissions, Capability};
 use aura_protocol::{AgentPermissionsWire, SessionInit};
 use aura_reasoner::Message;
@@ -408,7 +407,7 @@ fn truncate_messages_for_storage_caps_oversized_tool_result_text() {
             is_error: false,
         }],
     }];
-    truncate_messages_for_storage(&mut messages);
+    compact_for_storage(&mut messages);
     match &messages[0].content[0] {
         ContentBlock::ToolResult { content, .. } => match content {
             ToolResultContent::Text(t) => {
@@ -433,7 +432,7 @@ fn truncate_messages_for_storage_is_noop_for_small_blobs() {
             is_error: false,
         }],
     }];
-    truncate_messages_for_storage(&mut messages);
+    compact_for_storage(&mut messages);
     match &messages[0].content[0] {
         ContentBlock::ToolResult { content, .. } => match content {
             ToolResultContent::Text(t) => assert_eq!(t, &small),
@@ -458,7 +457,7 @@ fn truncate_messages_for_storage_caps_oversized_tool_result_json() {
             is_error: false,
         }],
     }];
-    truncate_messages_for_storage(&mut messages);
+    compact_for_storage(&mut messages);
     match &messages[0].content[0] {
         ContentBlock::ToolResult { content, .. } => match content {
             ToolResultContent::Text(t) => {

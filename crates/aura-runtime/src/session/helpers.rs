@@ -489,7 +489,10 @@ impl OutboundMessageSink<'_> {
         let matches_pending = matches!(
             (&self.pending_delta, kind),
             (Some(PendingStreamDelta::Text(_)), StreamDeltaKind::Text)
-                | (Some(PendingStreamDelta::Thinking(_)), StreamDeltaKind::Thinking)
+                | (
+                    Some(PendingStreamDelta::Thinking(_)),
+                    StreamDeltaKind::Thinking
+                )
         );
         if self.pending_delta.is_some() && !matches_pending {
             self.flush_pending_delta().await;
@@ -750,14 +753,9 @@ pub(super) async fn apply_turn_result(
     outbound_tx: &mpsc::Sender<OutboundMessage>,
 ) {
     session.messages.clone_from(&loop_result.messages);
-    // Defense-in-depth: cap any tool_use input / tool_result content
-    // that exceeds `SESSION_TOOL_BLOB_MAX_BYTES`. Utilization-based
-    // compaction in `aura_agent` kicks in at 15%+ of the context
-    // window; a single oversized blob (e.g. a verbose `list_agents`
-    // result on a cold start) can still bloat the wire payload well
-    // below that floor. This per-blob cap keeps those blobs from
-    // riding along with every subsequent turn's prompt.
-    super::truncate_messages_for_storage(&mut session.messages);
+    // Defense-in-depth: cap oversized tool_use inputs / tool_result content
+    // so one large blob does not ride along with every subsequent prompt.
+    aura_compaction::compact_for_storage(&mut session.messages);
     let files_changed = summarize_files_changed(loop_result);
 
     let input_tokens = loop_result.total_input_tokens;
@@ -813,7 +811,8 @@ pub(super) async fn apply_turn_result(
                 cache_read_input_tokens,
                 cumulative_input_tokens: session.cumulative_input_tokens,
                 cumulative_output_tokens: session.cumulative_output_tokens,
-                cumulative_cache_creation_input_tokens: session.cumulative_cache_creation_input_tokens,
+                cumulative_cache_creation_input_tokens: session
+                    .cumulative_cache_creation_input_tokens,
                 cumulative_cache_read_input_tokens: session.cumulative_cache_read_input_tokens,
                 context_utilization,
                 model: session.model.clone(),
