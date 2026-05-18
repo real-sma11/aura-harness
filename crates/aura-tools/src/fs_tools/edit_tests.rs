@@ -72,6 +72,24 @@ fn test_fs_edit_rejects_elided_new_text_placeholder() {
 }
 
 #[test]
+fn test_edit_detector_rejects_structured_redaction_marker() {
+    let args = serde_json::json!({
+        "path": "edit.txt",
+        "_redacted": {
+            "kind": "aura_compaction_redaction",
+            "version": 1,
+            "fields": [
+                { "field": "old_text", "bytes": 13 },
+                { "field": "new_text", "bytes": 4 }
+            ]
+        }
+    });
+
+    assert!(has_redacted_field_marker(&args, "old_text"));
+    assert!(has_redacted_field_marker(&args, "new_text"));
+}
+
+#[test]
 fn test_fs_edit_replace_all() {
     let (sandbox, dir) = create_test_sandbox();
 

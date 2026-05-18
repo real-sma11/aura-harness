@@ -31,6 +31,34 @@ fn is_elided_write_placeholder(content: &str) -> bool {
     content.starts_with("<<<AURA_ELIDED_CONTENT::") && content.ends_with(">>>")
 }
 
+fn has_redacted_field_marker(args: &serde_json::Value, field: &str) -> bool {
+    let Some(marker) = args.get("_redacted").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if marker
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "aura_compaction_redaction")
+        && marker
+            .get("field")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|marked| marked == field)
+    {
+        return true;
+    }
+    marker
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|fields| {
+            fields.iter().any(|entry| {
+                entry
+                    .get("field")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|marked| marked == field)
+            })
+        })
+}
+
 fn is_code_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -232,6 +260,14 @@ impl Tool for FsWriteTool {
         ctx: &ToolContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
+        if has_redacted_field_marker(&args, "content") {
+            return Err(ToolError::InvalidArguments(
+                "content is an elided history placeholder; supply the real file content. \
+                 Prior turns redact write_file/edit_file inputs to save context; never copy \
+                 the placeholder verbatim. Re-emit the full intended content here."
+                    .to_string(),
+            ));
+        }
         let path = args["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path' argument".into()))?
@@ -285,6 +321,21 @@ mod tests {
             assert!(msg.contains("supply the real file content"));
         }
         assert!(!dir.path().join("placeholder.txt").exists());
+    }
+
+    #[test]
+    fn test_write_detector_rejects_structured_redaction_marker() {
+        let args = serde_json::json!({
+            "path": "placeholder.txt",
+            "_redacted": {
+                "kind": "aura_compaction_redaction",
+                "version": 1,
+                "field": "content",
+                "bytes": 42
+            }
+        });
+
+        assert!(has_redacted_field_marker(&args, "content"));
     }
 
     #[test]

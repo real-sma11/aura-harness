@@ -12,12 +12,13 @@ mod tools;
 
 pub use messages::{
     absolute_byte_tier, apply_summary, compact_exploration_if_needed, compact_for_storage,
-    compact_messages, compact_older_messages, estimate_message_chars, message_chars_to_tokens,
-    pick_stricter_tier, recover_overflow, select_tier, summarize_cached_tool_result,
-    summarize_write_input, truncate_content, truncate_messages_for_storage, try_signature_compact,
-    CompactionAction, CompactionConfig, CompactionInput, CompactionPolicy, CompactionReport,
-    OverflowStep, RedactionMarker, SummaryInput, SummaryOutput, ABSOLUTE_BYTE_AGGRESSIVE_AT,
-    ABSOLUTE_BYTE_LIGHT_AT, ABSOLUTE_BYTE_MICRO_AT, SESSION_TOOL_BLOB_MAX_BYTES,
+    compact_messages, compact_older_messages, effective_pressure, estimate_message_chars,
+    message_chars_to_tokens, pick_stricter_tier, recover_overflow, select_tier,
+    summarize_cached_tool_result, summarize_write_input, truncate_content,
+    truncate_messages_for_storage, try_signature_compact, CompactionAction, CompactionConfig,
+    CompactionInput, CompactionPolicy, CompactionReport, OverflowStep, RedactionMarker,
+    SummaryInput, SummaryOutput, ABSOLUTE_BYTE_AGGRESSIVE_AT, ABSOLUTE_BYTE_LIGHT_AT,
+    ABSOLUTE_BYTE_MICRO_AT, SESSION_TOOL_BLOB_MAX_BYTES,
 };
 pub use tools::{
     compact_tool_surface, compact_tools, tool_definition_chars, tools_chars, ToolSurfaceReport,

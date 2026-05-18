@@ -267,8 +267,9 @@ fn detect_blocked_writes(tool: &ToolCallInfo, ctx: &BlockingContext) -> Option<B
         Some(BlockCheckResult::blocked(format!(
             "You already wrote to `{path}` in this turn. Use `edit_file` to make targeted changes \
              instead of rewriting the entire file. Prior write_file/edit_file inputs in your \
-             history may be redacted with `<<<AURA_ELIDED_*>>>` placeholders; re-derive \
-             old_text/new_text from the task intent, not from the placeholder."
+             history may be redacted with `_redacted` metadata or legacy \
+             `<<<AURA_ELIDED_*>>>` placeholders; re-derive old_text/new_text \
+             from the task intent, not from the marker."
         )))
     } else {
         Some(BlockCheckResult::allowed())

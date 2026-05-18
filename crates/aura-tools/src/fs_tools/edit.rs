@@ -64,6 +64,34 @@ fn is_elided_edit_placeholder(value: &str) -> bool {
     value.starts_with("<<<AURA_ELIDED_OLD::") || value.starts_with("<<<AURA_ELIDED_NEW::")
 }
 
+fn has_redacted_field_marker(args: &serde_json::Value, field: &str) -> bool {
+    let Some(marker) = args.get("_redacted").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if marker
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "aura_compaction_redaction")
+        && marker
+            .get("field")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|marked| marked == field)
+    {
+        return true;
+    }
+    marker
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|fields| {
+            fields.iter().any(|entry| {
+                entry
+                    .get("field")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|marked| marked == field)
+            })
+        })
+}
+
 fn reject_elided_edit_placeholder(field: &str, value: &str) -> Result<(), ToolError> {
     if is_elided_edit_placeholder(value) && value.ends_with(">>>") {
         return Err(ToolError::InvalidArguments(format!(
@@ -278,6 +306,15 @@ impl Tool for FsEditTool {
         ctx: &ToolContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
+        for field in ["old_text", "new_text"] {
+            if has_redacted_field_marker(&args, field) {
+                return Err(ToolError::InvalidArguments(format!(
+                    "{field} is an elided history placeholder; supply the real edit text. \
+                     Prior turns redact write_file/edit_file inputs to save context; never copy \
+                     the placeholder verbatim. Re-derive the intended old_text/new_text here."
+                )));
+            }
+        }
         let path = args["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path' argument".into()))?

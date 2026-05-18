@@ -401,7 +401,7 @@ impl AgentLoop {
                 }
             };
 
-            iteration::accumulate_response(&mut state, &response);
+            iteration::accumulate_response(&self.config, &mut state, &response);
             state.result.iterations = iteration + 1;
             streaming::emit_iteration_complete(
                 event_tx.as_ref(),
@@ -763,7 +763,9 @@ impl LoopState {
             .aura_session_id(config.aura_session_id.clone())
             .aura_org_id(config.aura_org_id.clone())
             .prompt_cache_key(config.prompt_cache_key.clone())
-            .prompt_cache_retention(parse_cache_retention(config.prompt_cache_retention.as_deref()))
+            .prompt_cache_retention(parse_cache_retention(
+                config.prompt_cache_retention.as_deref(),
+            ))
             .request_kind(request_kind)
             .try_build()
             .map_err(crate::AgentError::from)
@@ -823,7 +825,9 @@ fn latest_user_text(messages: &[Message]) -> Option<&str> {
 fn parse_cache_retention(value: Option<&str>) -> Option<aura_reasoner::PromptCacheRetention> {
     let v = value?.trim();
     match v {
-        "24h" | "h24" | "hours_24" | "Hours24" => Some(aura_reasoner::PromptCacheRetention::Hours24),
+        "24h" | "h24" | "hours_24" | "Hours24" => {
+            Some(aura_reasoner::PromptCacheRetention::Hours24)
+        }
         "in_memory" | "InMemory" | "memory" => Some(aura_reasoner::PromptCacheRetention::InMemory),
         _ => None,
     }

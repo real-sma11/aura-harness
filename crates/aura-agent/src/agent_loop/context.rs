@@ -19,6 +19,7 @@ fn reserved_output_tokens(config: &AgentLoopConfig, max_ctx: u64) -> u64 {
     u64::from(config.max_tokens).min(max_ctx)
 }
 
+#[cfg(test)]
 fn compaction_pressure_tokens(
     config: &AgentLoopConfig,
     estimated_tokens: u64,
@@ -114,10 +115,16 @@ pub(super) fn compact_if_needed(
 
     let estimated_tokens = current_context_tokens(state);
     state.result.estimated_context_tokens = estimated_tokens;
-    let pressure_tokens = compaction_pressure_tokens(config, estimated_tokens, max_ctx);
+    let reserved_tokens = reserved_output_tokens(config, max_ctx);
+    let raw_message_bytes = compaction::estimate_message_chars(&state.messages);
     let report = compaction::compact_messages(CompactionInput {
         messages: &mut state.messages,
-        policy: CompactionPolicy::new(Some(max_ctx), pressure_tokens, 0),
+        policy: CompactionPolicy {
+            current_context_tokens: Some(estimated_tokens),
+            raw_message_bytes: Some(raw_message_bytes),
+            request_kind: Some(config.request_kind),
+            ..CompactionPolicy::new(Some(max_ctx), estimated_tokens, reserved_tokens)
+        },
     });
     let chosen = match report.action {
         CompactionAction::Applied(tier) => Some(tier),

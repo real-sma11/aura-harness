@@ -173,7 +173,11 @@ impl AgentLoop {
 // ---------------------------------------------------------------------------
 
 /// Accumulate token counts, text, and thinking from the model response.
-pub(super) fn accumulate_response(state: &mut LoopState, response: &ModelResponse) {
+pub(super) fn accumulate_response(
+    config: &AgentLoopConfig,
+    state: &mut LoopState,
+    response: &ModelResponse,
+) {
     state.result.total_input_tokens += response.usage.input_tokens;
     state.result.total_output_tokens += response.usage.output_tokens;
     state.result.total_cache_creation_input_tokens += response
@@ -204,11 +208,10 @@ pub(super) fn accumulate_response(state: &mut LoopState, response: &ModelRespons
     }
 
     state.messages.push(response.message.clone());
-    summarize_write_inputs(&mut state.messages);
 
+    let raw_message_bytes = compaction::estimate_message_chars(&state.messages);
     #[allow(clippy::cast_possible_truncation)]
-    let message_tokens =
-        (compaction::estimate_message_chars(&state.messages) / CHARS_PER_TOKEN) as u64;
+    let message_tokens = (raw_message_bytes / CHARS_PER_TOKEN) as u64;
     let provider_tokens = response
         .usage
         .input_tokens
@@ -223,19 +226,32 @@ pub(super) fn accumulate_response(state: &mut LoopState, response: &ModelRespons
     let estimated_context_tokens = provider_tokens.max(message_tokens);
     state.last_context_tokens_estimate = Some(estimated_context_tokens);
     state.result.estimated_context_tokens = estimated_context_tokens;
-}
 
-/// Replace large write-tool inputs with summaries to save context space.
-fn summarize_write_inputs(messages: &mut [Message]) {
-    let Some(last_msg) = messages.last_mut() else {
-        return;
-    };
-    for block in &mut last_msg.content {
-        if let ContentBlock::ToolUse { name, input, .. } = block {
-            if let Some(summarized) = aura_compaction::summarize_write_input(name, input) {
-                *input = summarized;
-            }
-        }
+    let reserved_output_tokens = config
+        .max_context_tokens
+        .map_or(u64::from(config.max_tokens), |max_ctx| {
+            u64::from(config.max_tokens).min(max_ctx)
+        });
+    let report = compaction::Compactor::new().compact_messages(compaction::CompactionInput {
+        messages: &mut state.messages,
+        policy: compaction::CompactionPolicy {
+            current_context_tokens: Some(message_tokens),
+            raw_message_bytes: Some(raw_message_bytes),
+            request_kind: Some(config.request_kind),
+            ..compaction::CompactionPolicy::new(
+                config.max_context_tokens,
+                estimated_context_tokens,
+                reserved_output_tokens,
+            )
+        },
+    });
+    if report.reduced() {
+        let compacted_chars = compaction::estimate_message_chars(&state.messages);
+        #[allow(clippy::cast_possible_truncation)]
+        let compacted_tokens = (compacted_chars / CHARS_PER_TOKEN) as u64;
+        let updated_estimate = provider_tokens.max(compacted_tokens);
+        state.last_context_tokens_estimate = Some(updated_estimate);
+        state.result.estimated_context_tokens = updated_estimate;
     }
 }
 
