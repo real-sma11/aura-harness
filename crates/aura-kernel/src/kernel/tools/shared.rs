@@ -242,9 +242,11 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
     proposals.proposals.push(kernel_proposal);
 
     if let Some((action, effect)) = executed {
-        let had_failures = effect.status == EffectStatus::Failed;
+        let effect_failed = effect.status == EffectStatus::Failed;
         let decoded = decode_tool_effect(&effect);
+        let had_failures = effect_failed || decoded.is_error;
         let line_diff = decoded.line_diff;
+        let kind = decoded.kind;
         let output_content = decoded.content;
 
         let mut decision = Decision::new();
@@ -264,6 +266,7 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
                 tool_use_id,
                 content: output_content,
                 is_error: had_failures,
+                kind,
                 approval_required: None,
                 line_diff,
             }),
@@ -317,6 +320,7 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
                 tool_use_id,
                 content: denial_reason,
                 is_error: true,
+                kind: aura_core::ToolResultKind::AgentError,
                 approval_required,
                 line_diff: None,
             }),

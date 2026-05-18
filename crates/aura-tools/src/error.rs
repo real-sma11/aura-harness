@@ -23,6 +23,9 @@ pub enum ToolError {
     #[error("invalid arguments: {0}")]
     InvalidArguments(String),
 
+    #[error("{0}")]
+    CompactionStructural(String),
+
     #[error("command not allowed: {0}")]
     CommandNotAllowed(String),
 
@@ -66,6 +69,7 @@ impl ToolError {
             Self::PathNotFound(_) => "path_not_found",
             Self::Io(_) => "io_error",
             Self::InvalidArguments(_) => "invalid_arguments",
+            Self::CompactionStructural(_) => "compaction_structural",
             Self::CommandNotAllowed(_) => "command_not_allowed",
             Self::Forbidden(_) => "forbidden",
             Self::CommandTimeout { .. } => "tool_timeout",
@@ -91,6 +95,7 @@ impl ToolError {
             Self::PathNotFound(_)
             | Self::Io(_)
             | Self::InvalidArguments(_)
+            | Self::CompactionStructural(_)
             | Self::CommandTimeout { .. }
             | Self::CommandFailed(_)
             | Self::SizeLimitExceeded { .. }

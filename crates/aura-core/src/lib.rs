@@ -38,6 +38,6 @@ pub use types::{
     ProcessPending, Proposal, ProposalSet, RecordEntry, RejectedProposal, RuntimeCapabilityInstall,
     SubagentBudget, SubagentDispatchRequest, SubagentExit, SubagentKindSpec, SubagentResult,
     SystemKind, ToolAuth, ToolCall, ToolCallContext, ToolDefinition, ToolExecution,
-    ToolGateVerdict, ToolProposal, ToolResult, ToolResultContent, ToolState, Trace, Transaction,
-    TransactionType, UserDefaultMode, UserToolDefaults, DEFAULT_SUBAGENT_TIMEOUT_MS,
+    ToolGateVerdict, ToolProposal, ToolResult, ToolResultContent, ToolResultKind, ToolState, Trace,
+    Transaction, TransactionType, UserDefaultMode, UserToolDefaults, DEFAULT_SUBAGENT_TIMEOUT_MS,
 };

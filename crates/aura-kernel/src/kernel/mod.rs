@@ -103,6 +103,8 @@ pub struct ToolOutput {
     pub content: String,
     /// Whether the tool execution failed.
     pub is_error: bool,
+    /// Machine-readable result classification.
+    pub kind: aura_core::ToolResultKind,
     /// Set when the kernel produced this output because the policy
     /// raised [`crate::PolicyVerdict::RequireApproval`].
     pub approval_required: Option<ApprovalRequiredInfo>,

@@ -323,6 +323,7 @@ fn partition_oversized_writes(
                         tool_use_id: tool.id.clone(),
                         content: content_msg,
                         is_error: true,
+                        kind: aura_core::ToolResultKind::AgentError,
                         stop_loop: false,
                         file_changes: Vec::new(),
                     });
@@ -401,6 +402,7 @@ fn partition_blocked(
                 tool_use_id: tool.id.clone(),
                 content: blocked_content,
                 is_error: true,
+                kind: aura_core::ToolResultKind::AgentError,
                 stop_loop: false,
                 file_changes: Vec::new(),
             });

@@ -35,8 +35,8 @@ fn test_fs_edit_rejects_elided_old_text_placeholder() {
         false,
     );
 
-    assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
-    if let Err(ToolError::InvalidArguments(msg)) = result {
+    assert!(matches!(result, Err(ToolError::CompactionStructural(_))));
+    if let Err(ToolError::CompactionStructural(msg)) = result {
         assert!(msg.contains("old_text is an elided history placeholder"));
         assert!(msg.contains("supply the real edit text"));
     }
@@ -60,8 +60,8 @@ fn test_fs_edit_rejects_elided_new_text_placeholder() {
         false,
     );
 
-    assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
-    if let Err(ToolError::InvalidArguments(msg)) = result {
+    assert!(matches!(result, Err(ToolError::CompactionStructural(_))));
+    if let Err(ToolError::CompactionStructural(msg)) = result {
         assert!(msg.contains("new_text is an elided history placeholder"));
         assert!(msg.contains("supply the real edit text"));
     }
@@ -87,6 +87,28 @@ fn test_edit_detector_rejects_structured_redaction_marker() {
 
     assert!(has_redacted_field_marker(&args, "old_text"));
     assert!(has_redacted_field_marker(&args, "new_text"));
+}
+
+#[tokio::test]
+async fn test_fs_edit_redaction_marker_error_is_structural() {
+    let (sandbox, dir) = create_test_sandbox();
+    fs::write(dir.path().join("edit.txt"), "Hello, World!").unwrap();
+    let ctx = ToolContext::new(sandbox, crate::ToolConfig::default());
+    let args = serde_json::json!({
+        "path": "edit.txt",
+        "_redacted": {
+            "kind": "aura_compaction_redaction",
+            "version": 1,
+            "fields": [
+                { "field": "old_text", "bytes": 13 },
+                { "field": "new_text", "bytes": 4 }
+            ]
+        }
+    });
+
+    let result = FsEditTool.execute(&ctx, args).await;
+
+    assert!(matches!(result, Err(ToolError::CompactionStructural(_))));
 }
 
 #[test]

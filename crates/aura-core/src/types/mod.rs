@@ -36,7 +36,7 @@ pub use tool::{
     InstalledToolCapability, InstalledToolDefinition, InstalledToolIntegrationRequirement,
     InstalledToolRuntimeAuth, InstalledToolRuntimeExecution, InstalledToolRuntimeIntegration,
     InstalledToolRuntimeProviderExecution, LineDiff, RuntimeCapabilityInstall, ToolAuth, ToolCall,
-    ToolCallContext, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult,
+    ToolCallContext, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultKind,
 };
 pub use tool_permissions::{
     is_effectively_full_access, resolve_effective_permission, AgentToolPermissions, ToolState,

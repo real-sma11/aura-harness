@@ -113,7 +113,7 @@ pub fn fs_write(
     create_dirs: bool,
 ) -> Result<ToolResult, ToolError> {
     if is_elided_write_placeholder(content) {
-        return Err(ToolError::InvalidArguments(
+        return Err(ToolError::CompactionStructural(
             "content is an elided history placeholder; supply the real file content. \
              Prior turns redact write_file/edit_file inputs to save context; never copy \
              the placeholder verbatim. Re-emit the full intended content here."
@@ -261,7 +261,7 @@ impl Tool for FsWriteTool {
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
         if has_redacted_field_marker(&args, "content") {
-            return Err(ToolError::InvalidArguments(
+            return Err(ToolError::CompactionStructural(
                 "content is an elided history placeholder; supply the real file content. \
                  Prior turns redact write_file/edit_file inputs to save context; never copy \
                  the placeholder verbatim. Re-emit the full intended content here."
@@ -315,8 +315,8 @@ mod tests {
             false,
         );
 
-        assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
-        if let Err(ToolError::InvalidArguments(msg)) = result {
+        assert!(matches!(result, Err(ToolError::CompactionStructural(_))));
+        if let Err(ToolError::CompactionStructural(msg)) = result {
             assert!(msg.contains("elided history placeholder"));
             assert!(msg.contains("supply the real file content"));
         }
@@ -336,6 +336,25 @@ mod tests {
         });
 
         assert!(has_redacted_field_marker(&args, "content"));
+    }
+
+    #[tokio::test]
+    async fn test_fs_write_redaction_marker_error_is_structural() {
+        let (sandbox, _dir) = create_test_sandbox();
+        let ctx = ToolContext::new(sandbox, crate::ToolConfig::default());
+        let args = serde_json::json!({
+            "path": "placeholder.txt",
+            "_redacted": {
+                "kind": "aura_compaction_redaction",
+                "version": 1,
+                "field": "content",
+                "bytes": 42
+            }
+        });
+
+        let result = FsWriteTool.execute(&ctx, args).await;
+
+        assert!(matches!(result, Err(ToolError::CompactionStructural(_))));
     }
 
     #[test]

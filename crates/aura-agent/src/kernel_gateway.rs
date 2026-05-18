@@ -84,6 +84,7 @@ impl AgentToolExecutor for KernelToolGateway {
                             tool_use_id: output.tool_use_id,
                             content: output.content,
                             is_error: output.is_error,
+                            kind: output.kind,
                             stop_loop: false,
                             file_changes,
                         }

@@ -61,6 +61,11 @@ impl TaskToolExecutor {
             tool_use_id: tc.id.clone(),
             content: content.into(),
             is_error,
+            kind: if is_error {
+                aura_core::ToolResultKind::AgentError
+            } else {
+                aura_core::ToolResultKind::Ok
+            },
             stop_loop,
             file_changes: Vec::new(),
         }

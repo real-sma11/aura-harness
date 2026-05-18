@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::constants::{tool_result_cache_key, CACHEABLE_TOOLS};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, ToolResultContent};
 use tokio::sync::mpsc::Sender;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::events::AgentLoopEvent;
 use crate::helpers;
@@ -19,18 +19,18 @@ fn is_cacheable(tool_name: &str) -> bool {
     CACHEABLE_TOOLS.contains(&tool_name)
 }
 
-struct ExecutedTools {
-    tool_calls: Vec<ToolCallInfo>,
-    all_results: Vec<ToolCallResult>,
-    side_messages: Vec<String>,
-    is_stalled: bool,
-    blocked_ids: HashSet<String>,
-    cached_ids: HashSet<String>,
+pub(super) struct ExecutedTools {
+    pub(super) tool_calls: Vec<ToolCallInfo>,
+    pub(super) all_results: Vec<ToolCallResult>,
+    pub(super) side_messages: Vec<String>,
+    pub(super) is_stalled: bool,
+    pub(super) blocked_ids: HashSet<String>,
+    pub(super) cached_ids: HashSet<String>,
     /// `true` when the iteration contained at least one
     /// `write_file`/`edit_file`/`delete_file` blocked for missing
     /// `path`. Used to drive
     /// [`crate::constants::EMPTY_PATH_BLOCK_LIMIT`] early stop.
-    saw_empty_path_block: bool,
+    pub(super) saw_empty_path_block: bool,
 }
 
 /// Handle `StopReason::ToolUse` — cache, execute, emit, stall-check.
@@ -234,17 +234,33 @@ fn emit_stop_error_with_recoverability(
     state.result.stalled = true;
 }
 
-fn check_termination_conditions(
+pub(super) fn check_termination_conditions(
     event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
     tools: ExecutedTools,
 ) -> bool {
     let should_stop = tools.all_results.iter().any(|r| r.stop_loop);
 
-    let all_errors = !tools.saw_empty_path_block
+    for result in tools
+        .all_results
+        .iter()
+        .filter(|r| r.kind == aura_core::ToolResultKind::CompactionStructural)
+    {
+        warn!(
+            target: "compaction",
+            tool_use_id = %result.tool_use_id,
+            result_len = result.content.len(),
+            "Rejected compacted/redacted tool input without incrementing consecutive errors"
+        );
+    }
+
+    let all_agent_errors = !tools.saw_empty_path_block
         && !tools.all_results.is_empty()
-        && tools.all_results.iter().all(|r| r.is_error);
-    if all_errors {
+        && tools
+            .all_results
+            .iter()
+            .all(|r| r.kind == aura_core::ToolResultKind::AgentError);
+    if all_agent_errors {
         state.counters.consecutive_all_error_iterations += 1;
     } else {
         state.counters.consecutive_all_error_iterations = 0;
@@ -398,6 +414,7 @@ fn cached_tool_result(call: &ToolCallInfo, content: String) -> ToolCallResult {
         tool_use_id: call.id.clone(),
         content,
         is_error: false,
+        kind: aura_core::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
     }

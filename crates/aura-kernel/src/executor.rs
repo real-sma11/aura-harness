@@ -128,6 +128,8 @@ pub struct DecodedToolResult {
     pub content: String,
     /// Whether the effect represents an error.
     pub is_error: bool,
+    /// Machine-readable result classification.
+    pub kind: aura_core::ToolResultKind,
     /// Additional metadata from the tool result, if available.
     pub metadata: HashMap<String, String>,
     /// Optional line diff for file-mutating tools (`fs_write` /
@@ -160,6 +162,7 @@ pub fn decode_tool_effect(effect: &Effect) -> DecodedToolResult {
                 DecodedToolResult {
                     content,
                     is_error: !tool_result.ok,
+                    kind: tool_result.kind,
                     metadata: tool_result.metadata,
                     line_diff: tool_result.line_diff,
                 }
@@ -174,26 +177,32 @@ pub fn decode_tool_effect(effect: &Effect) -> DecodedToolResult {
                 DecodedToolResult {
                     content: format!("Tool result could not be parsed: {e}. Raw: {raw}"),
                     is_error: true,
+                    kind: aura_core::ToolResultKind::AgentError,
                     metadata: HashMap::new(),
                     line_diff: None,
                 }
             }
         }
     } else {
-        let content = if let Ok(tool_result) = serde_json::from_slice::<ToolResult>(&effect.payload)
-        {
-            String::from_utf8_lossy(&tool_result.stderr).to_string()
-        } else {
-            let raw = String::from_utf8_lossy(&effect.payload);
-            if raw.is_empty() {
-                "Tool execution failed".to_string()
+        let (content, kind) =
+            if let Ok(tool_result) = serde_json::from_slice::<ToolResult>(&effect.payload) {
+                (
+                    String::from_utf8_lossy(&tool_result.stderr).to_string(),
+                    tool_result.kind,
+                )
             } else {
-                raw.to_string()
-            }
-        };
+                let raw = String::from_utf8_lossy(&effect.payload);
+                let content = if raw.is_empty() {
+                    "Tool execution failed".to_string()
+                } else {
+                    raw.to_string()
+                };
+                (content, aura_core::ToolResultKind::AgentError)
+            };
         DecodedToolResult {
             content,
             is_error: true,
+            kind,
             metadata: HashMap::new(),
             line_diff: None,
         }

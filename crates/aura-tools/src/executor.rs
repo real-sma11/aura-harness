@@ -272,7 +272,12 @@ impl Executor for ToolExecutor {
             }
             Err(e) => {
                 error!(error = %e, "Tool execution failed");
-                let result = ToolResult::failure(&tool_call.tool, e.to_string());
+                let result = match e {
+                    ToolError::CompactionStructural(msg) => {
+                        ToolResult::compaction_structural_failure(&tool_call.tool, msg)
+                    }
+                    other => ToolResult::failure(&tool_call.tool, other.to_string()),
+                };
                 let payload = serde_json::to_vec(&result).map_err(|e| {
                     ExecutorError::ExecutionFailed(format!("Failed to serialize error result: {e}"))
                 })?;

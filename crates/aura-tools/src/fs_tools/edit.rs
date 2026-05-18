@@ -94,7 +94,7 @@ fn has_redacted_field_marker(args: &serde_json::Value, field: &str) -> bool {
 
 fn reject_elided_edit_placeholder(field: &str, value: &str) -> Result<(), ToolError> {
     if is_elided_edit_placeholder(value) && value.ends_with(">>>") {
-        return Err(ToolError::InvalidArguments(format!(
+        return Err(ToolError::CompactionStructural(format!(
             "{field} is an elided history placeholder; supply the real edit text. \
              Prior turns redact write_file/edit_file inputs to save context; never copy \
              the placeholder verbatim. Re-derive the intended old_text/new_text here."
@@ -308,7 +308,7 @@ impl Tool for FsEditTool {
     ) -> Result<ToolResult, ToolError> {
         for field in ["old_text", "new_text"] {
             if has_redacted_field_marker(&args, field) {
-                return Err(ToolError::InvalidArguments(format!(
+                return Err(ToolError::CompactionStructural(format!(
                     "{field} is an elided history placeholder; supply the real edit text. \
                      Prior turns redact write_file/edit_file inputs to save context; never copy \
                      the placeholder verbatim. Re-derive the intended old_text/new_text here."
