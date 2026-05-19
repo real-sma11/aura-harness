@@ -438,8 +438,26 @@ impl AgentLoop {
                 iteration_started_at,
             );
 
+            // Stop fired during or right after streaming finished — don't
+            // dispatch a fresh tool batch (which would race for minutes
+            // against the cancellation observed at the top of the next
+            // iteration). `dispatch_stop_reason` itself also threads the
+            // token down into `process_tool_results` to abort in-flight
+            // tools, but this check skips even the synthesizing path for
+            // the cheap "cancelled before any tool dispatch" case.
+            if is_cancelled(cancellation_token.as_ref()) {
+                debug!("Cancellation observed after model call; skipping tool dispatch");
+                break;
+            }
+
             if self
-                .dispatch_stop_reason(&response, executor, event_tx.as_ref(), &mut state)
+                .dispatch_stop_reason(
+                    &response,
+                    executor,
+                    event_tx.as_ref(),
+                    &mut state,
+                    cancellation_token.as_ref(),
+                )
                 .await
             {
                 break;
@@ -565,12 +583,21 @@ impl AgentLoop {
         executor: &dyn AgentToolExecutor,
         event_tx: Option<&Sender<AgentLoopEvent>>,
         state: &mut LoopState,
+        cancellation_token: Option<&CancellationToken>,
     ) -> bool {
         match response.stop_reason {
             StopReason::EndTurn | StopReason::StopSequence => true,
             StopReason::MaxTokens => !iteration::handle_max_tokens(&self.config, response, state),
             StopReason::ToolUse => {
-                tool_execution::handle_tool_use(self, response, executor, event_tx, state).await
+                tool_execution::handle_tool_use(
+                    self,
+                    response,
+                    executor,
+                    event_tx,
+                    state,
+                    cancellation_token,
+                )
+                .await
             }
         }
     }

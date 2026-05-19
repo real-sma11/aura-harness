@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use crate::constants::{tool_result_cache_key, CACHEABLE_TOOLS};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, ToolResultContent};
 use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::events::AgentLoopEvent;
@@ -42,8 +43,18 @@ pub(super) async fn handle_tool_use(
     executor: &dyn AgentToolExecutor,
     event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
+    cancellation_token: Option<&CancellationToken>,
 ) -> bool {
-    let tools = match execute_and_cache_tools(agent, response, executor, state, event_tx).await {
+    let tools = match execute_and_cache_tools(
+        agent,
+        response,
+        executor,
+        state,
+        event_tx,
+        cancellation_token,
+    )
+    .await
+    {
         Some(t) => t,
         None => return true,
     };
@@ -57,6 +68,7 @@ async fn execute_and_cache_tools(
     executor: &dyn AgentToolExecutor,
     state: &mut LoopState,
     event_tx: Option<&Sender<AgentLoopEvent>>,
+    cancellation_token: Option<&CancellationToken>,
 ) -> Option<ExecutedTools> {
     let tool_calls = extract_tool_calls(response);
     if tool_calls.is_empty() {
@@ -95,7 +107,13 @@ async fn execute_and_cache_tools(
             (Vec::new(), Vec::new(), false, HashSet::new(), false)
         } else {
             agent
-                .process_tool_results(&uncached_calls, executor, state, event_tx)
+                .process_tool_results(
+                    &uncached_calls,
+                    executor,
+                    state,
+                    event_tx,
+                    cancellation_token,
+                )
                 .await
         };
 

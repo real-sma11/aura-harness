@@ -35,7 +35,8 @@ use crate::types::{
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
 
 use super::streaming::emit as emit_event;
 use super::{AgentLoop, AgentLoopConfig, LoopState};
@@ -167,6 +168,34 @@ impl Drop for HeartbeatGuard {
     }
 }
 
+/// Build synthetic `tool_result` blocks for tool calls aborted by
+/// cancellation. Each result is marked `is_error: true` (so the cache
+/// invalidation path treats them as failures) and `stop_loop: true` so
+/// `check_termination_conditions` breaks the agent loop on the first
+/// cancelled result. The synthetic content is a stable, machine-
+/// readable marker (`[CANCELLED]`) so downstream log scrapers can
+/// distinguish user-initiated cancellation from a tool returning an
+/// error of its own.
+///
+/// Anthropic requires every assistant `tool_use` block to be paired
+/// with a `tool_result` block in the next user message; emitting
+/// synthetic results for the entire `to_execute` batch keeps that
+/// adjacency intact even though the loop is about to break and the
+/// resulting messages will not be re-sent to the model.
+fn synthesize_cancelled_results(tool_calls: &[ToolCallInfo]) -> Vec<ToolCallResult> {
+    tool_calls
+        .iter()
+        .map(|tc| ToolCallResult {
+            tool_use_id: tc.id.clone(),
+            content: "[CANCELLED] Tool call aborted by user stop request.".to_string(),
+            is_error: true,
+            kind: aura_core::ToolResultKind::AgentError,
+            stop_loop: true,
+            file_changes: Vec::new(),
+        })
+        .collect()
+}
+
 impl AgentLoop {
     /// Process tool call results from one iteration.
     ///
@@ -182,6 +211,7 @@ impl AgentLoop {
         executor: &dyn AgentToolExecutor,
         state: &mut LoopState,
         event_tx: Option<&Sender<AgentLoopEvent>>,
+        cancellation_token: Option<&CancellationToken>,
     ) -> (
         Vec<ToolCallResult>,
         Vec<String>,
@@ -215,6 +245,19 @@ impl AgentLoop {
 
         let executed = if to_execute.is_empty() {
             Vec::new()
+        } else if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+            // Stop fired between `call_model` returning and tool dispatch;
+            // never start a new tool batch after the user pressed Stop.
+            // Synthesize cancelled `tool_result` blocks with `stop_loop:
+            // true` so `check_termination_conditions` breaks the agent
+            // loop on the first cancelled result instead of pretending
+            // the tools were skipped (which would let the loop ask the
+            // model for more work on the next iteration).
+            info!(
+                tool_count = to_execute.len(),
+                "Cancellation observed before tool dispatch; synthesizing cancelled results"
+            );
+            synthesize_cancelled_results(&to_execute)
         } else {
             // Phase 6 of agent-stuck-and-reset: spawn a periodic
             // `progress: tool_running` heartbeat so aura-os's
@@ -226,7 +269,35 @@ impl AgentLoop {
             // (success, error, or panic — the surrounding `await`
             // still drops the guard before unwinding propagates).
             let _heartbeat = spawn_tool_heartbeat(event_tx, &to_execute, tool_heartbeat_interval());
-            executor.execute(&to_execute).await
+            // Race the executor with cancellation so a long-running tool
+            // (e.g. `run_command`, `cargo build`) does not block stop
+            // for minutes. When cancellation wins, the executor future
+            // is dropped and we synthesize cancelled `tool_result`
+            // blocks with `stop_loop: true` so the loop breaks on the
+            // next `check_termination_conditions`. Note: aborting the
+            // future does NOT kill child processes spawned by the
+            // executor — that is the executor's responsibility (e.g.
+            // tokio `Command` with `kill_on_drop(true)`). The
+            // contract here is "stop scheduling new tool work and
+            // surface the cancel to the agent loop ASAP"; a leaked
+            // subprocess is preferable to a Stop button that takes
+            // minutes to register.
+            match cancellation_token {
+                Some(token) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => {
+                            info!(
+                                tool_count = to_execute.len(),
+                                "Cancellation observed during tool execution; aborting in-flight tools"
+                            );
+                            synthesize_cancelled_results(&to_execute)
+                        }
+                        results = executor.execute(&to_execute) => results,
+                    }
+                }
+                None => executor.execute(&to_execute).await,
+            }
         };
 
         let any_write_success = track_tool_effects(
