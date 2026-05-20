@@ -251,6 +251,17 @@ fn project_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         compact_tool("get_project", "Get the current project's details (name, folder, status, etc.).", serde_json::json!({"type":"object","properties":{},"required":[]})),
         compact_tool("update_project", "Update the current project's name, description, build_command, or test_command. Commands must be valid shell commands with no extra text.", serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"build_command":{"type":"string"},"test_command":{"type":"string"}},"required":[]})),
+        compact_tool(
+            "assign_agent_to_project",
+            "Hire an existing template agent into the current project. Requires the template agent_id (from list_agents). Creates a new AgentInstance bound to the project and returns its agent_instance_id, which can then be addressed via send_to_agent / delegate_task. Idempotent error path: if the same template is already assigned, returns error_code=\"already_assigned\" with the existing agent_instance_id in the payload so the caller can re-use the existing instance instead of retrying.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "agent_id":{"type":"string","description":"Template agent_id to hire (UUID from list_agents)."}
+                },
+                "required":["agent_id"]
+            }),
+        ),
     ]
 }
 

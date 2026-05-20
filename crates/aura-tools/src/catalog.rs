@@ -298,6 +298,12 @@ fn domain_tool_required_capabilities(name: &str) -> Vec<Capability> {
     match name {
         "post_to_feed" => vec![Capability::PostToFeed],
         "check_budget" | "record_usage" => vec![Capability::ManageBilling],
+        // Assigning an existing template agent to a project is structurally
+        // the same operation as `spawn_agent` (it materializes a new
+        // AgentInstance in the project), so it lives under the same gate.
+        // Per-project authorization is still enforced server-side via the
+        // calling user's JWT.
+        "assign_agent_to_project" => vec![Capability::SpawnAgent],
         _ => Vec::new(),
     }
 }

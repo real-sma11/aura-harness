@@ -61,6 +61,10 @@ impl Default for PolicyConfig {
         let mut tool_capability_requirements = HashMap::new();
         tool_capability_requirements.insert("spawn_agent".to_string(), Capability::SpawnAgent);
         tool_capability_requirements.insert("task".to_string(), Capability::SpawnAgent);
+        tool_capability_requirements.insert(
+            "assign_agent_to_project".to_string(),
+            Capability::SpawnAgent,
+        );
         tool_capability_requirements.insert("send_to_agent".to_string(), Capability::ControlAgent);
         tool_capability_requirements
             .insert("agent_lifecycle".to_string(), Capability::ControlAgent);
@@ -134,5 +138,24 @@ impl PolicyConfig {
     pub fn with_agent_override(mut self, agent_override: Option<AgentToolPermissions>) -> Self {
         self.agent_override = agent_override;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assign_agent_to_project_is_gated_on_spawn_agent() {
+        let cfg = PolicyConfig::default();
+        let cap = cfg
+            .tool_capability_requirements
+            .get("assign_agent_to_project")
+            .expect("assign_agent_to_project must be registered in the policy map");
+        assert_eq!(
+            *cap,
+            Capability::SpawnAgent,
+            "assign_agent_to_project must gate on SpawnAgent, matching spawn_agent / task"
+        );
     }
 }

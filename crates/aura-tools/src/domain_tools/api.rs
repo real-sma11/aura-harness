@@ -127,6 +127,32 @@ pub struct ProjectDescriptor {
     pub test_command: Option<String>,
 }
 
+/// A project-bound agent instance returned by `list_project_agents` and
+/// `create_project_agent`. Mirrors aura-os's `AgentInstance` shape but only
+/// captures the fields the assign-agent flow needs to detect duplicates and
+/// hand back a usable handle to the caller.
+///
+/// Serializes / deserializes the instance id as `agent_instance_id` to match
+/// the canonical aura-os API contract (the marketplace `Hire` endpoint and
+/// `GET /api/projects/{id}/agents` both use this name). The `id` alias keeps
+/// us forward-compatible with any future server payload that drops the
+/// `agent_instance_` prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInstanceDescriptor {
+    #[serde(rename = "agent_instance_id", alias = "id")]
+    pub id: String,
+    /// Template agent id this instance was minted from. Used for duplicate
+    /// detection in `assign_agent_to_project`.
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub agent_id: String,
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub project_id: String,
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDescriptor {
     pub id: String,
@@ -295,6 +321,32 @@ pub trait DomainApi: Send + Sync {
         updates: ProjectUpdate,
         jwt: Option<&str>,
     ) -> anyhow::Result<ProjectDescriptor>;
+
+    // Project-agent instances (aura-os-server) — JWT auth via /api/ routes.
+    //
+    // Default impls return `unimplemented` so the >5 existing `impl DomainApi`
+    // sites (mocks, kernel-domain-gateway, automaton fakes, JWT wrapper) keep
+    // compiling. The only path that actually exercises these is
+    // `HttpDomainApi`, which overrides both.
+    async fn list_project_agents(
+        &self,
+        _project_id: &str,
+        _jwt: Option<&str>,
+    ) -> anyhow::Result<Vec<AgentInstanceDescriptor>> {
+        Err(anyhow::anyhow!(
+            "list_project_agents not implemented for this DomainApi"
+        ))
+    }
+    async fn create_project_agent(
+        &self,
+        _project_id: &str,
+        _agent_id: &str,
+        _jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        Err(anyhow::anyhow!(
+            "create_project_agent not implemented for this DomainApi"
+        ))
+    }
 
     // Storage: logs — JWT auth via /api/ routes
     async fn create_log(

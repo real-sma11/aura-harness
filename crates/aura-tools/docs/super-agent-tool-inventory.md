@@ -40,7 +40,7 @@ Source of truth for the tool list:
 | `get_project_stats`       | http     | GET `/api/projects/{project_id}/stats` | |
 | `list_agents`             | http     | GET `/api/agents`                     | |
 | `get_agent`               | http     | GET `/api/agents/{agent_id}`          | |
-| `assign_agent_to_project` | http     | POST `/api/agents/{agent_id}/assignments` | |
+| `assign_agent_to_project` | **implemented** (domain tool) | POST `/api/projects/{project_id}/agents` | Hires an existing template `agent_id` into the current project. Pre-flights against `list_project_agents` for duplicate detection; returns `error_code="already_assigned"` with the existing `agent_instance_id` when the template is already present. Gated on `Capability::SpawnAgent` (kernel policy + catalog visibility). Endpoint is the same one the marketplace **Hire** modal calls. |
 | `start_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/start` | |
 | `pause_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/pause` | |
 | `stop_dev_loop`           | http     | POST `/api/projects/{project_id}/loop/stop` | |

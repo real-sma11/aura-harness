@@ -73,6 +73,7 @@ const DOMAIN_TOOL_NAMES: &[&str] = &[
     "transition_task",
     "get_project",
     "update_project",
+    "assign_agent_to_project",
     "create_log",
     "list_logs",
     "get_project_stats",
@@ -207,6 +208,9 @@ impl DomainToolExecutor {
             "get_project" => project::get_project(self.api.as_ref(), project_id, &input).await,
             "update_project" => {
                 project::update_project(self.api.as_ref(), project_id, &input).await
+            }
+            "assign_agent_to_project" => {
+                project::assign_agent_to_project(self.api.as_ref(), project_id, &input).await
             }
 
             // Storage (logs, stats)

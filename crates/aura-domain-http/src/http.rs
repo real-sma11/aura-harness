@@ -9,8 +9,9 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
-    CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor, ProjectUpdate,
-    SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
+    AgentInstanceDescriptor, CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor,
+    ProjectUpdate, SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor,
+    TaskUpdate,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -452,6 +453,43 @@ impl DomainApi for HttpDomainApi {
             "testCommand": updates.test_command,
         });
         self.api_put(&url, &body, jwt).await
+    }
+
+    // -- Project agents (aura-os-server) --------------------------------------
+    //
+    // Mirrors the marketplace `Hire` flow:
+    //   POST /api/projects/{project_id}/agents { "agent_id": "..." }
+    //   GET  /api/projects/{project_id}/agents
+    // Routes through `project_base_url()` so they hit `aura-os-server` when
+    // `AURA_OS_SERVER_URL` is configured and fall back to `aura-network`
+    // otherwise — same routing rule as `get_project` / `update_project`.
+
+    async fn list_project_agents(
+        &self,
+        project_id: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<Vec<AgentInstanceDescriptor>> {
+        let jwt = Self::require_jwt(jwt)?;
+        let url = format!(
+            "{}/api/projects/{project_id}/agents",
+            self.project_base_url()
+        );
+        self.api_get(&url, jwt).await
+    }
+
+    async fn create_project_agent(
+        &self,
+        project_id: &str,
+        agent_id: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        let jwt = Self::require_jwt(jwt)?;
+        let url = format!(
+            "{}/api/projects/{project_id}/agents",
+            self.project_base_url()
+        );
+        let body = serde_json::json!({ "agent_id": agent_id });
+        self.api_post(&url, &body, jwt).await
     }
 
     // -- Storage: logs (JWT /api/) --------------------------------------------

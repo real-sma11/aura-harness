@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
-    CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor, ProjectUpdate,
-    SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
+    AgentInstanceDescriptor, CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor,
+    ProjectUpdate, SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor,
+    TaskUpdate,
 };
 
 /// Wraps an inner [`DomainApi`] and stamps a captured JWT onto every
@@ -185,6 +186,25 @@ impl DomainApi for JwtDomainApi {
     ) -> anyhow::Result<ProjectDescriptor> {
         self.inner
             .update_project(project_id, updates, self.jwt_or(jwt))
+            .await
+    }
+    async fn list_project_agents(
+        &self,
+        project_id: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<Vec<AgentInstanceDescriptor>> {
+        self.inner
+            .list_project_agents(project_id, self.jwt_or(jwt))
+            .await
+    }
+    async fn create_project_agent(
+        &self,
+        project_id: &str,
+        agent_id: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        self.inner
+            .create_project_agent(project_id, agent_id, self.jwt_or(jwt))
             .await
     }
     async fn create_log(

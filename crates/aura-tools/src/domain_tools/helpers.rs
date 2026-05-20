@@ -49,6 +49,25 @@ pub(crate) fn domain_err(error: impl std::fmt::Display) -> String {
     serde_json::json!({ "ok": false, "error": error.to_string() }).to_string()
 }
 
+/// Wrap an error into the standard JSON envelope with a stable `error_code`
+/// and an optional structured payload. Lets callers (the LLM) branch on a
+/// known code instead of regex-matching the human-readable `error` string.
+pub(crate) fn domain_err_with_code(
+    error_code: &str,
+    error: impl std::fmt::Display,
+    payload: Option<serde_json::Value>,
+) -> String {
+    let mut envelope = serde_json::json!({
+        "ok": false,
+        "error_code": error_code,
+        "error": error.to_string(),
+    });
+    if let (Some(Value::Object(extra)), Value::Object(env_map)) = (payload, &mut envelope) {
+        env_map.extend(extra);
+    }
+    envelope.to_string()
+}
+
 /// Extract an optional list of strings from a JSON array field.
 pub(crate) fn str_array(input: &Value, key: &str) -> Vec<String> {
     input
