@@ -127,6 +127,49 @@ pub struct ProjectDescriptor {
     pub test_command: Option<String>,
 }
 
+/// Slim view of a marketplace listing returned by
+/// `list_marketplace_agents`. Mirrors the shape of aura-os's
+/// `MarketplaceAgent` DTO (`apps/aura-os-server/src/dto.rs` ←
+/// `interface/src/apps/marketplace/marketplace-types.ts`), but only
+/// captures the fields a hiring agent actually needs. Heavy fields
+/// (base64 icon, full `system_prompt`, `personality`) are deliberately
+/// dropped on the server side via the wire shape and re-projected here
+/// to keep the JSON inside the model's per-tool-result cap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketplaceAgentDescriptor {
+    /// Template `agent_id` — the value to pass to `assign_agent_to_project`.
+    pub agent_id: String,
+    pub name: String,
+    pub role: String,
+    /// Marketplace listing description (the agent's elevator pitch).
+    /// Distinct from the underlying agent's `personality` / `system_prompt`
+    /// and surfaced as the LLM-readable summary on the talent card.
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub description: String,
+    /// Marketplace expertise slugs declared by the agent's creator. Useful
+    /// for follow-up filtering when the caller wants to narrow by topic.
+    #[serde(default)]
+    pub expertise: Vec<String>,
+    /// Free-form tag list from the underlying agent record.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Number of completed marketplace tasks attributed to this agent.
+    #[serde(default)]
+    pub completed_tasks: u64,
+    /// Aggregate revenue in USD this agent has earned in the marketplace.
+    #[serde(default)]
+    pub revenue_usd: f64,
+    /// Reputation score from the marketplace ranking layer.
+    #[serde(default)]
+    pub reputation: f64,
+    /// Display name of the agent's creator (organisation or user).
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub creator_display_name: String,
+    /// ISO-8601 timestamp of when the agent was first listed.
+    #[serde(default, deserialize_with = "super::helpers::deser_string_or_default")]
+    pub listed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDescriptor {
     pub id: String,
@@ -357,4 +400,53 @@ pub trait DomainApi: Send + Sync {
         body: Option<&serde_json::Value>,
         jwt: Option<&str>,
     ) -> anyhow::Result<String>;
+
+    /// List agents publicly listed in the marketplace. Returns a slim
+    /// projection (no icons / system_prompt / personality) so the tool
+    /// result stays under the per-tool-result byte cap, plus the total
+    /// pre-pagination so the LLM can iterate with `offset`.
+    ///
+    /// Default impl returns `unimplemented` so existing `impl DomainApi`
+    /// sites (mocks, kernel-domain-gateway, automaton fakes) keep compiling
+    /// — only `HttpDomainApi` actually overrides this.
+    async fn list_marketplace_agents(
+        &self,
+        _params: ListMarketplaceAgentsParams<'_>,
+        _jwt: Option<&str>,
+    ) -> anyhow::Result<ListMarketplaceAgentsResponse> {
+        Err(anyhow::anyhow!(
+            "list_marketplace_agents not implemented for this DomainApi"
+        ))
+    }
+}
+
+/// Query parameters accepted by `GET /api/marketplace/agents`. Mirrors
+/// `apps/aura-os-server/src/dto.rs::ListMarketplaceAgentsParams` and the
+/// shape consumed by the TypeScript `interface/src/api/marketplace.ts`.
+///
+/// All fields are optional; the server applies sensible defaults
+/// (sort=trending, limit=50, server-side cap at 100).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListMarketplaceAgentsParams<'a> {
+    /// One of "trending" | "latest" | "revenue" | "reputation". Passed
+    /// through verbatim — the server validates.
+    pub sort: Option<&'a str>,
+    /// Expertise slug filter (e.g. `"backend"`). Server matches on
+    /// exact slug. There is no free-text/keyword search today.
+    pub expertise: Option<&'a str>,
+    /// Page size. Server caps at 100; this layer doesn't re-cap so the
+    /// server's response stays authoritative.
+    pub limit: Option<u32>,
+    /// Pagination offset.
+    pub offset: Option<u32>,
+}
+
+/// Response shape from `GET /api/marketplace/agents`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListMarketplaceAgentsResponse {
+    pub agents: Vec<MarketplaceAgentDescriptor>,
+    /// Total matching agents pre-pagination, so the caller knows when
+    /// to stop incrementing `offset`.
+    #[serde(default)]
+    pub total: u64,
 }

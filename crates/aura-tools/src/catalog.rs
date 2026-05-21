@@ -298,6 +298,9 @@ fn domain_tool_required_capabilities(name: &str) -> Vec<Capability> {
     match name {
         "post_to_feed" => vec![Capability::PostToFeed],
         "check_budget" | "record_usage" => vec![Capability::ManageBilling],
+        // Browsing the marketplace is a read-only listing op — same
+        // capability shape as the existing org-scoped `list_agents`.
+        "list_agents_marketplace" => vec![Capability::ListAgents],
         _ => Vec::new(),
     }
 }

@@ -67,6 +67,10 @@ impl Default for PolicyConfig {
         tool_capability_requirements.insert("delegate_task".to_string(), Capability::ControlAgent);
         tool_capability_requirements.insert("get_agent_state".to_string(), Capability::ReadAgent);
         tool_capability_requirements.insert("list_agents".to_string(), Capability::ListAgents);
+        tool_capability_requirements.insert(
+            "list_agents_marketplace".to_string(),
+            Capability::ListAgents,
+        );
         tool_capability_requirements.insert("run_command".to_string(), Capability::InvokeProcess);
         tool_capability_requirements.insert("post_to_feed".to_string(), Capability::PostToFeed);
         tool_capability_requirements.insert("check_budget".to_string(), Capability::ManageBilling);
@@ -134,5 +138,24 @@ impl PolicyConfig {
     pub fn with_agent_override(mut self, agent_override: Option<AgentToolPermissions>) -> Self {
         self.agent_override = agent_override;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_agents_marketplace_is_gated_on_list_agents() {
+        let cfg = PolicyConfig::default();
+        let cap = cfg
+            .tool_capability_requirements
+            .get("list_agents_marketplace")
+            .expect("list_agents_marketplace must be registered in the policy map");
+        assert_eq!(
+            *cap,
+            Capability::ListAgents,
+            "list_agents_marketplace must share the ListAgents gate with org-scoped list_agents"
+        );
     }
 }

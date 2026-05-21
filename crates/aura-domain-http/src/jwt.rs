@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
-    CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor, ProjectUpdate,
+    CreateSessionParams, DomainApi, ListMarketplaceAgentsParams, ListMarketplaceAgentsResponse,
+    MessageDescriptor, ProjectDescriptor, ProjectUpdate,
     SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
 };
 
@@ -272,6 +273,15 @@ impl DomainApi for JwtDomainApi {
     ) -> anyhow::Result<String> {
         self.inner
             .network_api_call(method, path, body, self.jwt_or(jwt))
+            .await
+    }
+    async fn list_marketplace_agents(
+        &self,
+        params: ListMarketplaceAgentsParams<'_>,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<ListMarketplaceAgentsResponse> {
+        self.inner
+            .list_marketplace_agents(params, self.jwt_or(jwt))
             .await
     }
 }
