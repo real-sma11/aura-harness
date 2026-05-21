@@ -221,6 +221,27 @@ pub fn network_tool_definitions() -> Vec<ToolDefinition> {
             "Record token usage for billing.",
             serde_json::json!({"type":"object","properties":{"org_id":{"type":"string"},"user_id":{"type":"string"},"input_tokens":{"type":"integer"},"output_tokens":{"type":"integer"},"agent_id":{"type":"string"},"model":{"type":"string"}},"required":["org_id","user_id","input_tokens","output_tokens"]}),
         ),
+        compact_tool(
+            "list_agents_marketplace",
+            "Browse the public agent marketplace. Read-only; returns a paginated list of agents listed by their creators across all orgs (distinct from list_agents which is scoped to your org/team). Each entry includes agent_id, name, role, description, expertise tags, completed_tasks, revenue_usd, reputation, creator_display_name, listed_at. Use the returned agent_id with assign_agent_to_project to hire that agent. Filters: sort (trending|latest|revenue|reputation), expertise (slug, exact match), limit (1..=100, default 50), offset (pagination). The server does not support free-text/keyword search.",
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "sort":{
+                        "type":"string",
+                        "enum":["trending","latest","revenue","reputation"],
+                        "description":"Order results. Defaults to 'trending' server-side."
+                    },
+                    "expertise":{
+                        "type":"string",
+                        "description":"Filter to agents declaring this expertise slug. Exact match; no fuzzy search."
+                    },
+                    "limit":{"type":"integer","minimum":1,"maximum":100,"description":"Page size. Server caps at 100; default 50."},
+                    "offset":{"type":"integer","minimum":0,"description":"Number of agents to skip, for pagination."}
+                },
+                "required":[]
+            }),
+        ),
     ]
 }
 

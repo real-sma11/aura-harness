@@ -304,6 +304,9 @@ fn domain_tool_required_capabilities(name: &str) -> Vec<Capability> {
         // Per-project authorization is still enforced server-side via the
         // calling user's JWT.
         "assign_agent_to_project" => vec![Capability::SpawnAgent],
+        // Browsing the marketplace is a read-only listing op — same
+        // capability shape as the existing org-scoped `list_agents`.
+        "list_agents_marketplace" => vec![Capability::ListAgents],
         _ => Vec::new(),
     }
 }

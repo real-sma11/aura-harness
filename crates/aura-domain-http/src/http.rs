@@ -9,9 +9,9 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
-    AgentInstanceDescriptor, CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor,
-    ProjectUpdate, SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor,
-    TaskUpdate,
+    AgentInstanceDescriptor, CreateSessionParams, DomainApi, ListMarketplaceAgentsParams,
+    ListMarketplaceAgentsResponse, MessageDescriptor, ProjectDescriptor, ProjectUpdate,
+    SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -663,6 +663,45 @@ impl DomainApi for HttpDomainApi {
             return Err(anyhow!("HTTP {status}: {truncated}"));
         }
         Ok(text)
+    }
+
+    // -- Marketplace (aura-os-server) -----------------------------------------
+    //
+    // `GET /api/marketplace/agents` returns the cross-org talent pool. The
+    // endpoint is owned by aura-os-server (not aura-network / aura-storage),
+    // so we route through `project_base_url()` for the same reason as the
+    // project routes above. Wire shape lives in
+    // `apps/aura-os-server/src/dto.rs::ListMarketplaceAgentsResponse`.
+
+    async fn list_marketplace_agents(
+        &self,
+        params: ListMarketplaceAgentsParams<'_>,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<ListMarketplaceAgentsResponse> {
+        let jwt = Self::require_jwt(jwt)?;
+        let mut url = format!("{}/api/marketplace/agents", self.project_base_url());
+        let mut sep = '?';
+        if let Some(sort) = params.sort {
+            use std::fmt::Write;
+            let _ = write!(url, "{sep}sort={sort}");
+            sep = '&';
+        }
+        if let Some(expertise) = params.expertise {
+            use std::fmt::Write;
+            let _ = write!(url, "{sep}expertise={expertise}");
+            sep = '&';
+        }
+        if let Some(limit) = params.limit {
+            use std::fmt::Write;
+            let _ = write!(url, "{sep}limit={limit}");
+            sep = '&';
+        }
+        if let Some(offset) = params.offset {
+            use std::fmt::Write;
+            let _ = write!(url, "{sep}offset={offset}");
+            let _ = sep;
+        }
+        self.api_get(&url, jwt).await
     }
 }
 

@@ -91,6 +91,7 @@ const DOMAIN_TOOL_NAMES: &[&str] = &[
     "list_projects",
     "check_budget",
     "record_usage",
+    "list_agents_marketplace",
 ];
 
 /// Dispatches domain tool calls to the appropriate handler via `DomainApi`.
@@ -251,6 +252,9 @@ impl DomainToolExecutor {
             }
             "check_budget" => network::check_budget(self.api.as_ref(), project_id, &input).await,
             "record_usage" => network::record_usage(self.api.as_ref(), project_id, &input).await,
+            "list_agents_marketplace" => {
+                network::list_agents_marketplace(self.api.as_ref(), project_id, &input).await
+            }
 
             other => {
                 warn!(tool = other, "unknown domain tool");
