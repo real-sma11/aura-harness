@@ -167,32 +167,19 @@ pub fn build_agentic_task_context(
     if !work_log_summary.is_empty() {
         ctx.push_str(&format!(
             "# Session Progress (tasks completed so far)\n{work_log_summary}\n\n\
-             IMPORTANT: Review the completed tasks above. If your task's work was already done \
-             by a prior task (e.g. the struct/module/function already exists), verify quickly with \
-             search_code or read_file and call task_done immediately instead of re-implementing.\n\n"
+             If this task's work was already done by a prior task, call task_done with \
+             `no_changes_needed: true` instead of re-implementing.\n\n"
         ));
     }
 
-    ctx.push_str(
-        "Briefly explore the codebase, then form a plan and begin implementing. \
-         Focus on files you need to modify. Prefer targeted reads (with start_line/end_line) \
-         over full-file reads when you only need a specific section.\n\n",
-    );
-
-    let title_lower = task.title.to_lowercase();
-    let desc_lower = task.description.to_lowercase();
-    if title_lower.contains("test")
-        || title_lower.contains("integration")
-        || desc_lower.contains("test")
-        || desc_lower.contains("integration")
-    {
-        ctx.push_str(
-            "\nIMPORTANT: This task involves writing tests. Before writing any test code, \
-             read the struct/type definitions for every type you will construct or call methods on. \
-             Verify exact field names, constructor signatures (::new() parameters), and return types. \
-             Do NOT rely on memory or inference from method signatures in store/service files.\n",
-        );
-    }
+    // Stripped (2026-05): previously this pushed a "Briefly explore...
+    // form a plan... begin implementing" preamble plus, when the task
+    // mentioned "test" / "integration", an extra "verify exact field
+    // names, constructor signatures... before writing any test code"
+    // block. Together they pushed the agent into long read-only turns
+    // (49 tool calls / 0 file ops in the round-1 validation run). Hold
+    // the user message at the task header plus a one-line directive.
+    ctx.push_str("Make the changes this task requires, then call task_done.\n");
 
     ctx
 }
@@ -410,8 +397,11 @@ mod tests {
         assert!(!ctx.contains("spec truncated"));
     }
 
+    /// Round-2 strip: the test/integration-task verify-before-writing
+    /// injection was removed (see `build_agentic_task_context` doc
+    /// comment). Pin the absence so the block doesn't sneak back in.
     #[test]
-    fn context_includes_test_warning_for_test_tasks() {
+    fn context_omits_test_warning_for_test_tasks() {
         let project = ProjectInfo {
             name: "p",
             description: "",
@@ -433,6 +423,17 @@ mod tests {
             summary_of_previous_context: "",
         };
         let ctx = build_agentic_task_context(&project, &spec, &task, &session, &[], "");
-        assert!(ctx.contains("This task involves writing tests"));
+        assert!(
+            !ctx.contains("This task involves writing tests"),
+            "verify-before-writing block must stay out of the task context"
+        );
+        assert!(
+            !ctx.contains("Briefly explore"),
+            "explore-first preamble must stay out of the task context"
+        );
+        assert!(
+            ctx.contains("Make the changes this task requires, then call task_done."),
+            "round-2 directive must replace the deleted preamble"
+        );
     }
 }

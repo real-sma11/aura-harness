@@ -114,11 +114,12 @@ fn test_agent_loop_config_defaults() {
     // extraction) with `stop_reason: "cancelled"`. See
     // `constants::MAX_ITERATIONS`.
     assert_eq!(config.max_iterations, usize::MAX);
-    // Raised from 12 to 40 by the harness-dev-loop-efficiency plan so a
-    // realistic explore + verify-edit cycle fits without burning the
-    // turn on exploration-budget oscillation. See
-    // `constants::DEFAULT_EXPLORATION_ALLOWANCE`.
-    assert_eq!(config.exploration_allowance, 40);
+    // History: 12 -> 40 (harness-dev-loop-efficiency, validated against
+    // an open `plan_submitted` gate); 40 -> 20 (round-2 strip,
+    // 2026-05). The round-1 strip ungated the read block, so the
+    // 40-cap was hiding read-only loops rather than breaking them.
+    // See `constants::DEFAULT_EXPLORATION_ALLOWANCE`.
+    assert_eq!(config.exploration_allowance, 20);
     assert_eq!(config.auto_build_cooldown, 2);
     assert_eq!(config.thinking_taper_after, 2);
     assert!((config.thinking_taper_factor - 0.6).abs() < f64::EPSILON);

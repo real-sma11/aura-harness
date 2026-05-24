@@ -337,28 +337,35 @@ fn detect_blocked_commands(tool: &ToolCallInfo, ctx: &BlockingContext) -> Option
 
 /// Detector 4: Block exploration tools when allowance is exceeded.
 ///
-/// Phase-gated: the hard block only fires once the agent has
-/// successfully called `submit_plan` (signalled via
-/// [`BlockingContext::mark_plan_submitted`]). Before the plan,
-/// exploration is the only path the agent has to gather the context it
-/// needs to fill in a credible `submit_plan` payload, and the
-/// structural plan gate already rejects every write tool pre-plan — so
-/// hard-blocking reads there leaves the agent with no legal next tool
-/// and the run wedges into a "task completed without any file
-/// operations" failure (the regression introduced when
-/// `track_tool_effects` was first wired to the blocking counter, see
-/// the parallel test `exploration_count_is_incremented_by_track_tool_effects`).
-/// Soft pressure during exploration still comes from the warning
-/// offsets in [`crate::constants`] and the agent's system prompt.
+/// Stripped (2026-05): previously phase-gated on `plan_submitted` so
+/// the hard block only fired after the agent called `submit_plan`. The
+/// rationale was that pre-plan reads were the only way to gather
+/// context for a credible plan — but round-1 of the strip removed the
+/// plan write gate, so the agent can now write at any time. With no
+/// gate to flip `plan_submitted`, the latch was permanently open and
+/// the read budget became unenforceable: the failing run we used to
+/// validate round 1 made 49 tool calls and ~4 minutes of agentic
+/// turns without ever writing a file. Drop the latch entirely so the
+/// budget is a real ceiling: at `exploration_count >= allowance`
+/// every further `read_file`/`search_code`/`list_files` returns
+/// "exploration budget exceeded — start writing now". The model's
+/// only legal next moves are `write_file` / `edit_file` /
+/// `delete_file` / `task_done`, which is the transition the gate was
+/// designed to force.
+///
+/// `BlockingContext::plan_submitted` and `mark_plan_submitted` are
+/// kept around for the moment so `handle_submit_plan` can still flip
+/// the signal (and so any external caller that reads `plan_submitted`
+/// for telemetry keeps working), but this detector no longer reads
+/// it. The soft warnings at `allowance - 8` (mild) and
+/// `allowance - 4` (strong) still fire so the model gets a heads-up
+/// before the wall.
 pub(crate) fn detect_blocked_exploration(
     tool: &ToolCallInfo,
     ctx: &BlockingContext,
 ) -> Option<BlockCheckResult> {
     if !EXPLORATION_TOOLS.contains(&tool.name.as_str()) {
         return None;
-    }
-    if !ctx.plan_submitted {
-        return Some(BlockCheckResult::allowed());
     }
     if ctx.exploration_count >= ctx.exploration_allowance {
         Some(BlockCheckResult::blocked(

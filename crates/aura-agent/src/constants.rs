@@ -48,9 +48,18 @@ pub fn tool_result_cache_key(tool_name: &str, input: &serde_json::Value) -> Stri
 /// a user-initiated cancel.
 pub const MAX_ITERATIONS: usize = usize::MAX;
 
-/// Default exploration allowance (read-only tool calls before warnings).
-/// Raised from 12 to 40 to give realistic explore/edit cycles headroom.
-pub const DEFAULT_EXPLORATION_ALLOWANCE: usize = 40;
+/// Default exploration allowance (read-only tool calls before the
+/// hard block in `detect_blocked_exploration` fires).
+///
+/// History: 12 -> 40 (round 0, "give realistic explore/edit cycles
+/// headroom"); 40 -> 20 (round 2 strip, 2026-05). The 40-cap was
+/// validated against an open phase gate — the hard block only fired
+/// after `submit_plan`, which round 1 disarmed. Reads went unbounded
+/// in practice. With the gate now unconditional (see
+/// `detect_blocked_exploration` doc comment), 20 reads is enough for
+/// any honest workflow and forces the read-to-write transition for
+/// runs that would otherwise loop.
+pub const DEFAULT_EXPLORATION_ALLOWANCE: usize = 20;
 
 /// Auto-build cooldown: minimum iterations between automatic build checks.
 pub const AUTO_BUILD_COOLDOWN: usize = 2;
@@ -72,12 +81,19 @@ pub const THINKING_TAPER_FACTOR: f64 = 0.6;
 pub const THINKING_MIN_BUDGET: u32 = 6144;
 
 /// Maximum full reads of the same file before blocking.
-/// Raised from 3 to 10 to give realistic explore/edit cycles headroom.
-pub const MAX_READS_PER_FILE: usize = 10;
+///
+/// History: 3 -> 10 (round 0, "realistic explore/edit cycles
+/// headroom"); 10 -> 3 (round 2 strip, 2026-05). The validation run
+/// that motivated round 2 read `outbox.rs` ~7 times across full and
+/// ranged reads without ever writing — the loose cap was actively
+/// hiding the loop instead of breaking it.
+pub const MAX_READS_PER_FILE: usize = 3;
 
 /// Maximum range reads of the same file before blocking.
-/// Raised from 5 to 15 to give realistic explore/edit cycles headroom.
-pub const MAX_RANGE_READS_PER_FILE: usize = 15;
+///
+/// History: 5 -> 15 (round 0); 15 -> 5 (round 2 strip, 2026-05).
+/// Same rationale as [`MAX_READS_PER_FILE`].
+pub const MAX_RANGE_READS_PER_FILE: usize = 5;
 
 /// Consecutive command failures before blocking all commands.
 /// Raised from 5 to 8 to give realistic explore/edit cycles headroom.
