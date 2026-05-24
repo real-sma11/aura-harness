@@ -484,10 +484,13 @@ impl TaskToolExecutor {
                 results.push(Self::tool_result(
                     tc,
                     format!(
-                        "Plan accepted. Proceeding to implementation.\n\n\
+                        "Plan recorded for reference. Implementation can already \
+                         proceed — writes (write_file/edit_file/delete_file) and \
+                         task_done are accepted regardless of whether submit_plan \
+                         was called. This call reset the rolling-outcome window \
+                         and refreshed the exploration budget.\n\n\
                          YOUR PLAN (reference during implementation):\n{context_string}\n\n\
-                         Now implement according to this plan. Start with the most \
-                         foundational changes first.",
+                         Continue with the most foundational changes first.",
                     ),
                     false,
                     false,

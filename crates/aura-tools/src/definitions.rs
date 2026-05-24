@@ -305,9 +305,10 @@ pub fn engine_specific_tools() -> Vec<ToolDefinition> {
         ),
         tool(
             "submit_plan",
-            "Submit your implementation plan before making any file changes. \
-             You MUST call this after exploration and before any write_file/edit_file \
-             calls. The plan is validated and becomes your reference during implementation.",
+            "Optional: record your implementation plan for the transcript. \
+             Calling this resets exploration counters and gives you bonus read \
+             budget for the implement phase. Not required before \
+             write_file/edit_file.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

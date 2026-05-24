@@ -1,17 +1,29 @@
-//! Task planning types for explore/implement phase gating.
+//! Task planning types for the optional explore/implement plan handshake.
 //!
-//! Before the agent submits a plan, write operations (`write_file`, `edit_file`,
-//! `delete_file`) are rejected. The `submit_plan` tool transitions the phase
-//! from `Exploring` to `Implementing`.
+//! As of harness-v2, tasks start in [`TaskPhase::Implementing`] with an empty
+//! plan so write operations (`write_file`, `edit_file`, `delete_file`) and
+//! `task_done` are accepted from the first iteration. Calling `submit_plan`
+//! is now optional planning metadata — it still records the plan, resets the
+//! rolling-outcome window, and bumps the exploration budget, but is no longer
+//! required for a task to reach the implement phase.
 //
-// TODO(phase5, 2026-04-22): the `TaskPlan::empty()` constructor is
-// unused for now but is part of the Phase 5 task-executor integration.
+// `Exploring` is preserved in the enum so historical traces, telemetry, and
+// the `validate_execution` `reached_implementing` check keep round-tripping;
+// nothing in the live code path constructs it any more.
 #![allow(dead_code)]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskPhase {
     Exploring,
     Implementing { plan: TaskPlan },
+}
+
+impl Default for TaskPhase {
+    fn default() -> Self {
+        Self::Implementing {
+            plan: TaskPlan::empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +182,20 @@ mod tests {
         assert!(plan.approach.is_empty());
         assert!(plan.files_to_modify.is_empty());
         assert!(plan.files_to_create.is_empty());
+    }
+
+    #[test]
+    fn task_phase_defaults_to_implementing_with_empty_plan() {
+        // harness-v2 contract: a freshly-constructed TaskPhase must report
+        // the implementing variant so `validate_execution`'s
+        // `reached_implementing` check is satisfied by any task that
+        // produces file ops, regardless of whether `submit_plan` ran.
+        // Tests in the dev-loop validation suite rely on this default
+        // matching the production executor's initial phase.
+        match TaskPhase::default() {
+            TaskPhase::Implementing { plan } => assert_eq!(plan, TaskPlan::empty()),
+            TaskPhase::Exploring => panic!("default phase must be Implementing"),
+        }
     }
 
     #[test]

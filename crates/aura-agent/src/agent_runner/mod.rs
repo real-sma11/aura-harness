@@ -17,7 +17,7 @@ use aura_reasoner::{Message, ModelProvider, ModelRequestKind, ToolDefinition};
 use crate::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::events::AgentLoopEvent;
 use crate::file_ops::FileOp;
-use crate::planning::TaskPhase;
+use crate::planning::{TaskPhase, TaskPlan};
 use crate::prompts::{
     agentic_execution_system_prompt, build_agentic_task_context, build_chat_system_prompt,
     AgentInfo, ProjectInfo, SessionInfo, SpecInfo, TaskInfo,
@@ -323,12 +323,16 @@ impl AgentRunner {
         cancel: Option<CancellationToken>,
     ) -> Result<TaskExecutionResult, crate::AgentError> {
         // Shared `Arc<AtomicBool>` between the task executor and the
-        // wrapped agent loop. The executor flips it to `true` from
-        // `handle_submit_plan`; the loop observes-and-clears it from
-        // `LoopState::begin_iteration` to reset exploration counters
-        // for the implementation phase. See plan
-        // `harness-dev-loop-efficiency`.
-        let reset_signal = Arc::new(AtomicBool::new(false));
+        // wrapped agent loop. Pre-seeded to `true` so the first
+        // iteration's `LoopState::begin_iteration` zeroes exploration
+        // and read-guard counters, bumps the allowance with the
+        // implement-phase bonus, and arms the post-plan exploration
+        // hard block — giving every task the fresh budget that used to
+        // require a successful `submit_plan` call.
+        // `handle_submit_plan` still flips this back to `true` when a
+        // plan is accepted mid-run so an explicit re-plan also gets a
+        // fresh budget. See `harness_task_completion_fix` Phase 1.
+        let reset_signal = Arc::new(AtomicBool::new(true));
         // Build the full (uncapped) task-context bundle ONCE here so
         // both the `get_task_context` tool response and the initial
         // user message inside `execute_task_inner` derive from the
@@ -356,7 +360,9 @@ impl AgentRunner {
             test_gate_attempts: Arc::default(),
             test_runner: Arc::new(crate::task_executor::RealTaskTestRunner),
             disable_test_gate: crate::task_executor::read_disable_test_gate_env(),
-            task_phase: Arc::new(Mutex::new(TaskPhase::Exploring)),
+            task_phase: Arc::new(Mutex::new(TaskPhase::Implementing {
+                plan: TaskPlan::empty(),
+            })),
             self_review: Arc::default(),
             event_tx: event_tx.clone(),
             no_changes_needed: Arc::default(),
