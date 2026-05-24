@@ -54,19 +54,24 @@ fn agentic_prompt_includes_workspace_context() {
 
 #[test]
 fn agentic_prompt_includes_definition_of_done_hard_gate() {
+    // After the 2026-05 strip, the verbose "DEFINITION OF DONE (HARD
+    // GATE)" block was inlined into a single rule. The contract is
+    // unchanged — the agent must not call task_done while the build
+    // is broken or the test suite is failing — so the assertions
+    // pin the shorter rendering instead of the old section header.
     let project = test_project("/nonexistent");
     let prompt = agentic_execution_system_prompt(&project, None, None, 20);
     assert!(
-        prompt.contains("DEFINITION OF DONE (HARD GATE)"),
-        "DoD hard-gate section header missing"
+        prompt.contains("hard gate"),
+        "task_done hard-gate language missing: {prompt}"
     );
     assert!(
-        prompt.contains("ALL tests must pass"),
-        "all-tests-must-pass language missing"
+        prompt.contains("Do not call `task_done`"),
+        "task_done deferral instruction missing: {prompt}"
     );
     assert!(
-        prompt.contains("rejected while any test is failing"),
-        "rejection language missing"
+        prompt.contains("test suite"),
+        "test-suite reference missing: {prompt}"
     );
 }
 

@@ -258,31 +258,14 @@ impl TaskToolExecutor {
         if no_changes {
             return None;
         }
-        // Name the current phase so the model can recover through the
-        // intended submit_plan -> implement -> task_done workflow.
-        let phase = self.task_phase.lock().await;
-        let prefix = if matches!(*phase, TaskPhase::Exploring) {
+        Some(
             "ERROR: task_done was rejected — you have not produced any file changes \
-             (write_file / edit_file / delete_file) AND you are still in the EXPLORING phase. \
-             You cannot finish a task from Exploring; the task workflow is:\n\
-             \n\
-             1. (you are here) Briefly explore with read_file / search_code / find_files / list_files.\n\
-             2. Call submit_plan with a concrete approach (≥20 chars) and at least one path in \
-                files_to_modify or files_to_create. Plan acceptance unlocks file edits.\n\
-             3. Implement with write_file / edit_file / delete_file.\n\
-             4. THEN call task_done.\n\
-             \n\
-             Do NOT keep retrying task_done — call submit_plan next. "
-        } else {
-            "ERROR: task_done was rejected — you are in the IMPLEMENTING phase but have not \
-             produced any file changes (write_file / edit_file / delete_file). Implementation \
-             tasks must produce file changes. Make the edits this task requires, then call \
-             task_done. "
-        };
-        Some(format!(
-            "{prefix}If this task genuinely requires no file changes, call task_done again with \
+             (write_file / edit_file / delete_file). Implementation tasks must produce \
+             file changes. Make the edits this task requires, then call task_done. \
+             If this task genuinely requires no file changes, call task_done again with \
              \"no_changes_needed\": true and explain why in the \"notes\" field."
-        ))
+                .to_string(),
+        )
     }
 
     /// Run the full project test suite and translate the outcome into a

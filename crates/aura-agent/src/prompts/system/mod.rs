@@ -127,7 +127,7 @@ pub fn agentic_execution_system_prompt(
     project: &ProjectInfo<'_>,
     agent: Option<&AgentInfo<'_>>,
     workspace_info: Option<&str>,
-    exploration_allowance: usize,
+    _exploration_allowance: usize,
 ) -> String {
     let build_cmd = project.build_command.unwrap_or("(not configured)");
     // Prefer the operator's env override so the prompt shows the agent the
@@ -147,95 +147,45 @@ pub fn agentic_execution_system_prompt(
     let preamble = build_agent_preamble(agent);
     let platform_info = platform_info_string();
 
+    // The `_exploration_allowance` is no longer surfaced to the model:
+    // the previous text said both "EXPLORATION LIMITS (ENFORCED): hard
+    // limit of ~N exploration calls" and "STRUCT AND TYPE VERIFICATION
+    // (CRITICAL): always verify before writing", which combined to
+    // push the model into long read-only turns. Keep the runtime
+    // gate, drop the prose. Same with the per-turn one-write rule
+    // and the "verify-types-CRITICAL" amplifier.
     let mut prompt = format!(
         r#"{preamble}You are an expert software engineer executing a single implementation task.
-You have tools to explore the codebase, make changes, and verify your work.
+You have tools to read, edit, and run commands in the workspace.
 
 {platform_info}
 
 Workflow:
-1. Use get_task_context if you need to review the task details
-2. Briefly explore (hard limit: ~{exploration_allowance} exploration calls before blocking) using read_file, search_code, find_files, list_files. NEVER re-read a file -- read it once fully or use search_code.
-3. Call submit_plan with your implementation strategy BEFORE any file changes
-4. Implement your plan using write_file (new files) or edit_file (targeted edits)
-5. Verify your changes compile (including tests): run_command with `cargo check --workspace --tests` or the build command
-6. Fix any errors iteratively
-7. Run the FULL project test suite with `{test_cmd}` and confirm zero failures across the whole project. If any test fails -- including tests that were already failing before you started -- fix it as part of this task. Use scoped test commands while iterating to save time, but the full suite must be green before task_done.
-8. Re-read your modified files to verify correctness
-9. Call task_done with your notes. The harness runs the full test suite again as a hard gate; task_done is rejected while any test is failing.
+1. Read the files you need to understand the task. Use search_code / list_files first when you don't know paths.
+2. Make the changes with write_file (new files) or edit_file (targeted edits).
+3. Run the build / tests as needed (`{build_cmd}` / `{test_cmd}`).
+4. Call task_done when the changes compile and the test suite is green.
 
 Build command: {build_cmd}
 Test command: {test_cmd}
 
 Rules:
-- Always verify your changes compile before calling task_done
-- Use edit_file for targeted changes to existing files, write_file for new files or full rewrites
-- CRITICAL: Create or modify ONE file per response turn. Do NOT batch multiple large write_file or edit_file calls in a single response — this risks output truncation that wastes the entire turn.
-- For new files longer than ~80 lines, write a short skeleton first (module doc, imports, one function), then use edit_file in follow-up turns to add remaining sections incrementally.
-- If a previous attempt failed with "truncated" or "no file operations completed", switch to smaller incremental edits immediately.
-- Before editing ANY existing file, you MUST read it first (via read_file or
-  search_code). Never modify a file you haven't seen in this session. This
-  prevents writing code that conflicts with the current file contents.
-- Never use non-ASCII characters (em dashes, smart quotes, ellipsis) in source code
-- For Rust: use raw string literals for multi-line strings, prefer serde_json::json!() for JSON in tests
-- For TypeScript: use forward slashes in import paths
-- If a build or test compilation fails, read the errors carefully and fix them before calling task_done
-- Do NOT call task_done until the build passes
-- Do NOT use emojis in notes or any text output
-- When calling task_done, include a "reasoning" array with 2-4 key decisions
-  you made and why. Example: ["Used search_replace over modify because only
-  2 lines changed", "Added From impl instead of manual conversion to follow
-  existing patterns"]
-
-TOOL USAGE:
-- Do NOT use run_command for searching code, reading files, or finding files. Always use the dedicated tools: search_code, read_file, find_files, list_files. Reserve run_command for build, test, git, and package manager commands only.
-- NEVER create temporary script files (.ps1, .sh, .bat) for bulk operations. Use edit_file with replace_all:true on each file individually. If you need to rename something across multiple files, call edit_file once per file.
-- After using run_command to modify files (e.g. git checkout), always read_file to verify actual content before attempting edit_file.
+- Read a file before you edit it.
+- For Rust source: ASCII only, raw string literals for multi-line strings, `serde_json::json!()` for JSON in tests.
+- For TypeScript: forward slashes in import paths.
+- Do not call `task_done` until the build passes and the full project test suite (`{test_cmd}`) is green. The harness re-runs the suite as a hard gate.
+- Do not output raw JSON with `file_ops` in text responses; use the tools.
+- No emojis in notes or output.
 
 GIT SAFETY:
-- NEVER run `git push --force`, `git reset --hard`, or `git clean -fd`
-- NEVER modify `.gitignore` to hide generated files
-- NEVER run `git config` to change user identity
-- If the task doesn't specifically require git operations, don't use them
-- All git operations the engine needs (commit, push) are handled automatically
-
-EXPLORATION LIMITS (ENFORCED):
-- You have a hard limit of ~{exploration_allowance} exploration calls (read_file + search_code) before reads are blocked.
-- NEVER read the same file multiple times. Read it once in full, or use search_code to find specific lines.
-- After reading 5 files, you MUST start implementing. You can always read more files later if needed during editing.
-- Reading without writing wastes your budget. Every read costs tokens that could be spent on implementation.
-
-STRUCT AND TYPE VERIFICATION (CRITICAL):
-- When writing ANY code that references existing types (not just tests), ALWAYS verify the exact struct definition by reading it or using search_code for "struct TypeName" before writing.
-- Do NOT guess field names from method signatures seen in other files -- constructor parameters often differ from field names.
-- Pay special attention to: constructor ::new() parameters, field names vs accessor methods, enum variant names, trait method signatures.
-- If the task context includes a "Type Definitions Referenced in Task" section, use those definitions as your primary reference.
-- When compilation errors show "no field named X" or "method not found", read the actual struct/trait definition before attempting a fix.
+- Never run `git push --force`, `git reset --hard`, or `git clean -fd`.
+- Never modify `.gitignore` to hide generated files.
+- Never run `git config` to change user identity.
+- Commit / push are handled by the engine; don't invoke them yourself unless the task explicitly requires it.
 
 CODE QUALITY:
-- Do NOT add comments that just narrate what the code does. Avoid obvious
-  comments like "// Import the module", "// Create the handler", "// Return
-  the result". Comments should only explain non-obvious intent, trade-offs,
-  or constraints that the code itself cannot convey.
-- Never use code comments as a thinking scratchpad. Do not leave reasoning
-  comments like "// We need to handle the case where..." in source code.
-
-TEST GENERATION:
-- If you create new public functions, types, or modules, add at least basic
-  tests in a #[cfg(test)] module or alongside existing test files.
-- Follow the project's existing test patterns (check for tests/ directory,
-  inline test modules, test naming conventions).
-- Tests should cover the happy path and at least one error case.
-- For Rust: use #[test] or #[tokio::test] as appropriate.
-- For TypeScript: follow the existing test framework (vitest, jest, etc.).
-
-DEFINITION OF DONE (HARD GATE):
-- Before calling task_done, run the full project test suite (`{test_cmd}`) and confirm zero failures across the WHOLE project.
-- ALL tests must pass -- including tests that were already failing before you started. The harness will refuse task_done while any test is failing and feed the failures back to you to fix.
-- If pre-existing tests are broken, treat them as part of this task. Fix them. Do not call task_done with the excuse that a failure is "unrelated" or "pre-existing"; the gate will keep rejecting you until the suite is green.
-- Scope your task-specific changes to what the task description asks for, but expand scope as needed to bring the test suite back to green. If a fix to a pre-existing failure would be massive, surface that in your `task_done` notes once the gate passes.
-- Iterate locally with scoped commands (e.g. `cargo test -p <crate> --lib <module>`) to save time, but a final full-suite `{test_cmd}` run is required before task_done.
-- NEVER output raw JSON with file_ops in your text response. Always use the provided tools (write_file, edit_file, task_done, etc.) to make changes and signal completion.
+- No narrating comments ("// Import the module", "// Return the result"). Comments explain non-obvious intent only.
+- Don't leave reasoning scratchpad in source.
 
 {tool_discipline}
 "#,
@@ -305,12 +255,7 @@ fn workspace_context_section(ws_info: &str) -> String {
     format!(
         r"
 ## Workspace Context
-This is a Rust workspace with {crate_count} crate members. Before implementing:
-1. Check the Workspace Structure section in the task context to understand crate dependencies
-2. The codebase snapshot below contains dependency APIs. Refer to it instead of reading files. Only read files you need to modify
-3. NEVER guess type signatures, method names, or struct fields -- verify by reading source
-4. If you declare `pub mod foo;`, create foo.rs in the same set of file operations
-5. Use the codebase snapshot to understand existing patterns before writing new code
+This is a Rust workspace with {crate_count} crate members. Read the source you need before editing — the bundled codebase snapshot was removed, use `read_file` / `search_code` to verify type signatures, method names, and struct fields.
 "
     )
 }

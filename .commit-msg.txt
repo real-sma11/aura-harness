@@ -1,0 +1,78 @@
+strip(harness): remove submit_plan write-gate, slim context, lower thinking budget
+
+Background. Four consecutive dev-loop runs failed with
+`task completed without any file operations -- completion not verified`
+or `reached implementation phase but no file operations completed`.
+The model was capable; the harness was forcing it into long
+exploration spirals, then rejecting `task_done` once it tried to
+finish, then re-exploring after compaction redacted the bundled
+context. Hypothesis: the harness over-instructs and over-thinks the
+agent into paralysis. This commit strips the four guardrails that
+together produced that pattern, applied as a single batch so the
+hypothesis can be validated end-to-end on a real task.
+
+Cuts.
+
+1. Delete the `submit_plan` write gate. `write_file` / `edit_file` /
+   `delete_file` no longer require the `Implementing` phase. The
+   `submit_plan` tool stays as a no-op ack (still resets the
+   exploration counters and outcome window if the model uses it),
+   but the gate that translated "no plan yet" into a hard write
+   rejection is gone. The phase-aware `task_done` rejection
+   collapses into a single phase-neutral message.
+
+2. Drop the default `thinking_budget` from 10_000 to 2_000 and
+   remove the per-complexity escalation in `configure_loop_config`
+   (`Standard = compute_thinking_budget(...)`,
+   `Complex = compute_thinking_budget(...).max(12_000)`). Every
+   task now inherits the configured floor. The high budget was
+   producing "Thought for 2m" bursts and tool-free turns rather
+   than faster convergence. `compute_thinking_budget` is kept
+   under `#[cfg(test)]` so the math stays on hand for a possible
+   re-introduction.
+
+3. Slim `build_full_task_ctx` to the agentic task header
+   (project / spec / task / session / completed-deps / work-log).
+   The 160 KB workspace-map + type-defs + codebase-snapshot +
+   dep-API bundle is no longer included. Every `get_task_context`
+   call previously dumped ~40 K tokens; once compaction redacted
+   the older copy the model re-fetched it and the conversation
+   thrashed. The agent has `read_file` / `search_code` /
+   `list_files` and can pull what it needs.
+
+4. Slim `agentic_execution_system_prompt` from ~9 KB to a tight
+   set of rules. Removed: `STRUCT AND TYPE VERIFICATION (CRITICAL)`,
+   `EXPLORATION LIMITS (ENFORCED)`, the one-write-per-turn rule,
+   the `truncated` / `no file operations completed` retry hint,
+   the `TEST GENERATION` block, and the
+   `Use get_task_context if you need to review the task details`
+   workflow step. The DoD test gate is preserved as a single rule.
+   The workspace-context blurb is reworded to stop pointing at the
+   now-removed codebase snapshot. The runtime gates (exploration
+   allowance, write recording, blocking detectors, test gate) are
+   unchanged -- only the prose is gone.
+
+Tests. `cargo check --workspace --tests` is clean.
+`cargo test -p aura-agent --lib` passes 436/436 (the one pre-
+existing flake `pipeline_cancellation_mid_tool_execution_aborts_loop`
+fails identically on `main` and is unrelated). Updated test
+expectations:
+
+- `task_done_in_exploring_phase_points_at_submit_plan` ->
+  `task_done_in_exploring_phase_uses_phase_neutral_message`
+  (asserts the phase-aware wording is gone).
+- `write_file_in_exploring_phase_returns_actionable_schema` ->
+  `write_file_in_exploring_phase_is_not_gated` (asserts the
+  delegate now receives the call and the file-op is recorded).
+- `task_done_rejects_when_no_file_ops` no longer asserts the
+  `IMPLEMENTING phase` substring.
+- `agentic_prompt_includes_definition_of_done_hard_gate` now pins
+  the slimmer `hard gate` / `Do not call task_done` / `test suite`
+  language instead of the old `DEFINITION OF DONE (HARD GATE)`
+  block header.
+
+Validation plan. Rebuild aura-node, restart on :8080, trigger task
+6.7 `Implement send_text` once via `run-once`, and confirm a
+non-empty `file_ops` in the final `task_done` (or a `task_failed`
+with concrete file paths) within ~10 turns and ~50 K total output
+tokens.

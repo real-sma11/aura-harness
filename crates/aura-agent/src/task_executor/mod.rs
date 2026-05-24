@@ -26,28 +26,6 @@ use crate::verify::{infer_default_build_command, infer_default_test_command, Tes
 
 const MAX_STUB_FIX_ATTEMPTS: u32 = 2;
 
-/// Reply returned to the model when it tries `write_file` / `edit_file` /
-/// `delete_file` while still in [`TaskPhase::Exploring`].
-///
-/// The message includes the accepted `submit_plan` shape because the
-/// exploring-phase write gate is recoverable only when the next model turn
-/// submits a valid plan.
-const SUBMIT_PLAN_GATE_MESSAGE: &str = "ERROR: write_file / edit_file / delete_file are blocked until you call submit_plan.\n\
-\n\
-Call submit_plan first with this exact JSON shape:\n\
-{\n\
-  \"approach\": \"<at least 20 chars: how you'll fix the task>\",\n\
-  \"files_to_modify\": [\"<existing path>\", ...],\n\
-  \"files_to_create\": [\"<new path>\", ...],\n\
-  \"key_decisions\": [\"<optional notes>\", ...]\n\
-}\n\
-\n\
-Validation requirements (rejecting submit_plan calls that do not satisfy them):\n\
-- \"approach\" must be at least 20 characters describing your strategy.\n\
-- \"files_to_modify\" + \"files_to_create\" must list at least one path.\n\
-\n\
-Once submit_plan is accepted, write/edit/delete tools unlock for the rest of this task. Do NOT call task_done before then — the completion gate also requires at least one successful file operation.";
-
 /// Maximum number of times the `task_done` hard gate will reject a completion
 /// because the project test suite is failing.
 ///
@@ -317,22 +295,16 @@ fn is_policy_denial(content: &str) -> bool {
 impl AgentToolExecutor for TaskToolExecutor {
     async fn execute(&self, tool_calls: &[ToolCallInfo]) -> Vec<ToolCallResult> {
         let mut delegated_indices: Vec<usize> = Vec::new();
-        let mut gated_indices: Vec<usize> = Vec::new();
 
         for (i, tc) in tool_calls.iter().enumerate() {
             match tc.name.as_str() {
                 "task_done" | "get_task_context" | "submit_plan" => {}
                 "write_file" | "edit_file" | "delete_file" => {
-                    let phase = self.task_phase.lock().await;
-                    if matches!(*phase, TaskPhase::Exploring) {
-                        gated_indices.push(i);
-                    } else {
-                        self.track_file_op(&tc.name, &tc.input).await;
-                        if let Some(path) = tc.input.get("path").and_then(|v| v.as_str()) {
-                            self.self_review.lock().await.record_write(path);
-                        }
-                        delegated_indices.push(i);
+                    self.track_file_op(&tc.name, &tc.input).await;
+                    if let Some(path) = tc.input.get("path").and_then(|v| v.as_str()) {
+                        self.self_review.lock().await.record_write(path);
                     }
+                    delegated_indices.push(i);
                 }
                 _ => {
                     self.track_file_op(&tc.name, &tc.input).await;
@@ -361,11 +333,7 @@ impl AgentToolExecutor for TaskToolExecutor {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut stop = false;
 
-        for (i, tc) in tool_calls.iter().enumerate() {
-            if gated_indices.contains(&i) {
-                results.push(ToolCallResult::error(&tc.id, SUBMIT_PLAN_GATE_MESSAGE));
-                continue;
-            }
+        for tc in tool_calls.iter() {
             match tc.name.as_str() {
                 "task_done" => {
                     self.handle_task_done(tc, &mut results, &mut stop).await;

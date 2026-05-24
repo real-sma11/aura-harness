@@ -69,6 +69,15 @@ pub fn classify_task_complexity(title: &str, description: &str) -> TaskComplexit
     }
 }
 
+/// Member-count-scaled budget escalation.
+///
+/// Stripped (2026-05): no longer called by `configure_loop_config` — the
+/// runner now holds every task at the configured `thinking_budget` floor
+/// because the per-complexity escalation translated to "Thought for 2m"
+/// bursts rather than faster convergence. Kept around (and unit-tested)
+/// so the math is on hand if we want to re-introduce a softer scaling
+/// curve later.
+#[cfg(test)]
 pub fn compute_thinking_budget(base: u32, member_count: usize) -> u32 {
     if member_count >= 15 {
         base.max(16_000)

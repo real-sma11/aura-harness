@@ -25,8 +25,7 @@ use crate::prompts::{
 use crate::task_context;
 use crate::task_executor::TaskToolExecutor;
 use crate::turn_config::{
-    classify_task_complexity, compute_exploration_allowance, compute_thinking_budget,
-    resolve_simple_model, TaskComplexity,
+    classify_task_complexity, compute_exploration_allowance, resolve_simple_model, TaskComplexity,
 };
 use crate::types::{AgentLoopResult, AgentToolExecutor};
 use crate::verify::{
@@ -135,7 +134,11 @@ impl Default for AgentRunnerConfig {
             max_agentic_iterations: 40,
             max_shell_task_retries: 4,
             task_execution_max_tokens: 16_384,
-            thinking_budget: 10_000,
+            // Stripped (2026-05): cut from 10_000 to 2_000. The high
+            // budget enabled per-turn deliberation that translated to
+            // "Thought for 2m" bursts and tool-free turns, not faster
+            // convergence. See `harness/strip-for-progress` plan.
+            thinking_budget: 2_000,
             // Matches the reasoner's default reqwest request timeout
             // (300s / `AURA_MODEL_TIMEOUT_MS`) so the outer `timeout()`
             // guard in `AgentLoop::call_model` does not preempt an
@@ -518,15 +521,19 @@ pub fn configure_loop_config(
     complexity: TaskComplexity,
     config: &AgentRunnerConfig,
     exploration_allowance: usize,
-    member_count: usize,
+    _member_count: usize,
     system_prompt: String,
 ) -> AgentLoopConfig {
+    // Stripped (2026-05): the per-complexity budget escalation
+    // (Standard scaled by `_member_count`, Complex floored to 12_000)
+    // amplified per-turn deliberation without translating into faster
+    // convergence. Hold every task at the configured base — Simple
+    // still gets the same cap as before so trivial tasks don't burn
+    // tokens, but Standard and Complex inherit the runner's
+    // `thinking_budget` floor.
     let thinking_budget = match complexity {
         TaskComplexity::Simple => 2_000.min(config.thinking_budget),
-        TaskComplexity::Standard => compute_thinking_budget(config.thinking_budget, member_count),
-        TaskComplexity::Complex => {
-            compute_thinking_budget(config.thinking_budget, member_count).max(12_000)
-        }
+        TaskComplexity::Standard | TaskComplexity::Complex => config.thinking_budget,
     };
     let max_tokens = match complexity {
         TaskComplexity::Simple => config.task_execution_max_tokens.min(8_192),
@@ -581,37 +588,29 @@ pub fn configure_loop_config(
     }
 }
 
-/// Build the full (uncapped) task-context bundle: project / spec /
-/// task description / session / completed-deps / work-log header,
-/// plus workspace map + type defs + codebase snapshot + dep-api
-/// surface (all of which are themselves capped by
-/// `build_full_task_context` via [`task_context::MAX_TASK_CONTEXT_CHARS`]).
+/// Build the task-context bundle that backs both the initial user
+/// message and the `get_task_context` tool response.
 ///
-/// Shared by the non-tracked `execute_task` path (which builds inline)
-/// and the tracked path (`execute_task_tracked`), which pre-builds so
-/// the same string is both the initial user message (after
-/// `cap_bootstrap_task_context` shrinks it for model routing) and the
-/// `get_task_context` tool response (which stays untruncated so the
-/// agent can pull the full bundle on demand instead of grinding through
-/// `list_files` / `read_file` / `search_code` to rediscover it).
+/// Stripped (2026-05): historically this returned the full
+/// project/spec/task header plus a 160 KB bundle of workspace map,
+/// type defs, codebase snapshot, and dep-API surface (capped via
+/// `task_context::MAX_TASK_CONTEXT_CHARS`). On every `get_task_context`
+/// call the agent received ~40 K tokens of pre-bundled material; once
+/// compaction redacted the older copy the model called the tool again
+/// and the conversation thrashed. The agent already has
+/// `read_file` / `search_code` / `list_files` — give it the task text
+/// and let it pull the rest on demand.
 ///
 /// Pure data shaping: no I/O, no async, safe to call from any context.
 fn build_full_task_ctx(params: &AgenticTaskParams<'_>) -> String {
     let work_log_summary = task_context::build_work_log_summary(params.work_log);
-    let base_context = build_agentic_task_context(
+    build_agentic_task_context(
         params.project,
         params.spec,
         params.task,
         params.session,
         params.completed_deps,
         &work_log_summary,
-    );
-    task_context::build_full_task_context(
-        base_context,
-        params.workspace_map,
-        params.type_defs_context,
-        params.codebase_snapshot,
-        params.dep_api_context,
     )
 }
 
