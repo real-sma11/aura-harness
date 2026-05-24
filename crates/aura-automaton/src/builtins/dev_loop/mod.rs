@@ -41,6 +41,7 @@ use crate::runtime::{Automaton, TickOutcome};
 use crate::schedule::Schedule;
 
 mod aggregate;
+mod decomposition;
 mod finish;
 mod forward_event;
 mod run;
@@ -62,6 +63,7 @@ mod tests;
 // directory.
 
 pub(crate) use aggregate::{TaskAggregate, COMMIT_SKIPPED_NO_CHANGES};
+pub(crate) use decomposition::{auto_decompose_task, DecompositionInput, DecompositionResult};
 pub(crate) use safe_transition::safe_transition;
 pub(crate) use tick::commit_and_push;
 pub(crate) use validation::validate_execution;

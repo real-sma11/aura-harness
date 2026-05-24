@@ -554,7 +554,7 @@ fn render_block(
 /// hint. Construction of the agent context must never block on the
 /// workspace, so every IO call is wrapped in
 /// [`ResolveCaps::per_call_timeout`].
-pub async fn resolve_hints<R: WorkspaceReader>(
+pub async fn resolve_hints<R: WorkspaceReader + ?Sized>(
     hints: &ContextHints,
     workspace: &R,
     caps: ResolveCaps,

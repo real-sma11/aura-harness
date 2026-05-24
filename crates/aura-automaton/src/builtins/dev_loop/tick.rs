@@ -1,12 +1,13 @@
 use super::safe_transition::{safe_transition, TransitionOutcome};
 use super::{
-    debug, info, topological_sort, warn, Automaton, AutomatonError, AutomatonEvent,
-    DevLoopAutomaton, DevLoopConfig, DomainApi, HashMap, HashSet, Schedule, TaskAggregate,
-    TaskDescriptor, TaskExecutionResult, TickContext, TickOutcome, COMMIT_SKIPPED_NO_CHANGES,
-    STATE_COMPLETED_COUNT, STATE_DONE_IDS, STATE_FAILED_COUNT, STATE_FAILED_IDS,
-    STATE_FAILURE_REASONS, STATE_INITIALIZED, STATE_LOOP_FINISHED, STATE_TASK_QUEUE,
-    STATE_WORK_LOG,
+    auto_decompose_task, debug, info, topological_sort, warn, Automaton, AutomatonError,
+    AutomatonEvent, DecompositionInput, DecompositionResult, DevLoopAutomaton, DevLoopConfig,
+    DomainApi, HashMap, HashSet, Schedule, TaskAggregate, TaskDescriptor, TaskExecutionResult,
+    TickContext, TickOutcome, COMMIT_SKIPPED_NO_CHANGES, STATE_COMPLETED_COUNT, STATE_DONE_IDS,
+    STATE_FAILED_COUNT, STATE_FAILED_IDS, STATE_FAILURE_REASONS, STATE_INITIALIZED,
+    STATE_LOOP_FINISHED, STATE_RETRY_COUNTS, STATE_TASK_QUEUE, STATE_WORK_LOG,
 };
+use crate::events::TaskDecomposedSubtask;
 
 #[async_trait::async_trait]
 impl Automaton for DevLoopAutomaton {
@@ -270,6 +271,24 @@ impl DevLoopAutomaton {
     ) -> Result<(), AutomatonError> {
         warn!(task_id = %task.id, error = %e, "Task execution failed");
 
+        // Phase 5 — auto-decomposition gate. When a task fails on its
+        // FIRST retry (`attempt == 1`) with `NeedsDecomposition` /
+        // `ResearchLoopAbort`, run a single best-effort splitter LLM
+        // call. If it produces 2-5 valid subtasks we emit a
+        // `TaskDecomposed` event AND short-circuit the `task_failed`
+        // emission (the parent's terminal state is deferred until
+        // subtask resolution). Every failure path inside the gate
+        // falls through to the original `task_failed` emission below
+        // so no failure event is ever lost.
+        if matches!(e, AutomatonError::NeedsDecomposition { .. })
+            && current_attempt(ctx, &task.id) == 1
+        {
+            if let Some(result) = self.try_auto_decompose(ctx, task, &e).await {
+                self.record_task_decomposed(ctx, task, &e, result)?;
+                return Ok(());
+            }
+        }
+
         match safe_transition(self.domain.as_ref(), &task.id, "failed").await {
             Ok(outcome) => log_transition_outcome(&task.id, "failed", outcome),
             Err(te) => {
@@ -299,6 +318,144 @@ impl DevLoopAutomaton {
         })?;
         Ok(())
     }
+
+    /// Best-effort decomposition. Returns `Some(result)` only when
+    /// the splitter call yields ≥2 valid subtasks; every other path
+    /// (no workspace, no provider headers, model error, invalid JSON,
+    /// cycle, too few / too many subtasks) returns `None` so the
+    /// caller falls through to the original `task_failed` emission.
+    async fn try_auto_decompose(
+        &self,
+        ctx: &TickContext,
+        task: &TaskDescriptor,
+        e: &AutomatonError,
+    ) -> Option<DecompositionResult> {
+        let AutomatonError::NeedsDecomposition { hint } = e else {
+            return None;
+        };
+
+        // The Phase 4 enrichment helpers expect a `WorkspaceReader`.
+        // We feed them the dev-loop's `workspace_root`; when unset
+        // the resulting `FsWorkspace` just won't resolve any hints,
+        // which is fine — the splitter still gets the parent
+        // description + the structured failure hint.
+        let workspace_path = ctx
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let workspace = aura_agent::prompts::FsWorkspace::new(workspace_path);
+
+        let cfg = &self.runner.config;
+        let input = DecompositionInput {
+            parent_task: task,
+            hint,
+            workspace: &workspace,
+            provider: self.provider.as_ref(),
+            model: cfg.default_model.clone(),
+            auth_token: cfg.auth_token.clone(),
+            aura_org_id: cfg.aura_org_id.clone(),
+            aura_agent_id: cfg.aura_agent_id.clone(),
+            aura_session_id: cfg.aura_session_id.clone(),
+            aura_project_id: cfg.aura_project_id.clone(),
+        };
+
+        match auto_decompose_task(input).await {
+            Ok(result) => {
+                info!(
+                    task_id = %task.id,
+                    n_subtasks = result.subtasks.len(),
+                    "auto-decomposition produced subtasks"
+                );
+                Some(result)
+            }
+            Err(err) => {
+                warn!(
+                    task_id = %task.id,
+                    error = %err,
+                    "auto-decomposition failed; falling back to task_failed"
+                );
+                None
+            }
+        }
+    }
+
+    /// Record a successful decomposition: emit `TaskDecomposed`,
+    /// stamp the parent's failure reason into the work log for
+    /// downstream debugging, and intentionally skip the parent's
+    /// `failed` transition (the parent's terminal state is deferred
+    /// until subtask resolution).
+    ///
+    /// TODO(phase-5d): subtask scheduling + parent completion
+    /// tracking are deliberately NOT wired in this commit. Doing so
+    /// requires:
+    ///   1. an in-memory `STATE_LOCAL_SUBTASKS` map so
+    ///      `process_next_task` can resolve synthetic
+    ///      `{parent_id}::sub::N` ids without a backend round-trip,
+    ///   2. a `STATE_DECOMPOSED_PARENTS` tracker
+    ///      (`{ remaining: usize, failed: Vec<TaskId> }` per parent),
+    ///   3. parent-completion fan-in in `record_task_success` /
+    ///      `record_task_failure` so the parent surfaces as
+    ///      `TaskCompleted` (all subtasks ok) or `TaskFailed` (any
+    ///      subtask terminally failed).
+    ///
+    /// The plan (`harness_task_completion_fix` Phase 5) authorises
+    /// this partial landing explicitly under "scope discipline".
+    /// The aura-os Phase 6 server-side consumer of `TaskDecomposed`
+    /// hasn't shipped yet, so emitting the event without the
+    /// scheduling fan-out matches the cross-crate contract.
+    fn record_task_decomposed(
+        &self,
+        ctx: &mut TickContext,
+        task: &TaskDescriptor,
+        original_error: &AutomatonError,
+        result: DecompositionResult,
+    ) -> Result<(), AutomatonError> {
+        let mut failure_reasons: HashMap<String, String> =
+            ctx.state.get(STATE_FAILURE_REASONS).unwrap_or_default();
+        failure_reasons.insert(task.id.clone(), original_error.to_string());
+        ctx.state.set(STATE_FAILURE_REASONS, &failure_reasons);
+
+        let mut work_log: Vec<String> = ctx.state.get(STATE_WORK_LOG).unwrap_or_default();
+        let subtask_summary = result
+            .subtasks
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        work_log.push(format!(
+            "Task (decomposed): {}\nReason: {original_error}\nSubtasks: [{subtask_summary}]",
+            task.title
+        ));
+        ctx.state.set(STATE_WORK_LOG, &work_log);
+
+        let subtasks: Vec<TaskDecomposedSubtask> = result
+            .subtasks
+            .iter()
+            .map(|t| TaskDecomposedSubtask {
+                id: t.id.clone(),
+                title: t.title.clone(),
+                dependencies: t.dependencies.clone(),
+            })
+            .collect();
+
+        ctx.emit(AutomatonEvent::TaskDecomposed {
+            parent_id: task.id.clone(),
+            subtasks,
+            reasoning: result.reasoning,
+        })?;
+        Ok(())
+    }
+}
+
+/// Return the dev-loop's retry counter for `task_id`. `0` on the
+/// first attempt (a fresh task or initial run after a process
+/// restart), `1+` after `try_retry_failed` has incremented the
+/// counter. Mirrors the lookup in `run.rs::run_agentic_task` so the
+/// Phase 5 decomposition gate sees the same notion of "attempt N" the
+/// agent runner does.
+fn current_attempt(ctx: &TickContext, task_id: &str) -> u32 {
+    let retry_counts: HashMap<String, u32> = ctx.state.get(STATE_RETRY_COUNTS).unwrap_or_default();
+    retry_counts.get(task_id).copied().unwrap_or(0)
 }
 
 fn deps_satisfied(task: &TaskDescriptor, done_set: &HashSet<&str>) -> bool {
