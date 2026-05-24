@@ -80,6 +80,15 @@ pub const THINKING_TAPER_FACTOR: f64 = 0.6;
 /// full-size tool-call JSON plus a small amount of reasoning.
 pub const THINKING_MIN_BUDGET: u32 = 6144;
 
+/// Reasoner auto-enables Anthropic extended thinking on Claude 4.x
+/// models when `max_tokens > 2048` (see
+/// `aura_reasoner::anthropic::convert::resolve_thinking`). The agent
+/// loop clamps `max_tokens` to this value when it needs to disable
+/// extended thinking for one turn (iteration 0, force-tool steering)
+/// — keeping the inequality strict ensures the auto-enable path
+/// returns `None` for that one turn.
+pub const THINKING_AUTO_ENABLE_THRESHOLD: u32 = 2048;
+
 /// Maximum full reads of the same file before blocking.
 ///
 /// History: 3 -> 10 (round 0, "realistic explore/edit cycles
@@ -211,3 +220,27 @@ pub const NARRATION_TOKEN_SOFT_BUDGET: usize = 1_500;
 /// `"narration_budget_exhausted"` so downstream (the aura-automaton task
 /// validator) can map it to a Phase 2b `NeedsDecomposition` outcome.
 pub const NARRATION_TOKEN_HARD_BUDGET: usize = 4_000;
+
+// ---------------------------------------------------------------------------
+// Read-only loop steering (Phase 2 of harness-v2)
+// ---------------------------------------------------------------------------
+
+/// Soft threshold: after this many consecutive read-only iterations,
+/// inject a synthetic user message demanding the next turn be a write
+/// or `task_done`. Builds on the existing exploration budget — fires
+/// even when the per-call exploration block hasn't tripped yet, because
+/// the per-file caps in [`MAX_READS_PER_FILE`] / [`MAX_RANGE_READS_PER_FILE`]
+/// can let an agent rack up ~40 reads across many files before the
+/// hard block fires, by which point the credit budget is gone.
+///
+/// Orthogonal to [`NARRATION_TOKEN_SOFT_BUDGET`]: that one fires when
+/// the model produces text but no tool calls; this one fires when the
+/// model produces tool calls but they are all read-only.
+pub const READ_ONLY_INJECTION_THRESHOLD: usize = 4;
+
+/// Hard threshold: after this many consecutive read-only iterations,
+/// force `tool_choice = Required` and disable extended thinking for
+/// the next turn so the model has no choice but to call a tool
+/// (preferably a write). Anthropic blocks forced tool use while
+/// extended thinking is enabled, so the two flips ride together.
+pub const READ_ONLY_FORCE_TOOL_THRESHOLD: usize = 6;

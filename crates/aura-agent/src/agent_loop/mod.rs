@@ -48,7 +48,8 @@ use crate::blocking::stall::StallDetector;
 use crate::budget::{BudgetState, ExplorationState};
 use crate::constants::{
     AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, DEFAULT_EXPLORATION_ALLOWANCE, MAX_ITERATIONS,
-    THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
+    THINKING_AUTO_ENABLE_THRESHOLD, THINKING_MIN_BUDGET, THINKING_TAPER_AFTER,
+    THINKING_TAPER_FACTOR,
 };
 use crate::events::{AgentLoopEvent, DebugEvent};
 use crate::read_guard::ReadGuardState;
@@ -186,6 +187,16 @@ pub struct AgentLoopConfig {
     /// allowance so the implementation phase has a fresh budget. `None`
     /// for non-task callers (e.g. chat).
     pub phase_reset_signal: Option<Arc<AtomicBool>>,
+    /// Disable Anthropic extended thinking on iteration 0.
+    ///
+    /// When `true` (the policy used by [`crate::agent_runner`] for
+    /// dev-loop tasks), [`LoopState::begin_iteration`] arms the
+    /// [`ThinkingBudget::disable_thinking_this_iteration`] flag for
+    /// the very first turn so the explore phase emits fast tool
+    /// calls instead of "Thought for 2m"-bursting before the first
+    /// `read_file`. Default `false` for chat / generic callers
+    /// where deliberation on the first turn is desirable.
+    pub disable_thinking_iteration_0: bool,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -241,6 +252,7 @@ impl Default for AgentLoopConfig {
             skills_chars: 0,
             subagents_chars: 0,
             phase_reset_signal: None,
+            disable_thinking_iteration_0: false,
         }
     }
 }
@@ -688,13 +700,24 @@ pub(crate) struct ThinkingBudget {
     /// Cleared immediately after the restore so subsequent iterations
     /// resume normal tapering.
     pub(crate) restore_next_iteration: bool,
+    /// One-shot flag: when `true`, [`LoopState::build_request`] caps
+    /// `max_tokens` at the auto-thinking threshold so the underlying
+    /// reasoner does NOT auto-enable extended thinking for that one
+    /// turn, then resets the flag.
+    ///
+    /// Set by [`LoopState::begin_iteration`] for `iteration == 0`
+    /// (the explore turn should be fast tool calls, not multi-minute
+    /// deliberation) and by the read-only force-tool path (Anthropic
+    /// blocks forced tool use while extended thinking is enabled, so
+    /// the two flips ride together).
+    pub(crate) disable_thinking_this_iteration: bool,
 }
 
 /// Consecutive-iteration counters driving the loop's degraded-pattern
 /// abort policies (all-error streak, pathless-write streak, narration
-/// streak) and the narration-budget steering injections.
+/// streak, read-only streak) and the live steering injections.
 ///
-/// All four fields move and reset together — typically as a single
+/// All five fields move and reset together — typically as a single
 /// "the model just produced a useful turn" signal — so grouping them
 /// keeps the related resets co-located and lets helpers in
 /// [`super::iteration`] / [`super::tool_execution`] receive a focused
@@ -719,6 +742,23 @@ pub(crate) struct IterCounters {
     /// `tool_use` block. Initialized to `true` so the first turn starts
     /// with a budget-clean state.
     pub(crate) last_turn_had_tool_call: bool,
+    /// Consecutive iterations whose tool calls were ALL read-only
+    /// (no `write_file`/`edit_file`/`delete_file`/`task_done`). Reset
+    /// to zero on any iteration that contained at least one write or
+    /// completion call, and unchanged on tool-free iterations (those
+    /// are handled by [`Self::consecutive_narration_tokens`]).
+    ///
+    /// Drives two thresholds in
+    /// [`super::tool_execution::check_termination_conditions`] and
+    /// [`LoopState::build_request`]:
+    ///
+    /// - [`crate::constants::READ_ONLY_INJECTION_THRESHOLD`]: inject a
+    ///   synthetic user message demanding the next turn be a write
+    ///   or `task_done`.
+    /// - [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`]: force
+    ///   `tool_choice = Required` and disable extended thinking for
+    ///   the next turn so the model cannot defer to more deliberation.
+    pub(crate) consecutive_read_only_iterations: usize,
 }
 
 /// Mutable state carried across iterations of the agent loop.
@@ -762,6 +802,7 @@ impl LoopState {
                 // in `begin_iteration` still restores to `max_tokens`.
                 budget: config.thinking_budget.unwrap_or(config.max_tokens),
                 restore_next_iteration: false,
+                disable_thinking_this_iteration: false,
             },
             last_context_tokens_estimate: None,
             messages,
@@ -771,6 +812,7 @@ impl LoopState {
                 consecutive_empty_path_block_iterations: 0,
                 consecutive_narration_tokens: 0,
                 last_turn_had_tool_call: true,
+                consecutive_read_only_iterations: 0,
             },
         }
     }
@@ -783,6 +825,15 @@ impl LoopState {
     fn begin_iteration(&mut self, config: &AgentLoopConfig, iteration: usize) {
         self.build_cooldown = self.build_cooldown.saturating_sub(1);
         self.blocking_ctx.decrement_cooldowns();
+
+        // One-shot extended-thinking disable flag is re-evaluated each
+        // iteration: cleared first, then re-set below for the cases
+        // that need it. `build_request` reads the flag to decide
+        // whether to clamp `max_tokens` below the auto-thinking
+        // threshold. The flag never persists across iterations on
+        // its own — every turn either re-arms it or runs with
+        // thinking allowed.
+        self.thinking.disable_thinking_this_iteration = false;
 
         // Observe-and-clear the optional handshake from a wrapping
         // `TaskToolExecutor`: when `submit_plan` is accepted the
@@ -822,6 +873,30 @@ impl LoopState {
                 // original intent of the gate.
                 self.blocking_ctx.mark_plan_submitted();
             }
+        }
+
+        // Iteration 0 is the explore turn — fast tool calls, not
+        // multi-minute deliberation. When the caller opts in via
+        // `disable_thinking_iteration_0` (the runner sets this for
+        // dev-loop tasks), disable extended thinking for this one
+        // iteration so the model emits a tool call quickly instead
+        // of "Thought for 2m"-bursting before its first read. The
+        // taper logic (and on-truncation restore) continue to work
+        // from iteration 1 onward. Chat callers leave the flag off
+        // because deliberation on the first turn is often the point.
+        if iteration == 0 && config.disable_thinking_iteration_0 {
+            self.thinking.disable_thinking_this_iteration = true;
+        }
+
+        // Threshold-B steering: when the read-only streak crosses
+        // [`READ_ONLY_FORCE_TOOL_THRESHOLD`], we force `tool_choice`
+        // in `build_request`. Anthropic rejects forced tool use while
+        // extended thinking is enabled, so the same condition must
+        // also disable thinking for this one turn.
+        if self.counters.consecutive_read_only_iterations
+            >= crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD
+        {
+            self.thinking.disable_thinking_this_iteration = true;
         }
 
         // If the previous iteration ended with a `MaxTokens` truncation
@@ -879,7 +954,22 @@ impl LoopState {
             }
             _ => classifier_filtered,
         };
-        let tool_choice = aura_reasoner::ToolChoice::Auto;
+        // Threshold-B steering: when the model has spent
+        // [`READ_ONLY_FORCE_TOOL_THRESHOLD`] consecutive iterations on
+        // read-only tool calls without writing or completing, force
+        // any tool call. Anthropic's `ToolChoice` exposes `Required`
+        // (force any tool) but no per-call "disable parallel" knob;
+        // pairing it with the `disable_thinking_this_iteration` flag
+        // (set in `begin_iteration` under the same condition) is what
+        // makes the forced call legal — Anthropic rejects forced
+        // tool use while extended thinking is enabled.
+        let tool_choice = if self.counters.consecutive_read_only_iterations
+            >= crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD
+        {
+            aura_reasoner::ToolChoice::Required
+        } else {
+            aura_reasoner::ToolChoice::Auto
+        };
 
         let has_task_tools = effective_tools.iter().any(|tool| {
             matches!(
@@ -936,11 +1026,39 @@ impl LoopState {
             (_, _, kind, _) => kind,
         };
 
+        // Disable extended thinking for this one iteration by clamping
+        // `max_tokens` below the reasoner's auto-thinking threshold
+        // (`> 2048`, see
+        // `aura_reasoner::anthropic::convert::resolve_thinking`).
+        // The reasoner does not currently expose a per-request
+        // "extended thinking off" toggle for Claude 4.x — it
+        // auto-enables thinking whenever `max_tokens > 2048` — so the
+        // only correctness path is to keep `max_tokens` at or below
+        // that threshold.
+        //
+        // The flag persists for the whole iteration: it is set in
+        // [`Self::begin_iteration`] and cleared at the top of the
+        // NEXT [`Self::begin_iteration`] call. That keeps the
+        // disable in force across an overflow-retry within the same
+        // iteration (`retry_after_context_overflow` calls
+        // `build_request` again without re-entering
+        // `begin_iteration`).
+        //
+        // TODO(harness-v2): once `aura-reasoner` exposes an explicit
+        // "thinking: off" knob, replace this clamp with a direct call
+        // to disable extended thinking and remove the implicit
+        // coupling between `max_tokens` and the thinking switch.
+        let effective_max_tokens = if self.thinking.disable_thinking_this_iteration {
+            self.thinking.budget.min(THINKING_AUTO_ENABLE_THRESHOLD)
+        } else {
+            self.thinking.budget
+        };
+
         ModelRequest::builder(&config.model, &config.system_prompt)
             .messages(self.messages.clone())
             .tools(effective_tools)
             .tool_choice(tool_choice)
-            .max_tokens(self.thinking.budget)
+            .max_tokens(effective_max_tokens)
             .auth_token(config.auth_token.clone())
             .upstream_provider_family(config.upstream_provider_family.clone())
             .aura_project_id(config.aura_project_id.clone())

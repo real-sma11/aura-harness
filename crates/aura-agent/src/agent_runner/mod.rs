@@ -134,11 +134,18 @@ impl Default for AgentRunnerConfig {
             max_agentic_iterations: 40,
             max_shell_task_retries: 4,
             task_execution_max_tokens: 16_384,
-            // Stripped (2026-05): cut from 10_000 to 2_000. The high
-            // budget enabled per-turn deliberation that translated to
-            // "Thought for 2m" bursts and tool-free turns, not faster
-            // convergence. See `harness/strip-for-progress` plan.
-            thinking_budget: 2_000,
+            // Stripped (2026-05): cut from 10_000 to 2_000.
+            // Phase 2 of harness-v2 (2026-05 round 3): further reduced
+            // from 2000 to 800. Extended-thinking turns produced no
+            // faster convergence — they just stretched per-turn
+            // latency, and the tasks that timed out were the same
+            // ones that loop on read-only tool calls regardless of
+            // how much budget the model has to deliberate. The
+            // explore turn should be fast tool calls, not
+            // multi-minute deliberation; the iteration-0 disable in
+            // `LoopState::begin_iteration` clamps it further for the
+            // very first turn. See `harness_task_completion_fix` plan.
+            thinking_budget: 800,
             // Matches the reasoner's default reqwest request timeout
             // (300s / `AURA_MODEL_TIMEOUT_MS`) so the outer `timeout()`
             // guard in `AgentLoop::call_model` does not preempt an
@@ -590,6 +597,11 @@ pub fn configure_loop_config(
         aura_agent_id: config.aura_agent_id.clone(),
         aura_project_id: config.aura_project_id.clone(),
         request_kind: ModelRequestKind::DevLoopBootstrap,
+        // Phase 2 of harness-v2: disable extended thinking on the
+        // first iteration so the explore turn emits fast tool calls
+        // instead of "Thought for 2m"-bursting. Chat / non-task
+        // callers leave this off (the default).
+        disable_thinking_iteration_0: true,
         ..AgentLoopConfig::default()
     }
 }
