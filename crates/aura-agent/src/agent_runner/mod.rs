@@ -20,8 +20,8 @@ use crate::file_ops::FileOp;
 use crate::planning::{TaskPhase, TaskPlan};
 use crate::prompts::{
     agentic_execution_system_prompt, build_agentic_task_context, build_chat_system_prompt,
-    default_caps, extract_hints, resolve_hints, FsWorkspace, ProjectInfo, SessionInfo, SpecInfo,
-    TaskInfo,
+    default_caps, extract_hints, resolve_hints, AgentInfo, FsWorkspace, ProjectInfo, SessionInfo,
+    SpecInfo, TaskInfo,
 };
 use crate::task_context;
 use crate::task_executor::TaskToolExecutor;
@@ -186,6 +186,15 @@ pub struct AgenticTaskParams<'a> {
     /// decomposition path (and re-injecting the same hints wastes
     /// tokens without adding signal).
     pub attempt: u32,
+    /// Agent identity / skills / operator-authored system prompt
+    /// threaded from the wire layer (PR B re-adds the field that PR A
+    /// removed alongside the dead `build_agent_preamble`).
+    ///
+    /// PR B: every construction site passes `None`. The
+    /// `agentic_execution_system_prompt` builder is wired to consume
+    /// the bundle so PR C's aura-os populator can flip a single field
+    /// and have identity flow into the model-facing prompt.
+    pub agent: Option<&'a AgentInfo<'a>>,
 }
 
 /// Context for a shell task execution.
@@ -255,7 +264,7 @@ impl AgentRunner {
     ) -> Result<TaskExecutionResult, crate::AgentError> {
         let complexity = classify_task_complexity(params.task.title, params.task.description);
 
-        let system_prompt = agentic_execution_system_prompt(params.project);
+        let system_prompt = agentic_execution_system_prompt(params.project, params.agent);
 
         // Reuse the caller-supplied full task context bundle when
         // present (the `execute_task_tracked` path pre-builds it so

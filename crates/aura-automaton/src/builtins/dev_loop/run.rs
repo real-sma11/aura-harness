@@ -34,7 +34,7 @@ impl DevLoopAutomaton {
             .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
 
         let exec = self
-            .run_agentic_task(ctx, &project, &spec, task, &effective_path)
+            .run_agentic_task(ctx, cfg, &project, &spec, task, &effective_path)
             .await?;
         validate_execution(exec)
     }
@@ -64,6 +64,7 @@ impl DevLoopAutomaton {
     async fn run_agentic_task(
         &self,
         ctx: &TickContext,
+        cfg: &DevLoopConfig,
         project: &aura_tools::domain_tools::ProjectDescriptor,
         spec: &aura_tools::domain_tools::SpecDescriptor,
         task: &TaskDescriptor,
@@ -119,6 +120,14 @@ impl DevLoopAutomaton {
             summary_of_previous_context: "",
         };
 
+        // PR B: re-added wire field. The dev-loop start handler
+        // does not yet populate `agent_identity` / `agent_skills` /
+        // `agent_system_prompt` on the aura-os side, so
+        // `as_agent_info()` returns `None` for every production caller
+        // in this PR and the assembled system prompt stays
+        // byte-identical with PR A. PR C flips the populator and
+        // identity flows through automatically.
+        let agent_info = cfg.agent_identity.as_agent_info();
         let params = AgenticTaskParams {
             project: &project_info,
             spec: &spec_info,
@@ -133,6 +142,7 @@ impl DevLoopAutomaton {
             member_count: 1,
             tools,
             attempt,
+            agent: agent_info.as_ref(),
         };
 
         let cancel = ctx.cancellation_token().clone();

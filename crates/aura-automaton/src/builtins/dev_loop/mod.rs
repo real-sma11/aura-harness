@@ -94,14 +94,22 @@ const MAX_RETRIES_PER_TASK: u32 = 2;
 // Config + automaton façade
 // ---------------------------------------------------------------------------
 
-struct DevLoopConfig {
-    project_id: String,
+pub(crate) struct DevLoopConfig {
+    pub(crate) project_id: String,
     // TODO: will be used when dev-loop sessions tag their agent instance
     #[allow(dead_code)]
     agent_instance_id: String,
     // TODO: will be used for model selection in dev-loop
     #[allow(dead_code)]
     model: String,
+    /// PR B identity envelope. Parsed once at config-load time; the
+    /// borrowed `AgentIdentity` / `AgentInfo` views fed into
+    /// [`AgenticTaskParams::agent`] are derived from these owned
+    /// buffers via [`AgentIdentityEnvelope::as_agent_info`]. None of
+    /// the three fields are populated by `aura-os` until PR C, so
+    /// [`AgentIdentityEnvelope::is_empty`] returns `true` for every
+    /// production caller in this PR.
+    pub(crate) agent_identity: AgentIdentityEnvelope,
 }
 
 impl DevLoopConfig {
@@ -121,10 +129,108 @@ impl DevLoopConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(aura_agent::DEFAULT_MODEL)
             .to_string();
+        let agent_identity = AgentIdentityEnvelope::from_json(config);
         Ok(Self {
             project_id,
             agent_instance_id,
             model,
+            agent_identity,
+        })
+    }
+}
+
+/// Owned mirror of `aura_protocol::AgentIdentityWire` + skills + system
+/// prompt, threaded from the `AutomatonStartRequest` JSON config blob
+/// into `AgenticTaskParams::agent`.
+///
+/// Owns its strings so the `&str`-borrowing
+/// [`aura_agent::prompts::AgentInfo`] view we hand to
+/// [`AgenticTaskParams::agent`] can be built on demand from a stable
+/// in-memory location. PR B reads but never populates these fields
+/// (aura-os doesn't send them yet); PR C flips a single field on the
+/// aura-os side and identity flows into the model-facing prompt.
+#[derive(Debug, Default)]
+pub(crate) struct AgentIdentityEnvelope {
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) personality: String,
+    pub(crate) skills: Vec<String>,
+    pub(crate) system_prompt: Option<String>,
+}
+
+impl AgentIdentityEnvelope {
+    pub(crate) fn from_json(config: &serde_json::Value) -> Self {
+        let identity = config.get("agent_identity");
+        let name = identity
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let role = identity
+            .and_then(|v| v.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let personality = identity
+            .and_then(|v| v.get("personality"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let skills = config
+            .get("agent_skills")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let system_prompt = config
+            .get("agent_system_prompt")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        Self {
+            name,
+            role,
+            personality,
+            skills,
+            system_prompt,
+        }
+    }
+
+    /// True when no field carries content. PR B's default state for
+    /// every caller — `AgenticTaskParams::agent` stays `None` and the
+    /// assembled prompt matches the PR A snapshots byte-for-byte.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.name.trim().is_empty()
+            && self.role.trim().is_empty()
+            && self.personality.trim().is_empty()
+            && self.skills.is_empty()
+            && self
+                .system_prompt
+                .as_deref()
+                .map_or(true, |s| s.trim().is_empty())
+    }
+
+    /// Borrow this envelope as an [`aura_agent::prompts::AgentInfo`].
+    /// Returns `None` when [`Self::is_empty`].
+    pub(crate) fn as_agent_info(&self) -> Option<aura_agent::prompts::AgentInfo<'_>> {
+        if self.is_empty() {
+            return None;
+        }
+        let identity = (!self.name.is_empty()
+            || !self.role.is_empty()
+            || !self.personality.is_empty())
+        .then_some(aura_agent::prompts::AgentIdentity {
+            name: &self.name,
+            role: &self.role,
+            personality: &self.personality,
+        });
+        Some(aura_agent::prompts::AgentInfo {
+            identity,
+            skills: self.skills.as_slice(),
+            system_prompt: self.system_prompt.as_deref(),
         })
     }
 }

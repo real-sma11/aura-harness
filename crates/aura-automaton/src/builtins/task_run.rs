@@ -97,6 +97,11 @@ struct TaskRunConfig {
     /// present when the caller didn't pass an explicit `attempt` (a
     /// non-empty prior_failure implies at least one prior attempt).
     attempt: u32,
+    /// PR B identity envelope mirroring `DevLoopConfig::agent_identity`.
+    /// Empty for every PR B caller (aura-os does not yet populate the
+    /// wire fields); PR C flips the producer and `agent_info` flows
+    /// into `AgenticTaskParams::agent` automatically.
+    agent_identity: super::dev_loop::AgentIdentityEnvelope,
 }
 
 impl TaskRunConfig {
@@ -139,6 +144,7 @@ impl TaskRunConfig {
             .and_then(serde_json::Value::as_u64)
             .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
             .unwrap_or_else(|| u32::from(prior_failure.is_some()));
+        let agent_identity = super::dev_loop::AgentIdentityEnvelope::from_json(config);
         Ok(Self {
             project_id,
             task_id,
@@ -146,6 +152,7 @@ impl TaskRunConfig {
             prior_failure,
             work_log,
             attempt,
+            agent_identity,
         })
     }
 }
@@ -307,6 +314,13 @@ impl TaskRunAutomaton {
             .filter(|t| !matches!(t.name.as_str(), "write_file" | "edit_file" | "delete_file"))
             .collect();
 
+        // PR B: same envelope-from-JSON pattern as the dev-loop run
+        // path. `as_agent_info()` returns `None` when no wire field is
+        // populated (the only case in PR B), so the assembled system
+        // prompt stays byte-identical with PR A. PR C populates the
+        // wire fields on the aura-os side and identity flows through
+        // here automatically.
+        let agent_info = cfg.agent_identity.as_agent_info();
         let params = AgenticTaskParams {
             project: &project_info,
             spec: &spec_info,
@@ -321,6 +335,7 @@ impl TaskRunAutomaton {
             member_count: 1,
             tools,
             attempt: cfg.attempt,
+            agent: agent_info.as_ref(),
         };
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);

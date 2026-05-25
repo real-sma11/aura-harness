@@ -1,6 +1,34 @@
-use super::ProjectInfo;
+//! System-prompt assembly for the dev-loop and chat paths.
+//!
+//! PR B reshapes this module from a pair of `format!` blobs into a
+//! thin façade over [`SystemPromptBuilder`] + per-section modules in
+//! [`sections`]. The bytes produced by [`agentic_execution_system_prompt`]
+//! and [`build_chat_system_prompt`] are unchanged — the four PR A
+//! golden snapshots in `__snapshots__/` are the contract. PR C will
+//! flip every section's wrapper to the canonical `<tag>...</tag>`
+//! schema with one intentional snapshot regeneration.
+//!
+//! What still lives at this top level:
+//!
+//! - [`CHAT_SYSTEM_PROMPT_BASE`]: the chat capabilities prose. Kept
+//!   here so external `crate::prompts::CHAT_SYSTEM_PROMPT_BASE`
+//!   re-exports continue to resolve. PR C will hoist ownership into
+//!   [`sections::chat_capabilities`].
+//! - The chat-side `append_tech_stack` / `append_directory_listing` /
+//!   `append_config_previews` helpers — the plan defers their move
+//!   into a section module to PR C alongside the chat refactor.
 
+use super::{AgentInfo, ProjectInfo};
+
+mod builder;
 pub mod sections;
+
+pub use builder::{probe_agents_md, AgentsMdProbe, SystemPromptBuilder};
+
+#[cfg(test)]
+pub(crate) use sections::dev_loop_workflow::platform_info_string;
+#[cfg(test)]
+pub(crate) use sections::{AGENTS_MD_MAX_BYTES, AGENTS_MD_SECTION_HEADER};
 
 pub const CHAT_SYSTEM_PROMPT_BASE: &str = r#"You are Aura, an AI software engineering assistant embedded in a project management and code execution platform.
 
@@ -42,8 +70,18 @@ Use markdown formatting for code blocks and structured responses. Be concise. Do
 // Agentic execution system prompt
 // ---------------------------------------------------------------------------
 
+/// Build the dev-loop system prompt.
+///
+/// PR B re-adds the optional `agent` parameter so identity / skills /
+/// operator-authored prompt can flow through into the assembled output
+/// once aura-os populates the wire fields in PR C. Callers that have
+/// no agent context (the dev-loop / task-run automatons today) pass
+/// `None` and the rendered bytes match the PR A snapshots verbatim.
 #[must_use]
-pub fn agentic_execution_system_prompt(project: &ProjectInfo<'_>) -> String {
+pub fn agentic_execution_system_prompt(
+    project: &ProjectInfo<'_>,
+    agent: Option<&AgentInfo<'_>>,
+) -> String {
     let build_cmd = project.build_command.unwrap_or("(not configured)");
     // Prefer the operator's env override so the prompt shows the agent the
     // exact command the DoD gate will actually run. This keeps the agent's
@@ -59,83 +97,18 @@ pub fn agentic_execution_system_prompt(project: &ProjectInfo<'_>) -> String {
         .or(project.test_command)
         .unwrap_or("(not configured)");
 
-    let platform_info = platform_info_string();
+    let identity = agent.and_then(|a| a.identity);
+    let skills_owned: Vec<String> = agent.map(|a| a.skills.to_vec()).unwrap_or_default();
+    let agent_system_prompt = agent.and_then(|a| a.system_prompt);
 
-    let mut prompt = format!(
-        r#"You are an expert software engineer executing a single implementation task.
-You have tools to read, edit, and run commands in the workspace.
-
-{platform_info}
-
-Workflow:
-1. Explore (read_file / search_code / list_files).
-2. (Optional) call submit_plan to record your approach. Not required.
-3. Make the changes with apply_patch (see WRITES — APPLY_PATCH below). One call can add, update, and delete multiple files atomically.
-4. Run the build / tests as needed (`{build_cmd}` / `{test_cmd}`).
-5. Call task_done when the changes compile and the test suite is green. If no changes were required, call task_done with `no_changes_needed: true`.
-
-WRITES — APPLY_PATCH:
-The dev-loop has ONE write primitive: apply_patch. It takes a single `patch` string argument containing a multi-file patch in this envelope format:
-
-  *** Begin Patch
-  *** Add File: path/to/new.rs
-  +file content line 1
-  +file content line 2
-  *** Update File: path/to/existing.rs
-  @@ optional context header @@
-   unchanged context line
-  -removed line
-  +added line
-  *** Delete File: path/to/old.rs
-  *** End Patch
-
-Rules:
-- Paths are workspace-relative, forward-slash, no leading `./` and no `..`.
-- Add File body: every following line starting with `+` is the literal file content (the `+` is stripped). Indentation is preserved.
-- Update File body: one or more hunks. Each hunk starts with `@@ ... @@`. Inside a hunk, ` `-prefixed lines must match the file exactly (context); `-`-prefixed lines are removed and must match; `+`-prefixed lines are added.
-- One apply_patch call can mix Add, Update, and Delete directives across multiple files. The call is atomic: every directive is validated against the on-disk state first; if any directive fails (parse error, context mismatch, missing target, target already exists for Add), NONE of the changes are applied. Re-emit a corrected patch on the next turn.
-- The error returned will name the offending file/hunk so you can fix the context lines. Read the target file with `read_file` to re-derive context from real bytes before retrying.
-
-Build command: {build_cmd}
-Test command: {test_cmd}
-
-Rules:
-- Read a file before you edit it.
-- For Rust source: ASCII only, raw string literals for multi-line strings, `serde_json::json!()` for JSON in tests.
-- For TypeScript: forward slashes in import paths.
-- Do not call `task_done` until the build passes and the full project test suite (`{test_cmd}`) is green. The harness re-runs the suite as a hard gate.
-- If exploration reveals the task is already done (e.g. a prior task implemented it, or the change is a no-op), call task_done with `no_changes_needed: true` and explain in `notes`. The DoD test gate still runs, but file-op enforcement is bypassed.
-- Do not output raw JSON with `file_ops` in text responses; use the tools.
-- No emojis in notes or output.
-
-GIT SAFETY:
-- Never run `git push --force`, `git reset --hard`, or `git clean -fd`.
-- Never modify `.gitignore` to hide generated files.
-- Never run `git config` to change user identity.
-- Commit / push are handled by the engine; don't invoke them yourself unless the task explicitly requires it.
-
-CODE QUALITY:
-- No narrating comments ("// Import the module", "// Return the result"). Comments explain non-obvious intent only.
-- Don't leave reasoning scratchpad in source.
-"#,
-    );
-
-    append_agents_md(&mut prompt, project.folder_path);
-
-    prompt
-}
-
-const fn platform_info_string() -> &'static str {
-    if cfg!(windows) {
-        "Platform: Windows. Shell commands run via `cmd /C`. Use PowerShell or \
-         Windows-compatible syntax. Avoid Unix-only tools (grep, sed, awk, head, \
-         tail, wc, cat). Prefer the built-in tools (search_code, read_file, \
-         find_files, list_files) over shell commands for file exploration."
-    } else if cfg!(target_os = "macos") {
-        "Platform: macOS. Shell commands run via `sh -c`."
-    } else {
-        "Platform: Linux. Shell commands run via `sh -c`."
-    }
+    SystemPromptBuilder::new()
+        .agent_identity(identity)
+        .agent_skills(&skills_owned)
+        .agent_system_prompt(agent_system_prompt)
+        .dev_loop_workflow(build_cmd, test_cmd)
+        .tool_discipline()
+        .agents_md_from_workspace(project.folder_path)
+        .build()
 }
 
 // ---------------------------------------------------------------------------
@@ -144,25 +117,23 @@ const fn platform_info_string() -> &'static str {
 
 #[must_use]
 pub fn build_chat_system_prompt(project: &ProjectInfo<'_>, custom_system_prompt: &str) -> String {
-    let mut prompt = if custom_system_prompt.is_empty() {
-        CHAT_SYSTEM_PROMPT_BASE.to_string()
-    } else {
-        let mut p = custom_system_prompt.to_string();
-        p.push_str("\n\n");
-        p.push_str(CHAT_SYSTEM_PROMPT_BASE);
-        p
-    };
-
-    prompt.push_str(&format!(
-        "\n\n## Current Project\n- **Name**: {}\n- **Description**: {}\n- **Folder**: {}\n- **Build**: {}\n- **Test**: {}\n",
-        project.name,
-        project.description,
-        project.folder_path,
-        project.build_command.unwrap_or("(not set)"),
-        project.test_command.unwrap_or("(not set)"),
-    ));
-
-    append_agents_md(&mut prompt, project.folder_path);
+    let mut prompt = String::new();
+    if !custom_system_prompt.is_empty() {
+        prompt.push_str(custom_system_prompt);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(
+        &SystemPromptBuilder::new()
+            .chat_capabilities()
+            .project_context(project)
+            .agents_md_from_workspace(project.folder_path)
+            .build(),
+    );
+    // PR B keeps the chat-only workspace-overview helpers (tech stack,
+    // directory listing, config previews) at this top level. PR C will
+    // either fold them into a `chat_workspace_overview` section module
+    // or delete them outright; for now we just call them after the
+    // builder so the byte layout is unchanged.
     append_tech_stack(&mut prompt, project.folder_path);
     prompt
 }
@@ -260,58 +231,6 @@ fn append_config_previews(prompt: &mut String, folder: &std::path::Path) {
         prompt.push_str("\n### Key Config Files\n");
         prompt.push_str(&config_sections.join("\n"));
         prompt.push('\n');
-    }
-}
-
-/// Hard cap on AGENTS.md bytes injected into the system prompt. Larger
-/// files are skipped (with a warn log) rather than truncated so the
-/// agent never reads a half-instruction.
-pub(crate) const AGENTS_MD_MAX_BYTES: usize = 64 * 1024;
-
-/// Header used when an AGENTS.md is found at the workspace root. Kept
-/// as a `const` so callers and tests can both reference the canonical
-/// wording instead of duplicating the literal.
-pub(crate) const AGENTS_MD_SECTION_HEADER: &str = "## Project AGENTS.md";
-
-/// Read the project root's `AGENTS.md` (case-insensitive) and append it
-/// as a dedicated system-prompt section. No-op when the file is absent,
-/// when `folder_path` is not a directory, or when the file exceeds the
-/// byte cap.
-///
-/// We try a small set of explicit casing variants instead of doing a
-/// full directory scan: the AGENTS.md convention is well-defined and
-/// three `fs::read_to_string` probes are cheaper than enumerating the
-/// workspace root.
-fn append_agents_md(prompt: &mut String, folder_path: &str) {
-    let folder = std::path::Path::new(folder_path);
-    if !folder.is_dir() {
-        return;
-    }
-    for variant in ["AGENTS.md", "agents.md", "Agents.md"] {
-        let path = folder.join(variant);
-        match std::fs::read_to_string(&path) {
-            Ok(content) if content.len() <= AGENTS_MD_MAX_BYTES => {
-                prompt.push_str(&format!(
-                    "\n{header}\n\
-                     The following instructions come from the project's `{variant}` file \
-                     at the workspace root. Treat them as authoritative project-author \
-                     guidance and follow them throughout this session.\n\n\
-                     ```\n{content}\n```\n",
-                    header = AGENTS_MD_SECTION_HEADER,
-                ));
-                return;
-            }
-            Ok(content) => {
-                tracing::warn!(
-                    bytes = content.len(),
-                    cap = AGENTS_MD_MAX_BYTES,
-                    variant,
-                    "AGENTS.md exceeded byte cap; skipping injection",
-                );
-                return;
-            }
-            Err(_) => continue,
-        }
     }
 }
 

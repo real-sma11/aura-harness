@@ -13,7 +13,7 @@ fn test_project(folder: &str) -> ProjectInfo<'_> {
 #[test]
 fn agentic_prompt_includes_build_command() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
     assert!(prompt.contains("cargo build"));
     assert!(prompt.contains("cargo test"));
 }
@@ -26,7 +26,7 @@ fn agentic_prompt_includes_definition_of_done_hard_gate() {
     // is broken or the test suite is failing — so the assertions
     // pin the shorter rendering instead of the old section header.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
     assert!(
         prompt.contains("hard gate"),
         "task_done hard-gate language missing: {prompt}"
@@ -47,7 +47,7 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
     // agents to skip pre-existing failures, which contradicts the
     // hard gate.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
     assert!(
         !prompt.contains("IGNORE them"),
         "system prompt still tells agent to IGNORE pre-existing failures"
@@ -65,7 +65,7 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
 #[test]
 fn agentic_prompt_no_longer_advertises_exploration_budget() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
         !prompt.contains("EXPLORATION BUDGET"),
@@ -91,7 +91,7 @@ fn agentic_prompt_no_longer_advertises_exploration_budget() {
 #[test]
 fn agentic_prompt_pins_explicit_five_step_workflow() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(prompt.contains("Workflow:"), "Workflow header missing");
     assert!(
@@ -134,7 +134,7 @@ fn agentic_prompt_pins_explicit_five_step_workflow() {
 #[test]
 fn agentic_prompt_promotes_no_changes_needed_in_rules() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
         prompt.contains("If exploration reveals the task is already done"),
@@ -154,7 +154,7 @@ fn agentic_prompt_promotes_no_changes_needed_in_rules() {
 #[test]
 fn agentic_prompt_no_longer_includes_tool_call_discipline_section() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
         !prompt.contains("Tool-call discipline:"),
@@ -194,7 +194,7 @@ fn agentic_prompt_uses_test_command_env_override_when_set() {
     std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "pytest -q -k smoke");
 
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
     assert!(
         prompt.contains("pytest -q -k smoke"),
         "env override must surface in the prompt"
@@ -411,7 +411,7 @@ fn agentic_prompt_includes_agents_md_when_present() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(prompt.contains(AGENTS_MD_SECTION_HEADER));
     assert!(prompt.contains("Use raw string literals for multi-line Rust strings."));
@@ -428,7 +428,7 @@ fn agentic_prompt_omits_agents_md_when_absent() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
@@ -439,7 +439,7 @@ fn agentic_prompt_omits_agents_md_when_absent() {
 #[test]
 fn agentic_prompt_skips_agents_md_when_folder_missing() {
     let project = test_project("/definitely/does/not/exist/aura/agentic/test");
-    let prompt = agentic_execution_system_prompt(&project);
+    let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
@@ -544,7 +544,7 @@ fn snapshot_dev_loop_default() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().to_string_lossy().into_owned();
         let project = demo_project(&folder);
-        let prompt = agentic_execution_system_prompt(&project);
+        let prompt = agentic_execution_system_prompt(&project, None);
         let scrubbed = scrub(&prompt, &folder);
         assert_snapshot("dev_loop_default", &scrubbed);
     });
@@ -561,7 +561,7 @@ fn snapshot_dev_loop_with_agents_md() {
         .unwrap();
         let folder = dir.path().to_string_lossy().into_owned();
         let project = demo_project(&folder);
-        let prompt = agentic_execution_system_prompt(&project);
+        let prompt = agentic_execution_system_prompt(&project, None);
         let scrubbed = scrub(&prompt, &folder);
         assert_snapshot("dev_loop_with_agents_md", &scrubbed);
     });

@@ -330,6 +330,9 @@ impl AutomatonController for AutomatonBridge {
             None,
             None,
             None,
+            None,
+            Vec::new(),
+            None,
         )
         .await
     }
@@ -396,6 +399,9 @@ impl AutomatonController for AutomatonBridge {
             Vec::new(),
             None,
             None,
+            None,
+            None,
+            Vec::new(),
             None,
         )
         .await

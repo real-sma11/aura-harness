@@ -17,7 +17,8 @@ pub use enrichment::{
 };
 pub use fix::{build_fix_prompt_with_history, build_stub_fix_prompt, BuildFixPromptParams};
 pub use system::{
-    agentic_execution_system_prompt, build_chat_system_prompt, CHAT_SYSTEM_PROMPT_BASE,
+    agentic_execution_system_prompt, build_chat_system_prompt, probe_agents_md, AgentsMdProbe,
+    SystemPromptBuilder, CHAT_SYSTEM_PROMPT_BASE,
 };
 pub use turn_kernel_system::default_system_prompt;
 
@@ -29,6 +30,35 @@ pub struct ProjectInfo<'a> {
     pub folder_path: &'a str,
     pub build_command: Option<&'a str>,
     pub test_command: Option<&'a str>,
+}
+
+/// Borrowed agent-identity fields consumed by
+/// [`SystemPromptBuilder::agent_identity`]. The owning representation
+/// on the wire is [`aura_protocol::AgentIdentityWire`]; the
+/// `aura-runtime` automaton bridge converts wire → borrowed at the
+/// kickoff site so `aura-agent` stays free of protocol dependencies.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentIdentity<'a> {
+    pub name: &'a str,
+    pub role: &'a str,
+    pub personality: &'a str,
+}
+
+/// Bundle of identity / skills / operator-authored prompt threaded
+/// from the wire layer into [`AgenticTaskParams::agent`].
+///
+/// Re-introduced in PR B (PR A removed the unused `agent` field
+/// alongside the dead `build_agent_preamble` helper). Today every
+/// `AgenticTaskParams` construction site passes `None`; PR C populates
+/// the wire fields on the `aura-os` side and lets `Some(_)` flow
+/// through to the builder.
+///
+/// [`AgenticTaskParams::agent`]: crate::agent_runner::AgenticTaskParams::agent
+#[derive(Debug, Clone, Copy)]
+pub struct AgentInfo<'a> {
+    pub identity: Option<AgentIdentity<'a>>,
+    pub skills: &'a [String],
+    pub system_prompt: Option<&'a str>,
 }
 
 /// Minimal spec descriptor.

@@ -1,5 +1,5 @@
 use super::*;
-use aura_protocol::{AgentPermissionsWire, InstalledIntegration, InstalledTool};
+use aura_protocol::{AgentIdentityWire, AgentPermissionsWire, InstalledIntegration, InstalledTool};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AutomatonStartRequest {
@@ -62,6 +62,24 @@ pub(super) struct AutomatonStartRequest {
     /// `#[serde(default)]` keeps older clients compatible.
     #[serde(default)]
     aura_agent_id: Option<String>,
+    /// PR B (simplify-system-prompts): typed identity wire fields.
+    ///
+    /// `aura-os` does not populate any of the three until PR C, and
+    /// `#[serde(default)]` keeps the wire backward-compatible. When all
+    /// three are absent / empty the harness leaves
+    /// `AgenticTaskParams::agent` at `None` and the assembled system
+    /// prompt is byte-identical with PR A.
+    #[serde(default)]
+    agent_identity: Option<AgentIdentityWire>,
+    /// Operator-curated skills list. Empty default means no
+    /// `<agent_skills>` section is rendered.
+    #[serde(default)]
+    agent_skills: Vec<String>,
+    /// Operator-authored system prompt (the "system prompt" textarea
+    /// on the agent template). Empty / `None` means no
+    /// `<agent_system_prompt>` section is rendered.
+    #[serde(default)]
+    agent_system_prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +116,12 @@ pub(super) async fn automaton_start_handler(
     });
     let agent_permissions = crate::session::agent_permissions_from_wire(req.agent_permissions);
 
+    let agent_identity = req.agent_identity.filter(|wire| !wire.is_empty());
+    let agent_skills = req.agent_skills;
+    let agent_system_prompt = req
+        .agent_system_prompt
+        .filter(|s| !s.trim().is_empty());
+
     let automaton_id = if let Some(task_id) = req.task_id {
         bridge
             .run_task_with_capabilities(
@@ -116,6 +140,9 @@ pub(super) async fn automaton_start_handler(
                 req.aura_org_id,
                 req.aura_session_id,
                 req.aura_agent_id,
+                agent_identity,
+                agent_skills,
+                agent_system_prompt,
             )
             .await
     } else {
@@ -133,6 +160,9 @@ pub(super) async fn automaton_start_handler(
                 req.aura_org_id,
                 req.aura_session_id,
                 req.aura_agent_id,
+                agent_identity,
+                agent_skills,
+                agent_system_prompt,
             )
             .await
     }

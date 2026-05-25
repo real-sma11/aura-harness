@@ -22,6 +22,7 @@ use aura_agent::{KernelDomainGateway, KernelModelGateway, KernelToolGateway};
 use aura_automaton::{DevLoopAutomaton, TaskRunAutomaton};
 use aura_core::AgentPermissions;
 use aura_kernel::Kernel;
+use aura_protocol::AgentIdentityWire;
 use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;
 use tracing::info;
@@ -189,6 +190,9 @@ impl AutomatonBridge {
         aura_org_id: Option<String>,
         aura_session_id: Option<String>,
         aura_agent_id: Option<String>,
+        agent_identity: Option<AgentIdentityWire>,
+        agent_skills: Vec<String>,
+        agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
         if let Some(entry) = self.project_handles.get(project_id) {
             let tracked = entry.value();
@@ -234,6 +238,16 @@ impl AutomatonBridge {
             "git_repo_url": git_repo_url,
             "git_branch": git_branch,
             "auth_token": auth_token.as_deref(),
+            // PR B: typed identity wire fields surface to the
+            // automaton via the same JSON config blob the rest of the
+            // dev-loop kickoff already uses. `DevLoopConfig::from_json`
+            // parses them back out and threads them into
+            // `AgenticTaskParams::agent`. `null` / `[]` defaults keep
+            // the assembled prompt byte-identical with PR A until
+            // aura-os populates these fields in PR C.
+            "agent_identity": agent_identity,
+            "agent_skills": agent_skills,
+            "agent_system_prompt": agent_system_prompt,
         });
 
         let (handle, event_rx) = self
@@ -277,6 +291,9 @@ impl AutomatonBridge {
         aura_org_id: Option<String>,
         aura_session_id: Option<String>,
         aura_agent_id: Option<String>,
+        agent_identity: Option<AgentIdentityWire>,
+        agent_skills: Vec<String>,
+        agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
         let ctx = self
             .prepare_automaton_run(
@@ -313,6 +330,13 @@ impl AutomatonBridge {
             "auth_token": auth_token.as_deref(),
             "prior_failure": prior_failure,
             "work_log": work_log,
+            // PR B: same wire-field threading as `start_dev_loop_with_capabilities`.
+            // Single-task kickoffs go through the same prompt assembly,
+            // so they pick up identity / skills / operator system
+            // prompt the same way once PR C populates them upstream.
+            "agent_identity": agent_identity,
+            "agent_skills": agent_skills,
+            "agent_system_prompt": agent_system_prompt,
         });
 
         let (handle, event_rx) = self

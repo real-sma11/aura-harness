@@ -33,12 +33,14 @@
 //! child agents must carry a strict subset of their parent's permissions;
 //! see `aura_core::AgentPermissions::contains` on the harness side.
 
+pub mod agent_identity;
 pub mod client;
 pub mod common;
 pub mod installed;
 pub mod permissions;
 pub mod server;
 
+pub use agent_identity::AgentIdentityWire;
 pub use client::{
     ApprovalResponse, ConversationMessage, GenerationRequest, InboundMessage, IntentClassifierRule,
     IntentClassifierSpec, MessageAttachment, SessionInit, SessionModelOverrides,
