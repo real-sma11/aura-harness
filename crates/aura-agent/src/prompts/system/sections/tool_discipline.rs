@@ -9,8 +9,16 @@
 //! have to touch the call graph.
 //!
 //! This follow-up refills [`render`] with the *narrow* subset of
-//! tool-call patterns the harness still enforces at runtime today:
+//! tool-call patterns the harness still enforces at runtime today,
+//! plus one model-shaping anti-re-read rule that is tightly tied to
+//! the write tools' failure-reporting contract:
 //!
+//! - The anti-re-read rule: a successful `write_file` / `edit_file`
+//!   does not need a confirming `read_file`. The tools report failure
+//!   via `is_error = true` on the tool_result; trust that signal.
+//!   Model-shaping only — the harness does not reject a redundant
+//!   read — but it lives here because it describes the tool surface's
+//!   own success / failure contract.
 //! - The 32_000-byte `write_file` chunk guard in
 //!   [`crate::agent_loop::tool_pipeline::partition_oversized_writes`]
 //!   (constant: [`crate::constants::WRITE_FILE_CHUNK_BYTES`]). Oversized
@@ -28,6 +36,13 @@
 //! `search_code` rejection, `cargo` subcommand denial via `run_command`)
 //! are deliberately omitted — re-advertising them would mislead the
 //! model about what the runtime actually rejects.
+//!
+//! Layer A also dropped the historical "for larger files prefer
+//! `apply_patch`" advice from this section: after Layer 0 the
+//! dev-loop bundle no longer ships `apply_patch`, and the
+//! `write_file` + `edit_file` seed-and-append pattern handles oversized
+//! files. The §6.2 audit finding in the doom-loop plan called this out
+//! explicitly.
 
 /// Render the tool-discipline section wrapped in the canonical
 /// `<tool_discipline>...</tool_discipline>` envelope.
@@ -39,7 +54,8 @@
 #[must_use]
 pub(crate) fn render() -> Option<String> {
     let body = "\
-- `write_file` rejects content over 32000 bytes per call - the harness short-circuits the call and the change never lands on disk. For larger files, prefer `apply_patch` (not subject to the per-call cap), or seed with `write_file` (<=32000 bytes: module doc + imports + one stub) and append the rest with `edit_file`.
+- Do not re-read a file after a successful `write_file` / `edit_file` / `delete_file`. The tools report failure via `is_error = true` on the tool_result; trust that signal and keep moving.
+- `write_file` rejects content over 32000 bytes per call - the harness short-circuits the call and the change never lands on disk. For larger files, seed with `write_file` (<=32000 bytes: module doc + imports + one stub) and append the rest with `edit_file`.
 - Prior `write_file` / `edit_file` tool_use blocks in the transcript may have their bulky string fields (`content` / `old_text` / `new_text`) stripped to a `_redacted` marker or `<<<AURA_ELIDED_...>>>` placeholder so the transcript fits in context. Always re-emit the real bytes - calls that copy the placeholder verbatim are rejected before anything touches disk.";
     Some(format!("<tool_discipline>\n{body}\n</tool_discipline>"))
 }
