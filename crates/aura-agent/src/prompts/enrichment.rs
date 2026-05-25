@@ -265,6 +265,17 @@ fn grep_one(root: &Path, symbol: &str, max_hits: usize) -> Vec<SymbolHit> {
 /// being a real workspace symbol. Keep this list small and high-signal;
 /// the cost of a few false-positive grep calls is much lower than the
 /// cost of dropping a real symbol.
+///
+/// The trailing block is a deliberate, minimal expansion to cover
+/// sentence-initial English verbs/nouns that the new `bare_camel_regex`
+/// picks up but that have ~zero chance of being a real workspace
+/// symbol. Without these, prose like "Refactor the engine" or "The
+/// Implementation Then Defines An Outbox" leaks `Refactor`,
+/// `Implementation`, `Then`, `Defines` into the symbol list. Kept
+/// minimal: only words that previously caused a test regression are
+/// listed here. Future additions should be justified in the same way
+/// (a real input that the harness saw + a regression test pinning the
+/// fix).
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "this", "that", "from", "into", "into_",
     "self", "true", "false", "none", "some", "ok", "err", "fn", "pub",
@@ -273,6 +284,8 @@ const STOPWORDS: &[&str] = &[
     "return", "break", "continue", "as", "in", "of", "on", "to", "at",
     "by", "or", "not", "is", "be", "do", "we", "you", "it", "an", "a",
     "todo", "fixme", "note", "tip", "warning", "see", "test", "tests",
+    // bare_camel_regex (Phase A) coverage:
+    "refactor", "implement", "implementation", "then", "defines", "define",
 ];
 
 /// Extract candidate paths and symbol names from a task description.
@@ -280,8 +293,12 @@ const STOPWORDS: &[&str] = &[
 /// Heuristics (intentionally cheap):
 /// - Paths: `\b(crates|apps|src|tests|examples)/<path>\.<ext>\b` plus
 ///   any backtick- or quote-wrapped path-shaped token.
-/// - Symbols: `\b[A-Z][A-Za-z0-9]+::[A-Za-z0-9_]+\b` (Rust path) plus
-///   backtick-wrapped CamelCase / snake_case identifiers.
+/// - Symbols: four cheap regex passes deduped through a `HashSet`:
+///   CamelCase-prefixed Rust paths (`Foo::bar`), snake_case-prefixed
+///   Rust paths (`zero_storage::Outbox` — Cargo crates are
+///   conventionally snake_case), backtick-wrapped identifiers
+///   (`` `enqueue_batch` ``), and bare CamelCase identifiers in
+///   prose (`Publisher`, `OutboxEntry`, `URL`).
 /// - Filters HTTP(s) URLs, common English words, and tokens whose
 ///   "extension" is actually a sentence terminator.
 ///
@@ -372,9 +389,26 @@ fn looks_like_sentence_punctuation(_s: &str) -> bool {
     false
 }
 
-fn rust_path_regex() -> Regex {
+/// Match Rust `Module::item`-shaped paths whose leading segment is
+/// CamelCase — i.e. a type/trait/module conventionally named that way.
+fn rust_path_camel_regex() -> Regex {
     Regex::new(r"\b[A-Z][A-Za-z0-9_]+::[A-Za-z0-9_]+\b")
-        .expect("rust_path_regex must compile")
+        .expect("rust_path_camel_regex must compile")
+}
+
+/// Match Rust `crate::item`-shaped paths whose leading segment is
+/// snake_case. Cargo crate names are conventionally snake_case
+/// (`zero_storage`, `tokio`, `serde_json`), so any Rust path that
+/// *starts* at a crate boundary necessarily has a lowercase leading
+/// segment. The original `rust_path_regex` only matched CamelCase
+/// prefixes and silently dropped `zero_storage::Outbox`-style symbols
+/// referenced in real dev-loop task descriptions (the Publisher task
+/// that motivated this change). Greedy `(?:::ident)+` so chained
+/// paths like `zero_network::publisher::PublisherHandle` come back as
+/// a single match rather than truncated to the first two segments.
+fn rust_path_snake_regex() -> Regex {
+    Regex::new(r"\b[a-z][a-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\b")
+        .expect("rust_path_snake_regex must compile")
 }
 
 fn backtick_ident_regex() -> Regex {
@@ -386,19 +420,61 @@ fn backtick_ident_regex() -> Regex {
         .expect("backtick_ident_regex must compile")
 }
 
+/// Match bare (unquoted, no `::`) CamelCase identifiers in prose,
+/// e.g. `Publisher`, `OutboxEntry`, `PublisherHandle`, `URL`. Three
+/// shapes, alternation order chosen so leftmost-first matching prefers
+/// the longest CamelCase span:
+/// 1. CompoundCamelCase (≥2 humps): `OutboxEntry`, `MockGridClient`,
+///    `PublisherHandle`, `RetryPolicy`. Highest-signal — multiple
+///    case transitions are essentially never an English word.
+/// 2. Single-hump CamelCase (Cap + ≥2 lowercase): `Publisher`,
+///    `Outbox`. The riskiest shape — sentence-initial English words
+///    (`Refactor`, `Implementation`, `Defines`) land here too, so
+///    [`STOPWORDS`] is expanded to filter the most common offenders
+///    and [`is_plausible_camel_ident`] enforces it.
+/// 3. Short all-caps acronyms (length 3-6): `URL`, `HTTP`, `JSON`.
+fn bare_camel_regex() -> Regex {
+    Regex::new(r"\b(?:[A-Z][a-z]+(?:[A-Z][a-z]*|[A-Z]+)+|[A-Z][a-z]{2,}|[A-Z]{3,6})\b")
+        .expect("bare_camel_regex must compile")
+}
+
 fn extract_symbols(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for m in rust_path_regex().find_iter(text) {
-        out.push(m.as_str().to_string());
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    for m in rust_path_camel_regex().find_iter(text) {
+        let s = m.as_str().to_string();
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    for m in rust_path_snake_regex().find_iter(text) {
+        let s = m.as_str().to_string();
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
     }
     for cap in backtick_ident_regex().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let s = m.as_str();
             if is_plausible_ident(s) {
-                out.push(s.to_string());
+                let owned = s.to_string();
+                if seen.insert(owned.clone()) {
+                    out.push(owned);
+                }
             }
         }
     }
+    for m in bare_camel_regex().find_iter(text) {
+        let s = m.as_str();
+        if is_plausible_camel_ident(s) {
+            let owned = s.to_string();
+            if seen.insert(owned.clone()) {
+                out.push(owned);
+            }
+        }
+    }
+
     out
 }
 
@@ -414,6 +490,18 @@ fn is_plausible_ident(s: &str) -> bool {
     // lowercase words like `enqueue` would also match, but they're
     // common English-ish nouns and produce mostly noise without context.
     s.chars().any(|c| c.is_ascii_uppercase()) || s.contains('_')
+}
+
+/// Filter for [`bare_camel_regex`] matches. The regex itself already
+/// guarantees shape (≥3 chars, leading uppercase); this enforces the
+/// STOPWORDS denylist that suppresses sentence-initial English words
+/// the regex can't structurally tell apart from real symbols.
+fn is_plausible_camel_ident(s: &str) -> bool {
+    if s.len() < 3 {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    !STOPWORDS.contains(&lower.as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +826,107 @@ mod tests {
         let desc = "Refactor the engine to be faster and cleaner.";
         let hints = extract_hints(desc);
         assert!(!hints.is_meaningful(), "got {hints:?}");
+    }
+
+    #[test]
+    fn extracts_snake_case_crate_path() {
+        // Two real-world shapes: `crate::Type` and chained
+        // `crate::mod::Type`. The original `rust_path_regex` only
+        // matched CamelCase prefixes and silently dropped both.
+        let desc = "Wire up zero_storage::Outbox and \
+                    zero_network::publisher::PublisherHandle to publish.";
+        let symbols = extract_symbols(desc);
+        assert!(
+            symbols.iter().any(|s| s == "zero_storage::Outbox"),
+            "expected zero_storage::Outbox in {symbols:?}",
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s == "zero_network::publisher::PublisherHandle"),
+            "expected zero_network::publisher::PublisherHandle in {symbols:?}",
+        );
+    }
+
+    #[test]
+    fn extracts_bare_camelcase_publisher_task() {
+        // Verbatim from the Publisher dev-loop task that motivated
+        // Phase A. Before this change, none of the bare CamelCase
+        // identifiers (`Publisher`, `Outbox`, `PublisherHandle`,
+        // `RetryPolicy`, `MockGridClient`, `FlakyClient`) were
+        // extracted unless they appeared in backticks, so iteration 0
+        // enrichment had nothing to pre-resolve.
+        let desc = "Implement Publisher::enqueue(env) (writes to \
+            zero_storage::Outbox then attempts first publish) and \
+            spawn_driver() returning a PublisherHandle. Driver loop: \
+            poll Outbox::due(now_ms) on a tokio interval, call \
+            client.publish, on success mark_sent, on failure \
+            record_failure(next_try_ms) per RetryPolicy::next_delay. \
+            After 5 failed attempts set next_try_ms = u64::MAX. \
+            Acceptance: integration test using MockGridClient wrapped \
+            by a FlakyClient that fails the first 3 publishes — \
+            driver eventually delivers within \u{2264} attempt 5.";
+        let symbols = extract_symbols(desc);
+        for expected in [
+            "Publisher",
+            "Outbox",
+            "RetryPolicy",
+            "MockGridClient",
+            "FlakyClient",
+            "PublisherHandle",
+        ] {
+            assert!(
+                symbols.iter().any(|s| s == expected),
+                "expected {expected} in {symbols:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_extract_english_words_or_stopwords() {
+        // The bare-CamelCase regex would naively match every
+        // sentence-initial CamelCase word here. STOPWORDS + the
+        // `[A-Z][a-z]{2,}` length floor must filter all five English
+        // words while still letting the genuine identifier `Outbox`
+        // through.
+        let desc = "The Implementation Then Defines An Outbox";
+        let symbols = extract_symbols(desc);
+        assert!(
+            symbols.iter().any(|s| s == "Outbox"),
+            "expected Outbox in {symbols:?}",
+        );
+        for unwanted in ["The", "Implementation", "Then", "Defines", "An"] {
+            assert!(
+                !symbols.iter().any(|s| s == unwanted),
+                "unwanted {unwanted} present in {symbols:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn dedupes_symbols_across_regex_sources() {
+        // `Outbox` is reachable from three of the four regex sources
+        // (backtick, bare CamelCase, and indirectly via the
+        // `zero_storage::Outbox` snake-case path). After dedup it
+        // should appear exactly once as a standalone symbol.
+        let desc = "We use `Outbox` for queueing. The Outbox type \
+                    backs zero_storage::Outbox in the storage crate.";
+        let symbols = extract_symbols(desc);
+        let outbox_count = symbols
+            .iter()
+            .filter(|s| s.as_str() == "Outbox")
+            .count();
+        assert_eq!(
+            outbox_count, 1,
+            "expected exactly one bare Outbox, got {symbols:?}",
+        );
+        // The `::`-qualified form is a distinct string and should
+        // also be present (sanity check that dedup doesn't collapse
+        // genuinely different symbols).
+        assert!(
+            symbols.iter().any(|s| s == "zero_storage::Outbox"),
+            "expected zero_storage::Outbox alongside bare Outbox in {symbols:?}",
+        );
     }
 
     #[tokio::test]
