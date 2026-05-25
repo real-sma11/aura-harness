@@ -376,6 +376,42 @@ fn validate_execution_passes_through_when_no_changes_needed() {
     assert!(ok.no_changes_needed);
 }
 
+/// Cross-repo invariant: the verbatim string aura-harness emits when
+/// a task lands in the "no file ops AND not reached_implementing AND
+/// not no_changes_needed" trap is what `aura-os-harness::signals::
+/// classify_failure` keys off to map to `HarnessFailureKind::
+/// ResearchLoopAbort`. If this string ever changes silently, the
+/// aura-os retry policy (Phase 6) will mis-classify the failure as
+/// `Other` and stop retrying it via the decomposition path. The
+/// companion test in `aura-os-harness::signals::tests` pins the
+/// classifier side; this test pins the harness emitter side.
+#[test]
+fn validate_execution_emits_verbatim_research_loop_abort_message() {
+    let exec = TaskExecutionResult {
+        reached_implementing: false,
+        no_changes_needed: false,
+        file_ops: Vec::new(),
+        messages: Vec::new(),
+        ..TaskExecutionResult::default()
+    };
+
+    let err = validate_execution(exec).expect_err("expected AgentExecution");
+    let AutomatonError::AgentExecution(msg) = err else {
+        panic!("expected AgentExecution variant, got: {err:?}");
+    };
+    // Verbatim string the aura-os classifier matches against. The em
+    // dash is U+2014; preserve it byte-for-byte. Pairs with
+    // `aura-os-harness::signals::tests::
+    //   verbatim_validate_execution_message_classifies_as_research_loop_abort`
+    // which feeds this exact string back through `classify_failure`.
+    assert_eq!(
+        msg, "task completed without any file operations — completion not verified",
+        "validate_execution must emit the EXACT string aura-os keys off; \
+         changing this without updating aura-os will silently break the \
+         research-loop-abort retry policy",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Commit-skip DoD precheck (Section 2 of fix_4.6-class_failures plan).
 //

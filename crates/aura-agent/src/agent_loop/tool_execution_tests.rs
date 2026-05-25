@@ -325,6 +325,140 @@ fn truncate_preview_uses_ascii_marker() {
     assert!(!preview.contains('\u{2026}'));
 }
 
+// ------------------------------------------------------------------
+// Phase 2 contract — read-only loop steering (harness-v2).
+//
+// Drives `check_termination_conditions` directly with `n` synthetic
+// read-only iterations and pins:
+//
+//   1. The counter increments by exactly 1 per iteration.
+//   2. At `READ_ONLY_INJECTION_THRESHOLD` iterations the loop appends
+//      the verbatim `FORCE-PROGRESS:` user message ONCE.
+//   3. A subsequent iteration that contains a `write_file` resets
+//      the counter to 0 (forward progress clears the streak).
+// ------------------------------------------------------------------
+
+fn read_only_executed_tools(idx: usize) -> ExecutedTools {
+    let id = format!("read_{idx}");
+    ExecutedTools {
+        tool_calls: vec![ToolCallInfo {
+            id: id.clone(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({"path": format!("src/lib{idx}.rs")}),
+        }],
+        all_results: vec![ToolCallResult::success(&id, "file body")],
+        side_messages: Vec::new(),
+        is_stalled: false,
+        blocked_ids: Default::default(),
+        cached_ids: Default::default(),
+        saw_empty_path_block: false,
+    }
+}
+
+fn write_executed_tools() -> ExecutedTools {
+    let id = "wf_progress".to_string();
+    ExecutedTools {
+        tool_calls: vec![ToolCallInfo {
+            id: id.clone(),
+            name: "write_file".to_string(),
+            input: serde_json::json!({"path": "src/out.rs", "content": "pub fn out() {}"}),
+        }],
+        all_results: vec![ToolCallResult::success(&id, "wrote 16 bytes")],
+        side_messages: Vec::new(),
+        is_stalled: false,
+        blocked_ids: Default::default(),
+        cached_ids: Default::default(),
+        saw_empty_path_block: false,
+    }
+}
+
+#[test]
+fn read_only_streak_increments_per_iteration_and_resets_on_write() {
+    let config = AgentLoopConfig::default();
+    let mut state = LoopState::new(&config, Vec::new());
+    assert_eq!(state.counters.consecutive_read_only_iterations, 0);
+
+    for idx in 0..3 {
+        let stopped = check_termination_conditions(None, &mut state, read_only_executed_tools(idx));
+        assert!(!stopped, "iteration {idx}: should not stop on read-only call");
+        assert_eq!(
+            state.counters.consecutive_read_only_iterations,
+            idx + 1,
+            "counter must increment by 1 per read-only iteration",
+        );
+    }
+
+    let stopped = check_termination_conditions(None, &mut state, write_executed_tools());
+    assert!(!stopped, "write iteration must not stop the loop");
+    assert_eq!(
+        state.counters.consecutive_read_only_iterations, 0,
+        "successful write must reset the read-only streak counter",
+    );
+}
+
+#[test]
+fn force_progress_user_message_injected_at_threshold_a() {
+    let config = AgentLoopConfig::default();
+    let mut state = LoopState::new(&config, Vec::new());
+
+    // Drive exactly READ_ONLY_INJECTION_THRESHOLD read-only iterations.
+    for idx in 0..crate::constants::READ_ONLY_INJECTION_THRESHOLD {
+        let stopped = check_termination_conditions(None, &mut state, read_only_executed_tools(idx));
+        assert!(!stopped, "iteration {idx} should not stop");
+    }
+
+    // The loop must have appended a synthetic user message containing
+    // the verbatim `FORCE-PROGRESS:` marker. The exact wording also
+    // pins the no_changes_needed escape hatch — Phase 3's restored
+    // prompt language relies on this nudge.
+    let force_progress_text: String = state
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        force_progress_text.contains("FORCE-PROGRESS:"),
+        "expected FORCE-PROGRESS: marker after {} read-only iterations, got:\n{force_progress_text}",
+        crate::constants::READ_ONLY_INJECTION_THRESHOLD,
+    );
+    assert!(
+        force_progress_text.contains("task_done"),
+        "force-progress message must mention task_done as escape hatch",
+    );
+    assert!(
+        force_progress_text.contains("no_changes_needed"),
+        "force-progress message must surface the no_changes_needed exemption",
+    );
+}
+
+#[test]
+fn force_progress_message_is_not_injected_below_threshold_a() {
+    // One iteration short of the threshold must NOT trip the injection.
+    // This pins the boundary so a future change that fires the nudge
+    // earlier (e.g. at threshold-1 by accident) breaks visibly here.
+    let config = AgentLoopConfig::default();
+    let mut state = LoopState::new(&config, Vec::new());
+    let below = crate::constants::READ_ONLY_INJECTION_THRESHOLD.saturating_sub(1);
+    for idx in 0..below {
+        let _ = check_termination_conditions(None, &mut state, read_only_executed_tools(idx));
+    }
+    let injected = state.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::Text { text } if text.contains("FORCE-PROGRESS:"))
+        })
+    });
+    assert!(
+        !injected,
+        "FORCE-PROGRESS must not fire below threshold A ({} iterations)",
+        below,
+    );
+}
+
 #[test]
 fn placeholder_rejection_does_not_trip_consecutive_errors_limit() {
     let config = AgentLoopConfig::default();

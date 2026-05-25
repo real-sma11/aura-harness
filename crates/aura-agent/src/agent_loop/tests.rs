@@ -671,6 +671,102 @@ fn begin_iteration_no_op_when_no_signal_configured() {
     assert_eq!(state.blocking_ctx.exploration_count, 40);
 }
 
+// ------------------------------------------------------------------
+// Phase 2 contract — read-only force-tool steering at threshold B
+// (`READ_ONLY_FORCE_TOOL_THRESHOLD`, harness-v2).
+//
+// `begin_iteration` must arm `disable_thinking_this_iteration` and
+// `build_request` must downgrade `tool_choice` to `Required` AND
+// clamp `max_tokens` at or below `THINKING_AUTO_ENABLE_THRESHOLD`
+// for the same iteration. Anthropic blocks forced tool use while
+// extended thinking is enabled, so the two flips ride together.
+// ------------------------------------------------------------------
+
+/// Threshold-B headline regression: drive the read-only streak counter
+/// up to `READ_ONLY_FORCE_TOOL_THRESHOLD`, run one `begin_iteration`
+/// tick + one `build_request` call, then assert (a) thinking is
+/// disabled for this turn (one-shot flag set), (b) the produced
+/// request has `tool_choice: Required`, and (c) `max_tokens` is
+/// clamped at or below `THINKING_AUTO_ENABLE_THRESHOLD` so the
+/// reasoner's auto-enable-extended-thinking heuristic does not
+/// re-engage thinking despite the disable flag.
+#[test]
+fn force_tool_required_and_thinking_clamped_at_read_only_threshold_b() {
+    use aura_reasoner::{Message, ToolChoice};
+
+    // Pick a `thinking_budget` strictly above the auto-thinking
+    // threshold so the clamp is observable: the budget would
+    // otherwise sit comfortably above the threshold and the
+    // assertion below would silently pass.
+    let config = AgentLoopConfig {
+        thinking_budget: Some(8_192),
+        max_tokens: 16_384,
+        ..AgentLoopConfig::default()
+    };
+    let mut state = super::LoopState::new(&config, vec![Message::user("hi")]);
+    state.counters.consecutive_read_only_iterations =
+        crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD;
+
+    state.begin_iteration(&config, 5);
+    assert!(
+        state.thinking.disable_thinking_this_iteration,
+        "begin_iteration must arm disable_thinking_this_iteration when the \
+         read-only streak crosses threshold B (Anthropic rejects forced \
+         tool use with extended thinking enabled)",
+    );
+
+    let request = state
+        .build_request(&config, &[], 5)
+        .expect("build_request must succeed");
+    assert!(
+        matches!(request.tool_choice, ToolChoice::Required),
+        "tool_choice must be Required at threshold B, got {:?}",
+        request.tool_choice,
+    );
+    assert!(
+        request.max_tokens.get() <= crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        "max_tokens must be clamped to <= THINKING_AUTO_ENABLE_THRESHOLD ({}) \
+         when thinking is disabled this iteration; got {}",
+        crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        request.max_tokens.get(),
+    );
+}
+
+/// Companion: ONE iteration short of threshold B must keep
+/// `tool_choice: Auto` and leave the thinking-disable flag clear.
+/// Pins the boundary so a future change that fires the force-tool
+/// override one iteration earlier (or one iteration later) trips here.
+#[test]
+fn read_only_streak_below_threshold_b_keeps_tool_choice_auto() {
+    use aura_reasoner::{Message, ToolChoice};
+
+    let config = AgentLoopConfig {
+        thinking_budget: Some(8_192),
+        max_tokens: 16_384,
+        ..AgentLoopConfig::default()
+    };
+    let mut state = super::LoopState::new(&config, vec![Message::user("hi")]);
+    state.counters.consecutive_read_only_iterations =
+        crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD.saturating_sub(1);
+
+    state.begin_iteration(&config, 5);
+    assert!(
+        !state.thinking.disable_thinking_this_iteration,
+        "thinking must NOT be disabled below threshold B",
+    );
+    let request = state.build_request(&config, &[], 5).unwrap();
+    assert!(
+        matches!(request.tool_choice, ToolChoice::Auto),
+        "tool_choice must remain Auto below threshold B, got {:?}",
+        request.tool_choice,
+    );
+    assert_eq!(
+        request.max_tokens.get(),
+        state.thinking.budget,
+        "max_tokens must follow the unclamped thinking budget below threshold B",
+    );
+}
+
 /// End-to-end on the blocker: when `exploration_count` is past
 /// `exploration_allowance` *and the plan latch is set*,
 /// `detect_all_blocked` blocks reads. After the signal flips a second
