@@ -11,7 +11,8 @@
 //! live in dedicated siblings:
 //!
 //! - [`aggregate`] — `TaskAggregate` + commit/chunk-guard markers.
-//! - [`validation`] — `validate_execution` + `DecompositionHint`.
+//! - [`validation`] — `validate_execution` + the opt-in build
+//!   preflight gate (`AURA_BUILD_GATE`).
 //! - [`forward_event`] — `aura_agent::AgentLoopEvent` → `AutomatonEvent`
 //!   translation used by `tick.rs`, `task_run.rs`, and `chat.rs`.
 //!
@@ -41,7 +42,6 @@ use crate::runtime::{Automaton, TickOutcome};
 use crate::schedule::Schedule;
 
 mod aggregate;
-mod decomposition;
 mod finish;
 mod forward_event;
 mod run;
@@ -63,7 +63,6 @@ mod tests;
 // directory.
 
 pub(crate) use aggregate::{TaskAggregate, COMMIT_SKIPPED_NO_CHANGES};
-pub(crate) use decomposition::{auto_decompose_task, DecompositionInput, DecompositionResult};
 pub(crate) use safe_transition::safe_transition;
 pub(crate) use tick::commit_and_push;
 pub(crate) use validation::validate_execution;
@@ -71,7 +70,7 @@ pub(crate) use validation::validate_execution;
 pub use forward_event::forward_agent_event;
 pub use validation::{
     build_preflight_failure_to_error, build_preflight_gate_enabled, validate_build_preflight,
-    BuildPreflightOutcome, DecompositionHint,
+    BuildPreflightOutcome,
 };
 
 // ---------------------------------------------------------------------------

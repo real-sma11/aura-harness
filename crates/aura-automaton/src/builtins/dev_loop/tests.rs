@@ -9,7 +9,6 @@ use super::{
     COMMIT_SKIPPED_NO_CHANGES,
 };
 use crate::context::TickContext;
-use crate::error::AutomatonError;
 use crate::events::AutomatonEvent;
 use crate::state::AutomatonState;
 use crate::types::AutomatonId;
@@ -254,62 +253,11 @@ fn user_tool_result(tool_use_id: &str, content: &str, is_error: bool) -> Message
 }
 
 #[test]
-fn validate_execution_emits_needs_decomposition_when_reached_implementing_with_no_ops() {
-    // Canned failing-run fixture: two write_file tool_uses with no
-    // successful tool_result followed by a truncated third pending call.
-    let messages = vec![
-        assistant_tool_use(
-            "call_1",
-            "write_file",
-            json!({ "path": "src/neural/key.rs", "content": "pub struct NeuralKey {}" }),
-        ),
-        // same path, second attempt (should dedupe).
-        assistant_tool_use(
-            "call_2",
-            "write_file",
-            json!({ "path": "src/neural/key.rs", "content": "pub struct NeuralKey {}" }),
-        ),
-        assistant_tool_use(
-            "call_3",
-            "write_file",
-            json!({ "path": "src/neural/bundle.rs", "content": "pub fn bundle() {}" }),
-        ),
-    ];
-
-    let exec = TaskExecutionResult {
-        reached_implementing: true,
-        no_changes_needed: false,
-        messages,
-        ..TaskExecutionResult::default()
-    };
-
-    let err = validate_execution(exec).expect_err("expected NeedsDecomposition");
-    let AutomatonError::NeedsDecomposition { hint } = err else {
-        panic!("expected NeedsDecomposition variant, got: {err:?}");
-    };
-
-    assert_eq!(
-        hint.failed_paths,
-        vec![
-            "src/neural/key.rs".to_string(),
-            "src/neural/bundle.rs".to_string(),
-        ],
-        "should collect unique paths from pending write_file tool_uses"
-    );
-    assert_eq!(hint.last_pending_tool_name.as_deref(), Some("write_file"));
-    let summary = hint
-        .last_pending_tool_input_summary
-        .expect("expected summarized write_file input");
-    assert!(
-        summary.contains("src/neural/bundle.rs"),
-        "summary should name the last pending path, got: {summary}"
-    );
-}
-
-#[test]
-fn validate_execution_drops_successful_paths_from_failed_paths() {
-    // A write_file whose tool_use did receive a successful tool_result
-    // must not appear in failed_paths.
+fn validate_execution_is_identity_pass_with_file_ops() {
+    // The post-hoc "no file ops" decomposition gate was removed; the
+    // validator is now a thin identity helper. Smoke-test the
+    // surviving call shape so future verdicts have a regression
+    // anchor.
     let messages = vec![
         assistant_tool_use(
             "call_ok",
@@ -317,34 +265,24 @@ fn validate_execution_drops_successful_paths_from_failed_paths() {
             json!({ "path": "src/done.rs", "content": "ok" }),
         ),
         user_tool_result("call_ok", "wrote 2 bytes", false),
-        assistant_tool_use(
-            "call_pending",
-            "edit_file",
-            json!({ "path": "src/pending.rs", "old_text": "a", "new_text": "b" }),
-        ),
     ];
-
     let exec = TaskExecutionResult {
         reached_implementing: true,
         messages,
         ..TaskExecutionResult::default()
     };
 
-    let err = validate_execution(exec).expect_err("expected NeedsDecomposition");
-    let AutomatonError::NeedsDecomposition { hint } = err else {
-        panic!("expected NeedsDecomposition variant, got: {err:?}");
-    };
-
-    assert_eq!(hint.failed_paths, vec!["src/pending.rs".to_string()]);
-    assert_eq!(hint.last_pending_tool_name.as_deref(), Some("edit_file"));
+    let ok = validate_execution(exec).expect("validator is now an identity pass");
+    assert!(ok.reached_implementing);
+    assert_eq!(ok.messages.len(), 2);
 }
 
 #[test]
-fn validate_execution_keeps_hard_error_when_not_reached_implementing() {
-    // Classic "completed without any file operations" failure mode when
-    // the agent never got past the exploration phase: the old
-    // AgentExecution error must still fire so downstream callers keep
-    // their current behavior.
+fn validate_execution_is_identity_pass_without_file_ops() {
+    // The historical "no file ops + not reached_implementing"
+    // failure path is gone — the validator must NOT reject this
+    // shape any more (the orchestrator + retry policy police
+    // forward progress instead).
     let exec = TaskExecutionResult {
         reached_implementing: false,
         no_changes_needed: false,
@@ -352,16 +290,9 @@ fn validate_execution_keeps_hard_error_when_not_reached_implementing() {
         ..TaskExecutionResult::default()
     };
 
-    let err = validate_execution(exec).expect_err("expected AgentExecution");
-    match err {
-        AutomatonError::AgentExecution(msg) => {
-            assert!(
-                msg.contains("completion not verified"),
-                "unexpected message: {msg}"
-            );
-        }
-        other => panic!("expected AgentExecution variant, got: {other:?}"),
-    }
+    let ok = validate_execution(exec).expect("validator must be Ok for any shape");
+    assert!(!ok.reached_implementing);
+    assert!(!ok.no_changes_needed);
 }
 
 #[test]
@@ -372,44 +303,8 @@ fn validate_execution_passes_through_when_no_changes_needed() {
         ..TaskExecutionResult::default()
     };
 
-    let ok = validate_execution(exec).expect("no_changes_needed must short-circuit");
+    let ok = validate_execution(exec).expect("no_changes_needed must pass through");
     assert!(ok.no_changes_needed);
-}
-
-/// Cross-repo invariant: the verbatim string aura-harness emits when
-/// a task lands in the "no file ops AND not reached_implementing AND
-/// not no_changes_needed" trap is what `aura-os-harness::signals::
-/// classify_failure` keys off to map to `HarnessFailureKind::
-/// ResearchLoopAbort`. If this string ever changes silently, the
-/// aura-os retry policy (Phase 6) will mis-classify the failure as
-/// `Other` and stop retrying it via the decomposition path. The
-/// companion test in `aura-os-harness::signals::tests` pins the
-/// classifier side; this test pins the harness emitter side.
-#[test]
-fn validate_execution_emits_verbatim_research_loop_abort_message() {
-    let exec = TaskExecutionResult {
-        reached_implementing: false,
-        no_changes_needed: false,
-        file_ops: Vec::new(),
-        messages: Vec::new(),
-        ..TaskExecutionResult::default()
-    };
-
-    let err = validate_execution(exec).expect_err("expected AgentExecution");
-    let AutomatonError::AgentExecution(msg) = err else {
-        panic!("expected AgentExecution variant, got: {err:?}");
-    };
-    // Verbatim string the aura-os classifier matches against. The em
-    // dash is U+2014; preserve it byte-for-byte. Pairs with
-    // `aura-os-harness::signals::tests::
-    //   verbatim_validate_execution_message_classifies_as_research_loop_abort`
-    // which feeds this exact string back through `classify_failure`.
-    assert_eq!(
-        msg, "task completed without any file operations — completion not verified",
-        "validate_execution must emit the EXACT string aura-os keys off; \
-         changing this without updating aura-os will silently break the \
-         research-loop-abort retry policy",
-    );
 }
 
 // ---------------------------------------------------------------------------

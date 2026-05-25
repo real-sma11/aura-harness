@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::builtins::dev_loop::DecompositionHint;
-
 /// Errors from automaton lifecycle operations (install, tick, stop) and runtime management.
 #[derive(Debug, Error)]
 pub enum AutomatonError {
@@ -25,21 +23,6 @@ pub enum AutomatonError {
 
     #[error("automaton event delivery failed: {0}")]
     EventDelivery(String),
-
-    /// Task reached the implementing phase but produced no file operations
-    /// — likely truncated by `max_tokens` or interrupted. Carries a
-    /// structured `DecompositionHint` so the orchestrator can auto-split
-    /// the task into a skeleton + fill pair instead of a blind retry.
-    ///
-    /// The Phase 3 orchestrator in aura-os consumes this variant; callers
-    /// that only care about the string surface (e.g. `TaskFailed` event
-    /// emission) can continue to use `to_string()`.
-    #[error(
-        "task reached implementation phase but no file operations completed — needs decomposition (failed_paths={}, last_pending={:?})",
-        .hint.failed_paths.len(),
-        .hint.last_pending_tool_name,
-    )]
-    NeedsDecomposition { hint: DecompositionHint },
 
     #[error("credits exhausted")]
     CreditsExhausted,

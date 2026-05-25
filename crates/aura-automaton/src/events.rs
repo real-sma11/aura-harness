@@ -1,21 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Subtask metadata payload embedded in [`AutomatonEvent::TaskDecomposed`].
-///
-/// Carries just enough to render the parent / child relationship and
-/// to let consumers correlate later `TaskStarted` / `TaskCompleted`
-/// frames for each subtask back to the decomposition that spawned
-/// them. Full descriptors live in the dev-loop's local subtask
-/// cache; the wire shape stays minimal so the event payload doesn't
-/// inflate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskDecomposedSubtask {
-    pub id: String,
-    pub title: String,
-    pub dependencies: Vec<String>,
-}
-
 /// Events emitted by an automaton during its lifecycle (start, stop, tool use, progress, etc.).
 ///
 /// # `debug.*` frames
@@ -146,28 +131,6 @@ pub enum AutomatonEvent {
         task_id: String,
         attempt: u32,
         reason: String,
-    },
-    /// Emitted when a stuck dev-loop task (one that hit
-    /// `ResearchLoopAbort` / `NeedsDecomposition` on its first retry)
-    /// is split into 2-5 self-contained subtasks via the Phase 5
-    /// auto-decomposition path. The original `task_failed` event is
-    /// suppressed when this fires; on the all-subtasks-succeed path
-    /// the parent surfaces as `TaskCompleted`, on any-subtask-
-    /// terminal-failure it surfaces as `TaskFailed`. The `subtasks`
-    /// payload carries the canonical subtask ids
-    /// (`{parent_id}::sub::N`) so consumers can render the parent /
-    /// child relationship without having to follow up with a tree
-    /// fetch. `reasoning` is the splitter model's one-paragraph
-    /// rationale for the split (best-effort, may be empty).
-    ///
-    /// Pairs with aura-os Phase 6's
-    /// `RetryAction::RetryWithDecomposition` retry classification —
-    /// the server consumes this event to attribute parent / child
-    /// completion math.
-    TaskDecomposed {
-        parent_id: String,
-        subtasks: Vec<TaskDecomposedSubtask>,
-        reasoning: String,
     },
     /// Mid-stream `tool_use` request was interrupted and the agent is
     /// retrying with exponential backoff. 1:1 projection of
