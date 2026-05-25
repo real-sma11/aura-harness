@@ -81,7 +81,8 @@ fn agentic_prompt_leads_with_action_oriented_move_set() {
     let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
-        prompt.contains("Edit code with apply_patch. Finish with task_done."),
+        prompt
+            .contains("Edit code with write_file / edit_file / delete_file. Finish with task_done."),
         "action-oriented lead line missing: {prompt}"
     );
     assert!(
@@ -93,8 +94,8 @@ fn agentic_prompt_leads_with_action_oriented_move_set() {
         "old step-1 Explore prose should be gone: {prompt}"
     );
     assert!(
-        !prompt.contains("submit_plan"),
-        "prompt no longer advertises submit_plan: {prompt}"
+        prompt.contains("submit_plan"),
+        "dev-loop prompt must advertise submit_plan as an optional commitment device: {prompt}"
     );
 }
 

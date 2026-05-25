@@ -301,8 +301,16 @@ pub fn apply_patch_definition() -> ToolDefinition {
 }
 
 pub fn engine_specific_tools() -> Vec<ToolDefinition> {
+    // NOTE (Layer 0): apply_patch was removed from this bundle as part
+    // of the doom-loop fix; the conventional write_file/edit_file/
+    // delete_file write primitives reach the dev-loop agent via the
+    // `ToolProfile::Engine` inheritance from `ToolProfile::Core`
+    // (see `crates/aura-tools/src/catalog.rs`), so they must NOT be
+    // re-added here — doing so trips the no-duplicate-per-profile
+    // invariant in `catalog::tests::no_duplicate_names_in_any_profile`.
+    // `apply_patch_definition()` stays compilable as a `pub fn` for
+    // opt-in callers (chat agent, benchmarks).
     vec![
-        apply_patch_definition(),
         tool(
             "task_done",
             "Signal that the current task is complete. Call this when you have finished all changes and verified they compile. Provide notes summarizing what you did, optionally follow-up task suggestions, and a reasoning array with key decisions.",
@@ -343,9 +351,10 @@ pub fn engine_specific_tools() -> Vec<ToolDefinition> {
         tool(
             "submit_plan",
             "Optional: record your implementation plan for the transcript. \
-             Calling this resets exploration counters and gives you bonus read \
-             budget for the implement phase. Not required before \
-             write_file/edit_file.",
+             The plan is surfaced to the operator. Calling submit_plan resets \
+             the agent loop's exploration tracking, so it's most useful after \
+             you finish exploring and before you start editing. It is never \
+             required — you can edit files at any time.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

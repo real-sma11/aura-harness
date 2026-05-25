@@ -15,27 +15,20 @@
 #[must_use]
 pub(crate) fn render(build_cmd: &str, test_cmd: &str) -> String {
     let body = format!(
-        r#"Edit code with apply_patch. Finish with task_done.
+        r#"Edit code with write_file / edit_file / delete_file. Finish with task_done.
 
-apply_patch envelope (atomic - any directive failure rejects the whole patch):
+- write_file: create or overwrite a file. Rejects content > 32000 bytes per call; for larger files seed with write_file and append with edit_file.
+- edit_file: replace an exact substring in an existing file. Read the file first to get the exact bytes.
+- delete_file: remove a file.
 
-*** Begin Patch
-*** Add File: path/to/new.rs
-+content line
-*** Update File: path/to/existing.rs
-@@ optional context header
- unchanged context
--removed line
-+added line
-*** Delete File: path/to/old.rs
-*** End Patch
-
-Paths workspace-relative, forward-slash, no `./` or `..`. Update hunks need exact context - read_file first to derive it.
+Paths workspace-relative, forward-slash, no `./` or `..`.
 
 Invariants:
 - Read a file before editing it.
 - task_done only when `{build_cmd}` and `{test_cmd}` are both green; the harness re-runs `{test_cmd}` as a hard gate. If no changes are needed, call task_done with `no_changes_needed: true`.
-- Never run: git push --force, git reset --hard, git clean -fd, git config. Do not touch .gitignore to hide build output."#,
+- Never run: git push --force, git reset --hard, git clean -fd, git config. Do not touch .gitignore to hide build output.
+
+Optional: call submit_plan after you have finished exploring and before you start editing — it records your plan for the operator and resets your exploration counters. Never required."#,
     );
     format!("<dev_loop_workflow>\n{body}\n</dev_loop_workflow>")
 }

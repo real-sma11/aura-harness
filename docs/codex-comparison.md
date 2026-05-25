@@ -1089,7 +1089,7 @@ Recommendations grouped by priority. Each carries: rationale, scope (S/M/L), fil
 
 #### R-TOOL-1: `apply_patch` tool with V4A-format parser
 
-- **Rationale**: 15-30% token savings on file-mutating turns; format is well-specified and easy to parse.
+- **Rationale**: **SUPERSEDED — see Layer 0 doom-loop fix.** 15-30% token savings on file-mutating turns; format is well-specified and easy to parse.
 - **Scope**: S (1-2 weeks).
 - **Files to touch**:
   - New crate `crates/aura-apply-patch/` (parser + format).
@@ -1097,6 +1097,8 @@ Recommendations grouped by priority. Each carries: rationale, scope (S/M/L), fil
   - `crates/aura-tools/src/sandbox.rs` integrate path canonicalization.
   - `crates/aura-tools/src/definitions.rs` add tool spec.
 - **Success metric**: median input-token spend per file-edit turn drops 15% on the existing benchmark suite ([`docs/context-benchmark-suite.md`](./context-benchmark-suite.md)).
+
+Post-2026-05 evidence (Task 5.7 doom loop) showed apply_patch's atomically-all-or-nothing envelope and mandatory context-line derivation created a tool-shape gradient biasing the agent toward exploratory reads. The token-efficiency win on the success path was the wrong objective to optimize for; failure-mode shape on the uncertainty path dominates. apply_patch impl stays compilable for opt-in callers but is no longer in the dev-loop bundle.
 
 #### R-ARCH-1: UDS + JSON-RPC v2 transport
 
