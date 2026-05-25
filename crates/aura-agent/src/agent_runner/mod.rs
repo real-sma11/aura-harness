@@ -269,12 +269,8 @@ impl AgentRunner {
         } else {
             Some(params.workspace_map)
         };
-        let system_prompt = agentic_execution_system_prompt(
-            params.project,
-            params.agent,
-            workspace_info,
-            exploration_allowance,
-        );
+        let system_prompt =
+            agentic_execution_system_prompt(params.project, params.agent, workspace_info);
 
         // Reuse the caller-supplied full task context bundle when
         // present (the `execute_task_tracked` path pre-builds it so

@@ -2,8 +2,6 @@ use super::{AgentInfo, ProjectInfo};
 
 pub mod sections;
 
-pub use sections::tool_discipline::TOOL_CALL_DISCIPLINE_SECTION;
-
 pub const CHAT_SYSTEM_PROMPT_BASE: &str = r#"You are Aura, an AI software engineering assistant embedded in a project management and code execution platform.
 
 You have access to tools that let you directly manage the user's project:
@@ -127,7 +125,6 @@ pub fn agentic_execution_system_prompt(
     project: &ProjectInfo<'_>,
     agent: Option<&AgentInfo<'_>>,
     workspace_info: Option<&str>,
-    exploration_allowance: usize,
 ) -> String {
     let build_cmd = project.build_command.unwrap_or("(not configured)");
     // Prefer the operator's env override so the prompt shows the agent the
@@ -147,12 +144,6 @@ pub fn agentic_execution_system_prompt(
     let preamble = build_agent_preamble(agent);
     let platform_info = platform_info_string();
 
-    // Phase 3 of harness-v2 restored the EXPLORATION BUDGET prose and
-    // the explicit 5-step Workflow. The 2026-05 strip removed both
-    // while keeping the runtime budget gate armed, leaving the model
-    // with no in-context steering signal — which is the upstream
-    // cause of the "read 40 files, never write" trap. The runtime
-    // gate is the hard guarantee; this prose is the soft steering.
     let mut prompt = format!(
         r#"{preamble}You are an expert software engineer executing a single implementation task.
 You have tools to read, edit, and run commands in the workspace.
@@ -160,7 +151,7 @@ You have tools to read, edit, and run commands in the workspace.
 {platform_info}
 
 Workflow:
-1. Explore (read_file / search_code / list_files). Cap reads — see EXPLORATION BUDGET below.
+1. Explore (read_file / search_code / list_files).
 2. (Optional) call submit_plan to record your approach. Not required.
 3. Make the changes with apply_patch (see WRITES — APPLY_PATCH below). One call can add, update, and delete multiple files atomically.
 4. Run the build / tests as needed (`{build_cmd}` / `{test_cmd}`).
@@ -188,12 +179,6 @@ Rules:
 - One apply_patch call can mix Add, Update, and Delete directives across multiple files. The call is atomic: every directive is validated against the on-disk state first; if any directive fails (parse error, context mismatch, missing target, target already exists for Add), NONE of the changes are applied. Re-emit a corrected patch on the next turn.
 - The error returned will name the offending file/hunk so you can fix the context lines. Read the target file with `read_file` to re-derive context from real bytes before retrying.
 
-EXPLORATION BUDGET:
-- You have ~{exploration_allowance} read-only tool calls (read_file, list_files, find_files, stat_file, search_code) before the next one is hard-blocked by the harness.
-- After the budget is exhausted, the only legal moves are apply_patch / task_done. Continued exploration calls will return error results.
-- Each file can be read at most 3 times (full) or 5 times (ranged). Repeat reads against the same file return cached results.
-- If you have read enough and the task does not require any change, call task_done with `no_changes_needed: true` and a one-sentence explanation in `notes`. This is a first-class outcome, not a fallback.
-
 Build command: {build_cmd}
 Test command: {test_cmd}
 
@@ -215,10 +200,7 @@ GIT SAFETY:
 CODE QUALITY:
 - No narrating comments ("// Import the module", "// Return the result"). Comments explain non-obvious intent only.
 - Don't leave reasoning scratchpad in source.
-
-{tool_discipline}
 "#,
-        tool_discipline = TOOL_CALL_DISCIPLINE_SECTION,
     );
 
     append_agents_md(&mut prompt, project.folder_path);

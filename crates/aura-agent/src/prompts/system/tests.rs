@@ -20,7 +20,7 @@ fn fix_system_prompt_contains_json_instructions() {
 #[test]
 fn agentic_prompt_includes_build_command() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
     assert!(prompt.contains("cargo build"));
     assert!(prompt.contains("cargo test"));
 }
@@ -36,7 +36,7 @@ fn agentic_prompt_includes_agent_preamble() {
         system_prompt: "",
         skills: &skills,
     };
-    let prompt = agentic_execution_system_prompt(&project, Some(&agent), None, 20);
+    let prompt = agentic_execution_system_prompt(&project, Some(&agent), None);
     assert!(prompt.contains("TestAgent"));
     assert!(prompt.contains("backend engineer"));
     assert!(prompt.contains("Precise and methodical."));
@@ -46,8 +46,7 @@ fn agentic_prompt_includes_agent_preamble() {
 #[test]
 fn agentic_prompt_includes_workspace_context() {
     let project = test_project("/nonexistent");
-    let prompt =
-        agentic_execution_system_prompt(&project, None, Some("Contains 5 crate members"), 20);
+    let prompt = agentic_execution_system_prompt(&project, None, Some("Contains 5 crate members"));
     assert!(prompt.contains("Workspace Context"));
     assert!(prompt.contains("5 crate members"));
 }
@@ -60,7 +59,7 @@ fn agentic_prompt_includes_definition_of_done_hard_gate() {
     // is broken or the test suite is failing — so the assertions
     // pin the shorter rendering instead of the old section header.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
     assert!(
         prompt.contains("hard gate"),
         "task_done hard-gate language missing: {prompt}"
@@ -81,7 +80,7 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
     // agents to skip pre-existing failures, which contradicts the
     // hard gate.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
     assert!(
         !prompt.contains("IGNORE them"),
         "system prompt still tells agent to IGNORE pre-existing failures"
@@ -92,60 +91,49 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
     );
 }
 
-/// Phase 3 of harness-v2 restored the EXPLORATION BUDGET section in the
-/// agentic system prompt. The 2026-05 strip removed the prose while
-/// keeping the runtime gate armed, leaving the model with no
-/// in-context steering signal. These assertions pin the restored
-/// wording so a future strip cannot quietly remove it again without
-/// flipping the test.
+/// The 2026-05 cook-loop strip deleted the EXPLORATION BUDGET prose
+/// and the `{exploration_allowance}` substitution because the
+/// runtime cap that backed it is also gone. Pin the absence so a
+/// future revival has to delete this test on purpose.
 #[test]
-fn agentic_prompt_surfaces_exploration_budget_section() {
+fn agentic_prompt_no_longer_advertises_exploration_budget() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 17);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(
-        prompt.contains("EXPLORATION BUDGET:"),
-        "EXPLORATION BUDGET section header missing: {prompt}"
+        !prompt.contains("EXPLORATION BUDGET"),
+        "EXPLORATION BUDGET section was supposed to be removed: {prompt}"
     );
     assert!(
-        prompt.contains("~17 read-only tool calls"),
-        "exploration_allowance value not substituted into the budget prose: {prompt}"
+        !prompt.contains("read-only tool calls"),
+        "per-call exploration cap prose was supposed to be removed: {prompt}"
     );
     assert!(
-        prompt.contains("read_file, list_files, find_files, stat_file, search_code"),
-        "read-only tool list missing from budget prose: {prompt}"
+        !prompt.contains("Each file can be read at most"),
+        "per-file read-cap prose was supposed to be removed: {prompt}"
     );
     assert!(
-        prompt.contains("the only legal moves are apply_patch / task_done"),
-        "post-budget legal-move enumeration missing: {prompt}"
-    );
-    assert!(
-        prompt.contains("Each file can be read at most 3 times (full) or 5 times (ranged)"),
-        "per-file read-cap prose missing: {prompt}"
-    );
-    assert!(
-        prompt.contains("call task_done with `no_changes_needed: true`"),
-        "no_changes_needed escape-hatch prose missing from budget section: {prompt}"
-    );
-    assert!(
-        prompt.contains("This is a first-class outcome, not a fallback"),
-        "first-class-outcome framing missing from budget section: {prompt}"
+        !prompt.contains("the only legal moves are apply_patch / task_done"),
+        "post-budget legal-move prose was supposed to be removed: {prompt}"
     );
 }
 
-/// The Workflow block was rewritten as an explicit 5-step list
-/// (Explore -> optional plan -> write -> verify -> task_done). Pin
-/// each step so the ordering and the optional-plan framing don't
-/// silently regress.
+/// The Workflow block survives but no longer references the deleted
+/// EXPLORATION BUDGET section. Pin each step so the ordering and the
+/// optional-plan framing don't silently regress.
 #[test]
 fn agentic_prompt_pins_explicit_five_step_workflow() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(prompt.contains("Workflow:"), "Workflow header missing");
     assert!(
         prompt.contains("1. Explore (read_file / search_code / list_files)"),
         "step 1 (Explore) missing or rephrased: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Cap reads"),
+        "step 1 must no longer reference the removed read cap: {prompt}"
     );
     assert!(
         prompt.contains("2. (Optional) call submit_plan to record your approach. Not required."),
@@ -160,9 +148,8 @@ fn agentic_prompt_pins_explicit_five_step_workflow() {
         "step 4 (build/tests) missing or rephrased: {prompt}"
     );
     assert!(
-        prompt.contains(
-            "5. Call task_done when the changes compile and the test suite is green."
-        ),
+        prompt
+            .contains("5. Call task_done when the changes compile and the test suite is green."),
         "step 5 (task_done) missing or rephrased: {prompt}"
     );
     assert!(
@@ -173,25 +160,54 @@ fn agentic_prompt_pins_explicit_five_step_workflow() {
     );
 }
 
-/// `no_changes_needed` was previously buried in the Rules block. Phase
-/// 3 promotes it to a first-class outcome by mentioning it both in the
-/// Workflow / EXPLORATION BUDGET sections AND adding a dedicated Rules
-/// bullet. Pin the Rules bullet so the promotion doesn't get reverted
-/// in isolation.
+/// `no_changes_needed` is still surfaced as a first-class outcome via
+/// the Rules-bullet wording even though the EXPLORATION BUDGET block
+/// that also mentioned it is gone. Pin the Rules bullet so the
+/// promotion doesn't get reverted in isolation.
 #[test]
 fn agentic_prompt_promotes_no_changes_needed_in_rules() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(
-        prompt.contains(
-            "If exploration reveals the task is already done"
-        ),
+        prompt.contains("If exploration reveals the task is already done"),
         "no_changes_needed Rules-bullet prose missing: {prompt}"
     );
     assert!(
         prompt.contains("file-op enforcement is bypassed"),
         "Rules bullet must clarify file-op enforcement is bypassed: {prompt}"
+    );
+}
+
+/// The tool-call discipline block was removed in the 2026-05 strip
+/// because the runtime hooks that backed it (chunk guard, narration
+/// budget, force-tool-next-turn hint) are also gone or being phased
+/// out. Pin the absence so future authors don't accidentally re-add
+/// stale wording.
+#[test]
+fn agentic_prompt_no_longer_includes_tool_call_discipline_section() {
+    let project = test_project("/nonexistent");
+    let prompt = agentic_execution_system_prompt(&project, None, None);
+
+    assert!(
+        !prompt.contains("Tool-call discipline:"),
+        "tool-call discipline section was supposed to be removed: {prompt}"
+    );
+    assert!(
+        !prompt.contains("32000 bytes per call"),
+        "write_file chunk-guard prose was supposed to be removed: {prompt}"
+    );
+    assert!(
+        !prompt.contains("append_after_eof"),
+        "append_after_eof prose was supposed to be removed: {prompt}"
+    );
+    assert!(
+        !prompt.contains("alternation term"),
+        "search_code alternation rule was supposed to be removed: {prompt}"
+    );
+    assert!(
+        !prompt.contains("`cargo check`"),
+        "run_command-for-cargo-check prose was supposed to be removed: {prompt}"
     );
 }
 
@@ -211,7 +227,7 @@ fn agentic_prompt_uses_test_command_env_override_when_set() {
     std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "pytest -q -k smoke");
 
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
     assert!(
         prompt.contains("pytest -q -k smoke"),
         "env override must surface in the prompt"
@@ -254,51 +270,6 @@ fn chat_system_prompt_includes_project_details() {
     assert!(prompt.contains("A web application"));
     assert!(prompt.contains("npm run build"));
     assert!(prompt.contains("(not set)"));
-}
-
-#[test]
-fn agentic_prompt_includes_tool_call_discipline_section() {
-    let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
-
-    assert!(
-        prompt.contains("Tool-call discipline:"),
-        "discipline section header missing from assembled prompt"
-    );
-    assert!(
-        prompt.contains("write_file must stay at or under 32000 bytes"),
-        "write_file chunk rule missing"
-    );
-    assert!(
-        prompt.contains(
-            "After any read_file or search_code call, your next turn must either call \
-             another tool or submit a tool_result-producing action"
-        ),
-        "post-read tool-call rule missing"
-    );
-    assert!(
-        prompt
-            .contains("Never issue two search_code calls whose patterns share an alternation term"),
-        "overlapping-alternation rule missing"
-    );
-    assert!(
-        prompt.contains("If your last two turns produced no tool calls, the next turn MUST be a single tool call"),
-        "two-turns-no-tool rule missing"
-    );
-    assert!(
-        prompt.contains("fields removed and replaced with `_redacted` metadata"),
-        "write/edit redaction metadata rule missing"
-    );
-}
-
-#[test]
-fn tool_call_discipline_constant_matches_golden_wording() {
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.starts_with("Tool-call discipline:\n"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("32000 bytes per call"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("append_after_eof"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("alternation term"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("MUST be a single tool call"));
-    assert!(TOOL_CALL_DISCIPLINE_SECTION.contains("_redacted"));
 }
 
 #[test]
@@ -473,7 +444,7 @@ fn agentic_prompt_includes_agents_md_when_present() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(prompt.contains(AGENTS_MD_SECTION_HEADER));
     assert!(prompt.contains("Use raw string literals for multi-line Rust strings."));
@@ -490,7 +461,7 @@ fn agentic_prompt_omits_agents_md_when_absent() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
@@ -501,7 +472,7 @@ fn agentic_prompt_omits_agents_md_when_absent() {
 #[test]
 fn agentic_prompt_skips_agents_md_when_folder_missing() {
     let project = test_project("/definitely/does/not/exist/aura/agentic/test");
-    let prompt = agentic_execution_system_prompt(&project, None, None, 20);
+    let prompt = agentic_execution_system_prompt(&project, None, None);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
