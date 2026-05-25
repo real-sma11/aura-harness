@@ -254,10 +254,6 @@ impl AgentLoop {
             }
         }
 
-        if any_write_success {
-            state.blocking_ctx.exploration_allowance += 2;
-        }
-
         let mut all_results = oversized_writes;
         all_results.extend(blocked_results);
         all_results.extend(executed);
@@ -677,27 +673,23 @@ mod track_tool_effects_tests {
         }
     }
 
-    /// Regression test for the silently-dead exploration hard block.
-    ///
-    /// `track_tool_effects` historically only bumped `exploration_state.count`
-    /// (the warning counter) and never `blocking_ctx.exploration_count`
-    /// (the counter `detect_blocked_exploration` in `blocking/detection`
-    /// actually reads). This test pins both increments and the detector
-    /// boundary so the hard block can't go silent again.
+    /// Pin that `track_tool_effects` keeps both the blocking-context
+    /// exploration counter and the parallel telemetry counter in sync
+    /// on every successful exploration call. The hard exploration
+    /// block that used to read these counters was removed along with
+    /// `exploration_allowance` threading; the counters survive for
+    /// telemetry / future re-introduction of a real cap.
     #[test]
     fn exploration_count_is_incremented_by_track_tool_effects() {
-        let allowance = 12_usize;
+        const CALLS: usize = 12;
 
-        let mut blocking_ctx = BlockingContext::new(allowance);
+        let mut blocking_ctx = BlockingContext::default();
         let mut read_guard = ReadGuardState::default();
         let mut exploration_state = ExplorationState::default();
         let mut result = AgentLoopResult::default();
         let mut had_any_write = false;
 
-        // Drive `allowance` successful exploration calls, each on a
-        // distinct path so per-file read-guard limits don't trip and
-        // change which arm of `track_tool_effects` we exercise.
-        for i in 0..allowance {
+        for i in 0..CALLS {
             let tool_id = format!("toolu_explore_{i}");
             let path = format!("src/file_{i}.rs");
             let to_execute = vec![mk_read_tool(&tool_id, &path)];
@@ -713,48 +705,8 @@ mod track_tool_effects_tests {
             );
         }
 
-        assert_eq!(
-            blocking_ctx.exploration_count, allowance,
-            "track_tool_effects must increment BlockingContext::exploration_count \
-             on every successful exploration call (this was the dead-block bug)"
-        );
-        assert_eq!(
-            exploration_state.count, allowance,
-            "the parallel warning counter must stay in sync"
-        );
+        assert_eq!(blocking_ctx.exploration_count, CALLS);
+        assert_eq!(exploration_state.count, CALLS);
         assert!(!had_any_write, "no writes were issued in this test");
-
-        // The exploration hard block is phase-gated as of the
-        // submit_plan-deadlock fix: it only fires after
-        // `mark_plan_submitted` flips the latch. We simulate the
-        // post-plan world here (the agent loop's signal observer in
-        // `LoopState::begin_iteration` does the same flip in
-        // production) so the rest of the test exercises the
-        // documented post-plan behavior.
-        blocking_ctx.mark_plan_submitted();
-
-        // `detect_blocked_exploration` is reached through the public
-        // `detect_all_blocked` entry point; it uses `count >= allowance`,
-        // so the very next exploration call (the (N+1)th) must block.
-        // The probe path is fresh, so per-file read-guard limits cannot
-        // trip and steal the block verdict from the exploration detector.
-        let next_call = mk_read_tool("toolu_explore_next", "src/file_probe.rs");
-        let check = crate::blocking::detection::detect_all_blocked(
-            &next_call,
-            &blocking_ctx,
-            &read_guard,
-        );
-        assert!(
-            check.blocked,
-            "with exploration_count == allowance, the next exploration call must block"
-        );
-        assert!(
-            check
-                .recovery_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Exploration budget exceeded"),
-            "block message should be the documented 'Exploration budget exceeded' verdict"
-        );
     }
 }

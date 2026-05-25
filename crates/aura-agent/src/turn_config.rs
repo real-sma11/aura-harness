@@ -1,6 +1,6 @@
 //! Turn-level configuration: heuristics that determine how the agent loop
-//! runs for a given task (complexity classification, token budgets, exploration
-//! allowances, model selection).
+//! runs for a given task (complexity classification, token budgets, model
+//! selection).
 //!
 //! NOTE: Previously named `policy`; renamed to `turn_config` to avoid semantic
 //! collision with `aura_kernel::policy::Policy` (which is the authorization
@@ -83,40 +83,6 @@ pub fn compute_thinking_budget(base: u32, member_count: usize) -> u32 {
         base.max(16_000)
     } else if member_count >= 8 {
         base.max(10_000)
-    } else {
-        base
-    }
-}
-
-pub fn compute_exploration_allowance(
-    task_title: &str,
-    task_description: &str,
-    member_count: usize,
-) -> usize {
-    let complexity = classify_task_complexity(task_title, task_description);
-    let combined = format!("{task_title} {task_description}").to_lowercase();
-
-    let is_refactoring = combined.contains("refactor")
-        || combined.contains("rename across")
-        || combined.contains("migrate")
-        || combined.contains("multi-file");
-
-    let base: usize = match complexity {
-        TaskComplexity::Simple => 24,
-        TaskComplexity::Standard => 40,
-        TaskComplexity::Complex => {
-            if is_refactoring {
-                80
-            } else {
-                60
-            }
-        }
-    };
-
-    if member_count >= 15 {
-        base + 16
-    } else if member_count >= 8 {
-        base + 8
     } else {
         base
     }
@@ -206,31 +172,6 @@ mod tests {
     #[test]
     fn compute_thinking_budget_scales_for_large_workspace() {
         assert_eq!(compute_thinking_budget(8000, 20), 16_000);
-    }
-
-    #[test]
-    fn compute_exploration_allowance_simple_small_workspace() {
-        // Simple + small workspace (member_count < 8): base 24, no bonus
-        assert_eq!(
-            compute_exploration_allowance("Add dependency for serde", "", 3),
-            24
-        );
-    }
-
-    #[test]
-    fn compute_exploration_allowance_complex_refactoring_large_workspace() {
-        // Complex + refactoring + large workspace (member_count >= 15): base 80 + 16
-        assert_eq!(
-            compute_exploration_allowance("Refactor the auth module", "", 20),
-            96
-        );
-    }
-
-    #[test]
-    fn compute_exploration_allowance_standard_medium_workspace() {
-        // Standard + medium workspace (member_count >= 8): base 40 + 8
-        let desc = "a".repeat(500);
-        assert_eq!(compute_exploration_allowance("Add handler", &desc, 10), 48);
     }
 
     #[test]

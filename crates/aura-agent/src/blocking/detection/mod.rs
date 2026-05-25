@@ -24,8 +24,6 @@ pub struct BlockingContext {
     pub(crate) write_cooldowns: HashMap<String, usize>,
     /// Current exploration count.
     pub(crate) exploration_count: usize,
-    /// Exploration allowance (may be extended on successful writes).
-    pub(crate) exploration_allowance: usize,
     /// Count of write tool calls that had no extractable path (malformed args).
     pub(crate) malformed_write_count: usize,
     /// Most-recently-read file path. Used as a fallback hint when the
@@ -51,15 +49,6 @@ pub struct BlockingContext {
 }
 
 impl BlockingContext {
-    /// Create a new blocking context with the given exploration allowance.
-    #[must_use]
-    pub fn new(exploration_allowance: usize) -> Self {
-        Self {
-            exploration_allowance,
-            ..Self::default()
-        }
-    }
-
     /// Decrement all write cooldowns, removing expired ones.
     pub(crate) fn decrement_cooldowns(&mut self) {
         self.write_cooldowns.retain(|_, v| {
@@ -68,11 +57,10 @@ impl BlockingContext {
         });
     }
 
-    /// Record a successful write to extend exploration allowance and reset read guards.
+    /// Record a successful write and reset read guards for the path.
     pub(crate) fn on_write_success(&mut self, path: &str, read_guard: &mut ReadGuardState) {
         self.written_paths.insert(path.to_string());
         self.write_failures.remove(path);
-        self.exploration_allowance = self.exploration_allowance.saturating_add(2);
         read_guard.reset_for_path(path);
     }
 
@@ -179,12 +167,6 @@ pub fn detect_all_blocked(
     }
 
     if let Some(result) = detect_blocked_commands(tool, ctx) {
-        if result.blocked {
-            return result;
-        }
-    }
-
-    if let Some(result) = detect_blocked_exploration(tool, ctx) {
         if result.blocked {
             return result;
         }
@@ -356,50 +338,7 @@ fn detect_blocked_commands(tool: &ToolCallInfo, ctx: &BlockingContext) -> Option
     }
 }
 
-/// Detector 4: Block exploration tools when allowance is exceeded.
-///
-/// Stripped (2026-05): previously phase-gated on `plan_submitted` so
-/// the hard block only fired after the agent called `submit_plan`. The
-/// rationale was that pre-plan reads were the only way to gather
-/// context for a credible plan — but round-1 of the strip removed the
-/// plan write gate, so the agent can now write at any time. With no
-/// gate to flip `plan_submitted`, the latch was permanently open and
-/// the read budget became unenforceable: the failing run we used to
-/// validate round 1 made 49 tool calls and ~4 minutes of agentic
-/// turns without ever writing a file. Drop the latch entirely so the
-/// budget is a real ceiling: at `exploration_count >= allowance`
-/// every further `read_file`/`search_code`/`list_files` returns
-/// "exploration budget exceeded — start writing now". The model's
-/// only legal next moves are `write_file` / `edit_file` /
-/// `delete_file` / `task_done`, which is the transition the gate was
-/// designed to force.
-///
-/// `BlockingContext::plan_submitted` and `mark_plan_submitted` are
-/// kept around for the moment so `handle_submit_plan` can still flip
-/// the signal (and so any external caller that reads `plan_submitted`
-/// for telemetry keeps working), but this detector no longer reads
-/// it. The soft warnings at `allowance - 8` (mild) and
-/// `allowance - 4` (strong) still fire so the model gets a heads-up
-/// before the wall.
-pub(crate) fn detect_blocked_exploration(
-    tool: &ToolCallInfo,
-    ctx: &BlockingContext,
-) -> Option<BlockCheckResult> {
-    if !EXPLORATION_TOOLS.contains(&tool.name.as_str()) {
-        return None;
-    }
-    if ctx.exploration_count >= ctx.exploration_allowance {
-        Some(BlockCheckResult::blocked(
-            "Exploration budget exceeded. You have spent too many iterations reading files \
-             and searching without making changes. Start implementing now with the information \
-             you have.",
-        ))
-    } else {
-        Some(BlockCheckResult::allowed())
-    }
-}
-
-/// Detector 5: Block reads that exceed the per-file read guard limits.
+/// Detector 4: Block reads that exceed the per-file read guard limits.
 fn detect_blocked_reads(
     tool: &ToolCallInfo,
     read_guard: &ReadGuardState,
@@ -428,7 +367,7 @@ fn detect_blocked_reads(
     Some(BlockCheckResult::allowed())
 }
 
-/// Detector 6: Block writes to paths with active cooldowns.
+/// Detector 5: Block writes to paths with active cooldowns.
 fn detect_write_cooldowns(tool: &ToolCallInfo, ctx: &BlockingContext) -> Option<BlockCheckResult> {
     if !WRITE_TOOLS.contains(&tool.name.as_str()) {
         return None;

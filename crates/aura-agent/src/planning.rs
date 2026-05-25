@@ -3,9 +3,9 @@
 //! As of harness-v2, tasks start in [`TaskPhase::Implementing`] with an empty
 //! plan so write operations (`write_file`, `edit_file`, `delete_file`) and
 //! `task_done` are accepted from the first iteration. Calling `submit_plan`
-//! is now optional planning metadata — it still records the plan, resets the
-//! rolling-outcome window, and bumps the exploration budget, but is no longer
-//! required for a task to reach the implement phase.
+//! is now optional planning metadata — it still records the plan and resets
+//! the rolling-outcome window, but is no longer required for a task to reach
+//! the implement phase.
 //
 // `Exploring` is preserved in the enum so historical traces, telemetry, and
 // the `validate_execution` `reached_implementing` check keep round-tripping;

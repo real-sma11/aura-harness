@@ -47,9 +47,8 @@ use crate::blocking::detection::BlockingContext;
 use crate::blocking::stall::StallDetector;
 use crate::budget::{BudgetState, ExplorationState};
 use crate::constants::{
-    AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, DEFAULT_EXPLORATION_ALLOWANCE, MAX_ITERATIONS,
-    THINKING_AUTO_ENABLE_THRESHOLD, THINKING_MIN_BUDGET, THINKING_TAPER_AFTER,
-    THINKING_TAPER_FACTOR,
+    AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, MAX_ITERATIONS, THINKING_AUTO_ENABLE_THRESHOLD,
+    THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
 use crate::events::{AgentLoopEvent, DebugEvent};
 use crate::read_guard::ReadGuardState;
@@ -97,8 +96,6 @@ pub struct AgentLoopConfig {
     pub max_context_tokens: Option<u64>,
     /// Credit budget (total tokens allowed).
     pub credit_budget: Option<u64>,
-    /// Exploration allowance (read-only calls before warning).
-    pub exploration_allowance: usize,
     /// Auto-build cooldown in iterations.
     pub auto_build_cooldown: usize,
     /// Thinking budget taper starts after this iteration.
@@ -238,7 +235,6 @@ impl Default for AgentLoopConfig {
             model_override: None,
             max_context_tokens: Some(200_000),
             credit_budget: None,
-            exploration_allowance: DEFAULT_EXPLORATION_ALLOWANCE,
             auto_build_cooldown: AUTO_BUILD_COOLDOWN,
             thinking_taper_after: THINKING_TAPER_AFTER,
             thinking_taper_factor: THINKING_TAPER_FACTOR,
@@ -384,7 +380,6 @@ impl AgentLoop {
         state.build_baseline = executor.capture_build_baseline().await;
         info!(
             max_iterations = self.config.max_iterations,
-            exploration_allowance = self.config.exploration_allowance,
             "Starting agent loop"
         );
 
@@ -797,7 +792,7 @@ impl LoopState {
         Self {
             result: AgentLoopResult::default(),
             tool_cache: ToolResultCache::default(),
-            blocking_ctx: BlockingContext::new(config.exploration_allowance),
+            blocking_ctx: BlockingContext::default(),
             read_guard: ReadGuardState::default(),
             exploration_state: ExplorationState::default(),
             stall_detector: StallDetector::default(),
@@ -854,33 +849,17 @@ impl LoopState {
         // intentionally preserved so duplicate-write detection still
         // works after the reset. `exploration_compaction_done` is
         // cleared so proactive compaction can fire once more during
-        // the implement phase. The allowance is bumped by
-        // `config.exploration_allowance / 2` (the implement-bonus from
-        // the plan) on top of any in-place growth so the model has
-        // headroom for verify-read cycles between edits.
+        // the implement phase.
         if let Some(ref signal) = config.phase_reset_signal {
             if signal.swap(false, Ordering::AcqRel) {
                 tracing::info!(
                     old_exploration_count = self.blocking_ctx.exploration_count,
-                    old_exploration_allowance = self.blocking_ctx.exploration_allowance,
                     "submit_plan accepted: resetting exploration/read-guard counters"
                 );
                 self.blocking_ctx.exploration_count = 0;
                 self.exploration_state.count = 0;
                 self.read_guard = ReadGuardState::default();
-                let implement_bonus = config.exploration_allowance / 2;
-                self.blocking_ctx.exploration_allowance = self
-                    .blocking_ctx
-                    .exploration_allowance
-                    .saturating_add(implement_bonus);
                 self.exploration_compaction_done = false;
-                // Arm the post-plan exploration hard block. Before this
-                // call `detect_blocked_exploration` is a no-op (see its
-                // doc comment) so the agent can spend whatever reads it
-                // needs to assemble a credible `submit_plan` payload.
-                // Once flipped, the gate polices runaway read thrash
-                // during the implementation phase, which is the
-                // original intent of the gate.
                 self.blocking_ctx.mark_plan_submitted();
             }
         }

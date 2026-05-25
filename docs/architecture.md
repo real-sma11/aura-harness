@@ -464,7 +464,7 @@ The heart of the runtime. `AgentLoop` is the **sole orchestrator** — it drives
 | Type | Purpose |
 |------|---------|
 | `AgentLoop` | Multi-step loop: model call → tool execution → repeat until `EndTurn` or budget exhaustion |
-| `AgentLoopConfig` | Tunables: `max_iterations`, `max_tokens`, `stream_timeout`, `credit_budget`, `exploration_allowance`, `system_prompt`, `model`, auth headers, `tool_hints`, thinking taper |
+| `AgentLoopConfig` | Tunables: `max_iterations`, `max_tokens`, `stream_timeout`, `credit_budget`, `system_prompt`, `model`, auth headers, `tool_hints`, thinking taper |
 | `KernelToolGateway` | Bridges agent tool execution → `ExecutorRouter`: parallel/sequential mode, per-tool timeouts, policy deny |
 | `KernelModelGateway` | Bridges agent model calls → kernel reasoning |
 | `AgentToolExecutor` (trait) | `execute(&[ToolCallInfo]) -> Vec<ToolCallResult>` + optional `auto_build_check` |

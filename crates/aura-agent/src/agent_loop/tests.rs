@@ -114,9 +114,6 @@ fn test_agent_loop_config_defaults() {
     // extraction) with `stop_reason: "cancelled"`. See
     // `constants::MAX_ITERATIONS`.
     assert_eq!(config.max_iterations, usize::MAX);
-    // Neutralized to `usize::MAX` by the cook-loop-fix strip
-    // (2026-05). See `constants::DEFAULT_EXPLORATION_ALLOWANCE`.
-    assert_eq!(config.exploration_allowance, usize::MAX);
     assert_eq!(config.auto_build_cooldown, 2);
     assert_eq!(config.thinking_taper_after, 2);
     assert!((config.thinking_taper_factor - 0.6).abs() < f64::EPSILON);
@@ -552,13 +549,12 @@ async fn test_agent_loop_handles_summary_compaction() {
 // ------------------------------------------------------------------
 
 /// The plan's headline regression check: drive `blocking_ctx`
-/// exploration up to the allowance, flip the shared
-/// `Arc<AtomicBool>`, run one `begin_iteration` tick, then assert (a)
-/// the exploration counter is zero, (b) the allowance has grown by
-/// `allowance / 2`, and (c) `ReadGuardState` is empty. The bonus
-/// arithmetic is the implement-phase headroom that lets the model do
-/// verify-reads between edits without re-tripping the exploration
-/// block.
+/// exploration up, flip the shared `Arc<AtomicBool>`, run one
+/// `begin_iteration` tick, then assert (a) the exploration counter is
+/// zero, and (b) `ReadGuardState` is empty. The implement-phase
+/// allowance bonus was deleted along with `exploration_allowance`
+/// (the hard cap was already neutralized to `usize::MAX`), so the
+/// reset is now purely a counter clear.
 #[test]
 fn phase_reset_clears_exploration_budget() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -566,56 +562,33 @@ fn phase_reset_clears_exploration_budget() {
 
     let signal = Arc::new(AtomicBool::new(false));
     let config = AgentLoopConfig {
-        exploration_allowance: 40,
         phase_reset_signal: Some(Arc::clone(&signal)),
         ..AgentLoopConfig::default()
     };
     let mut state = super::LoopState::new(&config, vec![]);
 
-    // Drive exploration to the allowance so the read-guard would
-    // otherwise stay tripped for the rest of the turn.
-    state.blocking_ctx.exploration_count = config.exploration_allowance;
-    state.exploration_state.count = config.exploration_allowance;
+    state.blocking_ctx.exploration_count = 40;
+    state.exploration_state.count = 40;
     state.read_guard.record_full_read("foo.rs");
     state.read_guard.record_full_read("foo.rs");
     state.read_guard.record_range_read("bar.rs");
     state.exploration_compaction_done = true;
 
-    // Duplicate-write detection must survive the reset, so seed
-    // `written_paths` and assert it stays populated below.
     state
         .blocking_ctx
         .written_paths
         .insert("written.rs".into());
 
-    // Flip the shared signal (in production this is done by
-    // `TaskToolExecutor::handle_submit_plan`).
     signal.store(true, Ordering::Release);
 
-    // One iteration tick observes and clears the signal.
     state.begin_iteration(&config, 5);
 
-    // (a) exploration counter zeroed (both the blocking_ctx hard
-    // block and the exploration_state warning counter).
     assert_eq!(state.blocking_ctx.exploration_count, 0);
     assert_eq!(state.exploration_state.count, 0);
 
-    // (b) allowance grew by allowance / 2 (the implement bonus from
-    // the plan): config.exploration_allowance = 40, bump = 20, so
-    // the new value is 60.
-    assert_eq!(
-        state.blocking_ctx.exploration_allowance,
-        config.exploration_allowance + config.exploration_allowance / 2,
-    );
-
-    // (c) ReadGuardState empty.
     assert_eq!(state.read_guard.full_read_count("foo.rs"), 0);
     assert_eq!(state.read_guard.range_read_count("bar.rs"), 0);
 
-    // Side effects we explicitly want: compaction-done flag cleared
-    // so proactive compaction can fire once more during implementing,
-    // signal itself consumed so the next tick is a no-op, and
-    // written_paths preserved for duplicate-write detection.
     assert!(!state.exploration_compaction_done);
     assert!(
         !signal.load(Ordering::Acquire),
@@ -636,7 +609,6 @@ fn begin_iteration_does_not_reset_when_signal_unset() {
 
     let signal = Arc::new(AtomicBool::new(false));
     let config = AgentLoopConfig {
-        exploration_allowance: 40,
         phase_reset_signal: Some(Arc::clone(&signal)),
         ..AgentLoopConfig::default()
     };
@@ -648,7 +620,6 @@ fn begin_iteration_does_not_reset_when_signal_unset() {
 
     assert_eq!(state.blocking_ctx.exploration_count, 10);
     assert_eq!(state.exploration_state.count, 10);
-    assert_eq!(state.blocking_ctx.exploration_allowance, 40);
 }
 
 /// Companion: without a wired signal (the chat path), begin_iteration
@@ -656,7 +627,6 @@ fn begin_iteration_does_not_reset_when_signal_unset() {
 #[test]
 fn begin_iteration_no_op_when_no_signal_configured() {
     let config = AgentLoopConfig {
-        exploration_allowance: 40,
         phase_reset_signal: None,
         ..AgentLoopConfig::default()
     };
@@ -691,65 +661,13 @@ fn build_request_always_emits_tool_choice_auto() {
     );
 }
 
-/// End-to-end on the blocker: when `exploration_count` is past
-/// `exploration_allowance` *and the plan latch is set*,
-/// `detect_all_blocked` blocks reads. After the signal flips a second
-/// time (e.g. the agent re-submits an updated plan via the normal
-/// reset path) and one `begin_iteration` tick clears the counter, the
-/// same read tool must be allowed through.
-///
-/// The pre-plan case where `exploration_count > allowance` does NOT
-/// block is covered separately by
-/// `crate::blocking::detection::tests::test_detect_blocked_exploration_pre_plan_never_blocks`
-/// — the exploration hard block is intentionally a no-op until
-/// `BlockingContext::mark_plan_submitted` flips the latch (which the
-/// signal observer below does on the first reset), so we set up the
-/// state with the latch already armed.
-#[test]
-fn exploration_block_then_signal_unblocks() {
-    use crate::blocking::detection::detect_all_blocked;
-    use crate::types::ToolCallInfo;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    let signal = Arc::new(AtomicBool::new(false));
-    let config = AgentLoopConfig {
-        exploration_allowance: 40,
-        phase_reset_signal: Some(Arc::clone(&signal)),
-        ..AgentLoopConfig::default()
-    };
-    let mut state = super::LoopState::new(&config, vec![]);
-
-    state.blocking_ctx.exploration_count = 41;
-    // Arm the post-plan exploration hard block so the assertion below
-    // exercises the post-plan branch. The signal-observer path used
-    // below re-arms it idempotently on the second reset.
-    state.blocking_ctx.mark_plan_submitted();
-
-    let read_tool = ToolCallInfo {
-        id: "t1".into(),
-        name: "read_file".into(),
-        input: serde_json::json!({"path": "src/lib.rs"}),
-    };
-    let result = detect_all_blocked(&read_tool, &state.blocking_ctx, &state.read_guard);
-    assert!(result.blocked, "should be blocked before signal");
-
-    signal.store(true, Ordering::Release);
-    state.begin_iteration(&config, 6);
-
-    let result = detect_all_blocked(&read_tool, &state.blocking_ctx, &state.read_guard);
-    assert!(
-        !result.blocked,
-        "should be unblocked after signal reset in begin_iteration"
-    );
-}
-
 /// Regression guard for the submit_plan deadlock fix: the agent
 /// loop's signal observer must flip `BlockingContext::plan_submitted`
-/// in addition to resetting the counters, so the post-plan hard block
-/// can fire when the implement phase actually thrashes. Without this
-/// the gate would never engage and `038ccdf`'s anti-thrash intent
-/// would silently disappear in the opposite direction.
+/// in addition to resetting the counters, so downstream telemetry
+/// keeps observing the implement-phase transition. The exploration
+/// hard block that this latch used to gate has since been removed
+/// along with `exploration_allowance` threading, but the latch
+/// itself is preserved for handshake purposes.
 #[test]
 fn phase_reset_arms_plan_submitted_latch() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -757,7 +675,6 @@ fn phase_reset_arms_plan_submitted_latch() {
 
     let signal = Arc::new(AtomicBool::new(false));
     let config = AgentLoopConfig {
-        exploration_allowance: 40,
         phase_reset_signal: Some(Arc::clone(&signal)),
         ..AgentLoopConfig::default()
     };
@@ -772,8 +689,7 @@ fn phase_reset_arms_plan_submitted_latch() {
 
     assert!(
         state.blocking_ctx.plan_submitted,
-        "begin_iteration must arm the latch when it observes the reset signal so the \
-         post-plan exploration hard block can fire"
+        "begin_iteration must arm the latch when it observes the reset signal"
     );
 }
 

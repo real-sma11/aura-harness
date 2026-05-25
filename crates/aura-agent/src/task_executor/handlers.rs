@@ -586,8 +586,7 @@ impl TaskToolExecutor {
                         "Plan recorded for reference. Implementation can already \
                          proceed — writes (write_file/edit_file/delete_file) and \
                          task_done are accepted regardless of whether submit_plan \
-                         was called. This call reset the rolling-outcome window \
-                         and refreshed the exploration budget.\n\n\
+                         was called. This call reset the rolling-outcome window.\n\n\
                          YOUR PLAN (reference during implementation):\n{context_string}\n\n\
                          Continue with the most foundational changes first.",
                     ),

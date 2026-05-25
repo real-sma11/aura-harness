@@ -48,17 +48,6 @@ pub fn tool_result_cache_key(tool_name: &str, input: &serde_json::Value) -> Stri
 /// a user-initiated cancel.
 pub const MAX_ITERATIONS: usize = usize::MAX;
 
-/// Default exploration allowance (read-only tool calls before the
-/// hard block in `detect_blocked_exploration` fires).
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05): the behavioral cap was removed because every gate
-/// that key'd off it was hiding read-only loops rather than
-/// breaking them. The detector remains in the codebase but is
-/// now effectively unreachable; the only real terminators are
-/// `EndTurn`, credit budget, and cooperative cancellation.
-pub const DEFAULT_EXPLORATION_ALLOWANCE: usize = usize::MAX;
-
 /// Auto-build cooldown: minimum iterations between automatic build checks.
 pub const AUTO_BUILD_COOLDOWN: usize = 2;
 

@@ -339,64 +339,6 @@ async fn budget_warning_emits_warning_event() {
 }
 
 #[tokio::test]
-async fn exploration_limit_emits_warning_event() {
-    // exploration_allowance = 6, mild warning fires at count >= 2 (6 - 4).
-    // After 2 fs_read iterations the warning is emitted.
-    let mut builder = MockProvider::new();
-    for i in 0..3 {
-        builder = builder.with_response(MockResponse::tool_use(
-            format!("t{i}"),
-            "read_file",
-            serde_json::json!({"path": format!("file{i}.txt")}),
-        ));
-    }
-    builder = builder.with_response(MockResponse::text("Done"));
-    let provider = StreamingMockProvider::new(builder);
-
-    let executor = MockExecutor {
-        results: vec![ToolCallResult::success("placeholder", "contents")],
-    };
-
-    let config = AgentLoopConfig {
-        exploration_allowance: 6,
-        system_prompt: "test".to_string(),
-        ..AgentLoopConfig::default()
-    };
-    let agent = AgentLoop::new(config);
-
-    let (tx, rx) = mpsc::channel(1024);
-    let messages = vec![Message::user("explore")];
-    let tools = vec![ToolDefinition::new(
-        "read_file",
-        "Read a file",
-        serde_json::json!({"type": "object"}),
-    )];
-
-    let _result = agent
-        .run_with_events(&provider, &executor, messages, tools, Some(tx), None)
-        .await
-        .unwrap();
-
-    let events = collect_events(rx).await;
-
-    let warnings: Vec<&str> = events
-        .iter()
-        .filter_map(|e| {
-            if let AgentLoopEvent::Warning(msg) = e {
-                Some(msg.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    assert!(
-        warnings.iter().any(|w| w.contains("exploration budget")),
-        "Should have an exploration budget warning, got warnings: {warnings:?}"
-    );
-}
-
-#[tokio::test]
 async fn llm_error_emits_error_event() {
     let provider = MockProvider::new().with_failure();
     let executor = MockExecutor { results: vec![] };

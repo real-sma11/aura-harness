@@ -147,7 +147,6 @@ async fn test_no_exploration_compact_when_low() {
     let provider = provider_builder;
 
     let config = AgentLoopConfig {
-        exploration_allowance: 12,
         max_context_tokens: Some(200_000),
         system_prompt: "test".to_string(),
         ..AgentLoopConfig::default()

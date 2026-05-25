@@ -19,8 +19,8 @@ pub struct BudgetState {
 /// cook-loop-fix strip (2026-05) along with the
 /// `EXPLORATION_WARNING_*_OFFSET` constants. The remaining `count`
 /// field tracks total exploration tool calls for telemetry only —
-/// the hard block in `detect_blocked_exploration` is also
-/// neutralized via `DEFAULT_EXPLORATION_ALLOWANCE = usize::MAX`.
+/// the hard exploration block and its allowance threading were
+/// stripped along with `compute_exploration_allowance`.
 #[derive(Debug, Default)]
 pub struct ExplorationState {
     /// Total exploration tool calls.

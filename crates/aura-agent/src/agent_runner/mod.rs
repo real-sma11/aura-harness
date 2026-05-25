@@ -25,9 +25,7 @@ use crate::prompts::{
 };
 use crate::task_context;
 use crate::task_executor::TaskToolExecutor;
-use crate::turn_config::{
-    classify_task_complexity, compute_exploration_allowance, resolve_simple_model, TaskComplexity,
-};
+use crate::turn_config::{classify_task_complexity, resolve_simple_model, TaskComplexity};
 use crate::types::{AgentLoopResult, AgentToolExecutor};
 use crate::verify::{
     auto_correct_build_command, normalize_error_signature, run_build_command, BuildFixAttemptRecord,
@@ -257,12 +255,6 @@ impl AgentRunner {
     ) -> Result<TaskExecutionResult, crate::AgentError> {
         let complexity = classify_task_complexity(params.task.title, params.task.description);
 
-        let exploration_allowance = compute_exploration_allowance(
-            params.task.title,
-            params.task.description,
-            params.member_count,
-        );
-
         let system_prompt = agentic_execution_system_prompt(params.project);
 
         // Reuse the caller-supplied full task context bundle when
@@ -283,7 +275,6 @@ impl AgentRunner {
         let mut loop_config = configure_loop_config(
             complexity,
             &self.config,
-            exploration_allowance,
             params.member_count,
             system_prompt,
         );
@@ -537,7 +528,6 @@ impl AgentRunner {
 pub fn configure_loop_config(
     complexity: TaskComplexity,
     config: &AgentRunnerConfig,
-    exploration_allowance: usize,
     _member_count: usize,
     system_prompt: String,
 ) -> AgentLoopConfig {
@@ -582,7 +572,6 @@ pub fn configure_loop_config(
         billing_reason: "aura_task".to_string(),
         max_context_tokens: Some(config.max_context_tokens),
         credit_budget: config.max_task_credits,
-        exploration_allowance,
         auto_build_cooldown: 1,
         auth_token: config.auth_token.clone(),
         system_prompt,
