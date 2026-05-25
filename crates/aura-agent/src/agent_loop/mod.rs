@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use aura_reasoner::{
     ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, Role, StopReason,
-    ToolChoice, ToolDefinition, ToolResultContent,
+    ToolChoice, ToolDefinition,
 };
 use aura_tools::IntentClassifier;
 use chrono::Utc;
@@ -558,7 +558,8 @@ impl AgentLoop {
         &self,
         input: &aura_compaction::SummaryInput,
     ) -> Result<ModelRequest, crate::AgentError> {
-        let prompt = compact_summary_prompt(input);
+        let prompt =
+            crate::prompts::auxiliary::compaction::build_compact_summary_user_prompt(input);
         let max_tokens = (input.max_summary_chars / CHARS_PER_TOKEN)
             .clamp(256, 4_096)
             .try_into()
@@ -566,9 +567,7 @@ impl AgentLoop {
 
         ModelRequest::builder(
             &self.config.model,
-            "Summarize compacted conversation history for a coding agent. \
-             Preserve concrete decisions, files, tool outcomes, errors, and unresolved tasks. \
-             Do not invent facts.",
+            crate::prompts::auxiliary::compaction::COMPACTION_SUMMARY_SYSTEM_PROMPT,
         )
         .messages(vec![Message::user(prompt)])
         .tools(Vec::new())
@@ -1025,88 +1024,6 @@ fn summary_error_for_log(error: &iteration::LlmCallError) -> &'static str {
         iteration::LlmCallError::PromptTooLong(_) => "prompt_too_long",
         iteration::LlmCallError::RateLimited(_) => "rate_limited",
         iteration::LlmCallError::Fatal(_) => "fatal",
-    }
-}
-
-fn compact_summary_prompt(input: &aura_compaction::SummaryInput) -> String {
-    let mut prompt = format!(
-        "Summarize the compactable middle history below into no more than about {} characters.\n\
-         The live transcript was {} chars before local compaction and {} chars after local compaction.\n\
-         Target total transcript chars after summary: {}.\n\
-         Keep exact file paths, tool names, important outputs, decisions, and unresolved errors.\n\n\
-         ## Compactable Middle History\n",
-        input.max_summary_chars,
-        input.original_chars,
-        input.local_chars,
-        input.target_total_chars,
-    );
-
-    for (idx, message) in input.compactable_messages.iter().enumerate() {
-        prompt.push_str(&render_summary_message(idx, message));
-    }
-
-    prompt.push_str("\n## Recent Tail Kept Verbatim\n");
-    for (idx, message) in input.recent_tail.iter().enumerate() {
-        prompt.push_str(&render_summary_message(idx, message));
-    }
-    prompt
-}
-
-fn render_summary_message(idx: usize, message: &Message) -> String {
-    let mut rendered = format!("\n### Message {idx} ({:?})\n", message.role);
-    for block in &message.content {
-        match block {
-            ContentBlock::Text { text } => {
-                rendered.push_str("text:\n");
-                rendered.push_str(&truncate_for_summary_prompt(text));
-                rendered.push('\n');
-            }
-            ContentBlock::Thinking { thinking, .. } => {
-                rendered.push_str("thinking:\n");
-                rendered.push_str(&truncate_for_summary_prompt(thinking));
-                rendered.push('\n');
-            }
-            ContentBlock::ToolUse { id, name, input } => {
-                rendered.push_str(&format!("tool_use id={id} name={name} input="));
-                rendered.push_str(
-                    &serde_json::to_string(input)
-                        .unwrap_or_else(|_| "<unserializable>".to_string()),
-                );
-                rendered.push('\n');
-            }
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                rendered.push_str(&format!(
-                    "tool_result id={tool_use_id} is_error={is_error}:\n"
-                ));
-                match content {
-                    ToolResultContent::Text(text) => {
-                        rendered.push_str(&truncate_for_summary_prompt(text));
-                    }
-                    ToolResultContent::Json(value) => rendered.push_str(
-                        &serde_json::to_string(value)
-                            .unwrap_or_else(|_| "<unserializable>".to_string()),
-                    ),
-                }
-                rendered.push('\n');
-            }
-            ContentBlock::Image { .. } => {
-                rendered.push_str("image: [omitted]\n");
-            }
-        }
-    }
-    rendered
-}
-
-fn truncate_for_summary_prompt(text: &str) -> String {
-    const MAX_BLOCK_CHARS: usize = 4_000;
-    if text.len() <= MAX_BLOCK_CHARS {
-        text.to_string()
-    } else {
-        aura_compaction::truncate_content(text, MAX_BLOCK_CHARS, Some(2_000), Some(1_000))
     }
 }
 

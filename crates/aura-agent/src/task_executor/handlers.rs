@@ -1,9 +1,10 @@
 use super::{
-    build_stub_fix_prompt, classify_build_errors, error_category_guidance, file_ops,
-    format_tool_arg_hint, infer_default_test_command, looks_like_compiler_errors, AgentLoopEvent,
-    FileOp, FollowUpSuggestion, Path, TaskPhase, TaskPlan, TaskToolExecutor, ToolCallInfo,
-    ToolCallResult, DISABLE_TEST_GATE_ENV, MAX_STUB_FIX_ATTEMPTS, MAX_TASK_DONE_TEST_RETRIES,
+    classify_build_errors, error_category_guidance, file_ops, format_tool_arg_hint,
+    infer_default_test_command, looks_like_compiler_errors, AgentLoopEvent, FileOp,
+    FollowUpSuggestion, Path, TaskPhase, TaskPlan, TaskToolExecutor, ToolCallInfo, ToolCallResult,
+    DISABLE_TEST_GATE_ENV, MAX_STUB_FIX_ATTEMPTS, MAX_TASK_DONE_TEST_RETRIES,
 };
+use crate::prompts::{SteeringInjector, SteeringKind};
 use crate::types::{FileChange, FileChangeKind};
 use aura_tools::apply_patch::{
     execute_apply_patch, parse_patch, AppliedChangeKind, ApplyPatchError, PatchError,
@@ -121,18 +122,15 @@ impl TaskToolExecutor {
         results: &mut Vec<ToolCallResult>,
     ) {
         let Some(patch_str) = tc.input.get("patch").and_then(|v| v.as_str()) else {
-            results.push(Self::gate_rejection(
-                tc,
-                "apply_patch requires a non-empty `patch` string argument containing the \
-                 full `*** Begin Patch ... *** End Patch` envelope.",
-            ));
+            let msg = SteeringInjector::render(&SteeringKind::ApplyPatchMissingArgument);
+            results.push(Self::gate_rejection(tc, msg));
             return;
         };
 
         let patch = match parse_patch(patch_str) {
             Ok(p) => p,
             Err(e) => {
-                let msg = render_patch_error(&e);
+                let msg = SteeringInjector::render(&apply_patch_parse_kind(&e));
                 results.push(Self::gate_rejection(tc, msg));
                 return;
             }
@@ -142,7 +140,7 @@ impl TaskToolExecutor {
         let outcome = match execute_apply_patch(patch, workspace_root).await {
             Ok(r) => r,
             Err(e) => {
-                let msg = render_apply_error(&e);
+                let msg = SteeringInjector::render(&apply_patch_exec_kind(&e));
                 results.push(Self::gate_rejection(tc, msg));
                 return;
             }
@@ -357,14 +355,7 @@ impl TaskToolExecutor {
         if no_changes {
             return None;
         }
-        Some(
-            "ERROR: task_done was rejected — you have not produced any file changes \
-             (write_file / edit_file / delete_file). Implementation tasks must produce \
-             file changes. Make the edits this task requires, then call task_done. \
-             If this task genuinely requires no file changes, call task_done again with \
-             \"no_changes_needed\": true and explain why in the \"notes\" field."
-                .to_string(),
-        )
+        Some(SteeringInjector::render(&SteeringKind::TaskDoneNoWrites))
     }
 
     /// Run the full project test suite and translate the outcome into a
@@ -416,11 +407,12 @@ impl TaskToolExecutor {
                     *a += 1;
                     *a
                 };
-                let prompt = format!(
-                    "ERROR: task_done test gate failed to execute `{cmd}`: {e}. \
-                     Fix the test command or your project setup, then call task_done \
-                     again. (gate attempt {attempt}/{MAX_TASK_DONE_TEST_RETRIES})"
-                );
+                let prompt = SteeringInjector::render(&SteeringKind::TaskDoneTestGateIoFailure {
+                    cmd: cmd.clone(),
+                    error: e.to_string(),
+                    attempt: attempt as usize,
+                    max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
+                });
                 if attempt >= MAX_TASK_DONE_TEST_RETRIES {
                     *self.dod_test_gate_exhausted.lock().await = true;
                     return TestGateOutcome::Exhausted { prompt };
@@ -469,29 +461,30 @@ impl TaskToolExecutor {
             format!("\n\nLast stderr:\n{stderr_tail}")
         };
 
-        let header = format!(
-            "ERROR: task_done blocked by Definition-of-Done test gate. \
-             Running `{cmd}` reported failures (gate attempt {attempt}/{MAX_TASK_DONE_TEST_RETRIES}). \
-             Fix EVERY failing test in the project — including tests that were already broken before \
-             your task — then call task_done again.\n\nSummary: {summary}",
-            summary = outcome.summary,
-        );
-
-        let prompt = format!("{header}{failures_block}{stderr_block}");
-
         if attempt >= MAX_TASK_DONE_TEST_RETRIES {
             *self.dod_test_gate_exhausted.lock().await = true;
-            let exhausted_prompt = format!(
-                "{prompt}\n\nThis is attempt {attempt}/{MAX_TASK_DONE_TEST_RETRIES}. The \
-                 test gate retry budget is exhausted; the task is being marked as failed \
-                 with dod_test_gate_exhausted=true so the orchestrator can decide how to \
-                 proceed."
-            );
+            let exhausted_prompt =
+                SteeringInjector::render(&SteeringKind::TaskDoneTestGateExhausted {
+                    cmd: cmd.clone(),
+                    attempt: attempt as usize,
+                    max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
+                    summary: outcome.summary.clone(),
+                    failures_block,
+                    stderr_block,
+                });
             return TestGateOutcome::Exhausted {
                 prompt: exhausted_prompt,
             };
         }
 
+        let prompt = SteeringInjector::render(&SteeringKind::TaskDoneTestGateFailed {
+            cmd: cmd.clone(),
+            attempt: attempt as usize,
+            max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
+            summary: outcome.summary,
+            failures_block,
+            stderr_block,
+        });
         TestGateOutcome::Failed { prompt }
     }
 
@@ -549,7 +542,9 @@ impl TaskToolExecutor {
             MAX_STUB_FIX_ATTEMPTS,
         ));
 
-        Some(build_stub_fix_prompt(&stub_reports))
+        Some(SteeringInjector::render(&SteeringKind::StubDetected {
+            reports: stub_reports.clone(),
+        }))
     }
 
     pub(super) async fn handle_submit_plan(
@@ -650,58 +645,54 @@ impl TaskToolExecutor {
     }
 }
 
-/// Render a parser-level `PatchError` as a model-facing diagnostic. Keeps
-/// the wording uniform across all `apply_patch` parser rejections so the
-/// model can pattern-match the prefix when deciding how to re-emit.
-fn render_patch_error(err: &PatchError) -> String {
-    format!(
-        "apply_patch failed to parse: {err}.\n\n\
-         Re-emit the patch with a well-formed envelope:\n\
-         *** Begin Patch\n\
-         *** Add File: path/to/new.rs   (or *** Update File: / *** Delete File:)\n\
-         +content lines (Add) / @@ context @@ then -removed / +added / `space`+context (Update)\n\
-         *** End Patch"
-    )
+/// Map a parser-level [`PatchError`] to the matching
+/// [`SteeringKind`] variant. The actual model-facing wording lives in
+/// [`crate::prompts::steering`]; this helper just routes the variant
+/// shape.
+fn apply_patch_parse_kind(err: &PatchError) -> SteeringKind {
+    SteeringKind::ApplyPatchParseFailed {
+        err: err.to_string(),
+    }
 }
 
-/// Render an executor-level `ApplyPatchError` (includes parse errors that
-/// were promoted up). On `ContextMismatch`, the underlying diagnostic
-/// already carries the offending file + hunk + expected lines, so we
-/// surface it verbatim.
-fn render_apply_error(err: &ApplyPatchError) -> String {
+/// Map an executor-level [`ApplyPatchError`] to the matching
+/// [`SteeringKind`] variant. Parser errors that were promoted up are
+/// re-routed through [`apply_patch_parse_kind`]; the other variants
+/// carry the offending file / hunk / reason verbatim into their
+/// SteeringKind fields so the renderer in
+/// [`crate::prompts::steering::messages`] can reproduce the
+/// pre-PR-D diagnostic wording byte-for-byte.
+fn apply_patch_exec_kind(err: &ApplyPatchError) -> SteeringKind {
     match err {
-        ApplyPatchError::Parse(e) => render_patch_error(e),
-        ApplyPatchError::TargetAlreadyExists { path } => format!(
-            "apply_patch error: `*** Add File: {path}` rejected because the target \
-             already exists. Use `*** Update File:` for an existing file, or \
-             `*** Delete File:` first if you really want to replace it."
-        ),
-        ApplyPatchError::TargetNotFound { path } => format!(
-            "apply_patch error: target file `{path}` does not exist. Read the project \
-             to verify the path, or use `*** Add File:` if you intend to create it."
-        ),
-        ApplyPatchError::PathEscape { path } => format!(
-            "apply_patch error: path `{path}` resolves outside the workspace root. All \
-             patch paths must be workspace-relative (no `..`, no absolute / drive-letter \
-             paths)."
-        ),
+        ApplyPatchError::Parse(e) => apply_patch_parse_kind(e),
+        ApplyPatchError::TargetAlreadyExists { path } => SteeringKind::ApplyPatchTargetAlreadyExists {
+            path: path.clone(),
+        },
+        ApplyPatchError::TargetNotFound { path } => SteeringKind::ApplyPatchTargetNotFound {
+            path: path.clone(),
+        },
+        ApplyPatchError::PathEscape { path } => SteeringKind::ApplyPatchPathEscape {
+            path: path.clone(),
+        },
         ApplyPatchError::ContextMismatch {
             path,
             hunk_index,
             reason,
-        } => format!(
-            "apply_patch error: hunk #{n} in `{path}` did not match the file. {reason}\n\n\
-             Read the target file with `read_file` and re-derive the hunk's context lines \
-             from real bytes before re-emitting the patch.",
-            n = hunk_index + 1,
-        ),
-        ApplyPatchError::ConflictingChanges { path, reason } => format!(
-            "apply_patch error: conflicting directives for `{path}` within one patch. \
-             {reason} Combine them into a single directive instead."
-        ),
-        ApplyPatchError::Io { path, source } => format!(
-            "apply_patch error: filesystem failure on `{path}`: {source}"
-        ),
+        } => SteeringKind::ApplyPatchContextMismatch {
+            path: path.clone(),
+            hunk_index: *hunk_index,
+            reason: reason.clone(),
+        },
+        ApplyPatchError::ConflictingChanges { path, reason } => {
+            SteeringKind::ApplyPatchConflictingChanges {
+                path: path.clone(),
+                reason: reason.clone(),
+            }
+        }
+        ApplyPatchError::Io { path, source } => SteeringKind::ApplyPatchIo {
+            path: path.clone(),
+            source: source.to_string(),
+        },
     }
 }
 

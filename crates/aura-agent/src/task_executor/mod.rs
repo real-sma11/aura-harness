@@ -17,7 +17,6 @@ use crate::build::{classify_build_errors, error_category_guidance};
 use crate::events::AgentLoopEvent;
 use crate::file_ops::{self, FileOp};
 use crate::planning::{TaskPhase, TaskPlan};
-use crate::prompts::build_stub_fix_prompt;
 use crate::self_review::SelfReviewGuard;
 use crate::types::{
     AgentToolExecutor, AutoBuildResult, BuildBaseline, ToolCallInfo, ToolCallResult,

@@ -3,11 +3,18 @@
 //! All builders accept lightweight descriptor structs instead of domain objects,
 //! keeping this module free of app-layer dependencies.
 
+// `auxiliary` (not `aux`) because Windows reserves `AUX` as a device name
+// and refuses to create directories with that name in any case form.
+pub mod auxiliary;
 mod context;
 pub mod enrichment;
 mod fix;
+pub mod steering;
 mod system;
 mod turn_kernel_system;
+
+#[cfg(test)]
+mod guardrail_tests;
 
 pub use crate::verify::error_types::{parse_error_references, BuildFixAttemptRecord};
 pub use context::build_agentic_task_context;
@@ -15,7 +22,8 @@ pub use enrichment::{
     default_caps, extract_hints, resolve_hints, ContextHints, FsWorkspace, ResolveCaps,
     ResolvedContext, SymbolHit, WorkspaceReader,
 };
-pub use fix::{build_fix_prompt_with_history, build_stub_fix_prompt, BuildFixPromptParams};
+pub use fix::{build_fix_prompt_with_history, BuildFixPromptParams};
+pub use steering::{SteeringInjector, SteeringKind};
 pub use system::{
     agentic_execution_system_prompt, build_chat_system_prompt, probe_agents_md, AgentsMdProbe,
     SystemPromptBuilder, CHAT_SYSTEM_PROMPT_BASE,
