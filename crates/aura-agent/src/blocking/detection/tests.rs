@@ -54,77 +54,6 @@ fn test_detect_blocked_writes_allows_delete_file_on_written_path() {
 }
 
 #[test]
-fn test_detect_blocked_write_failures_at_threshold() {
-    let mut ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    ctx.write_failures
-        .insert("test.rs".to_string(), WRITE_FAILURE_BLOCK_THRESHOLD);
-    let tool = make_tool("write_file", serde_json::json!({"path": "test.rs"}));
-    let result = detect_blocked_write_failures(&tool, &ctx).unwrap();
-    assert!(result.blocked);
-}
-
-#[test]
-fn test_detect_blocked_commands_under_threshold() {
-    let mut ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    ctx.consecutive_cmd_failures = CMD_FAILURE_BLOCK_THRESHOLD - 1;
-    let tool = make_tool("run_command", serde_json::json!({"command": "cargo build"}));
-    let result = detect_blocked_commands(&tool, &ctx).unwrap();
-    assert!(!result.blocked);
-}
-
-#[test]
-fn test_detect_blocked_commands_at_threshold() {
-    let mut ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    ctx.consecutive_cmd_failures = CMD_FAILURE_BLOCK_THRESHOLD;
-    let tool = make_tool("run_command", serde_json::json!({"command": "cargo build"}));
-    let result = detect_blocked_commands(&tool, &ctx).unwrap();
-    assert!(result.blocked);
-}
-
-#[test]
-fn test_detect_blocked_exploration_allows_under() {
-    let ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    let tool = make_tool("read_file", serde_json::json!({"path": "test.rs"}));
-    let result = detect_blocked_exploration(&tool, &ctx).unwrap();
-    assert!(!result.blocked);
-}
-
-#[test]
-fn test_detect_blocked_exploration_when_exceeded() {
-    // After the round-2 strip the hard block is unconditional — no
-    // `mark_plan_submitted` setup needed.
-    let mut ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    ctx.exploration_count = DEFAULT_EXPLORATION_ALLOWANCE;
-    let tool = make_tool("read_file", serde_json::json!({"path": "test.rs"}));
-    let result = detect_blocked_exploration(&tool, &ctx).unwrap();
-    assert!(result.blocked);
-}
-
-/// Round-2 strip: the read hard-block fires regardless of whether
-/// `submit_plan` has been called. Round 1 deleted the plan write
-/// gate, so blocking reads pre-plan no longer leaves the agent with
-/// no legal next tool — `write_file` / `edit_file` / `delete_file`
-/// are always available.
-#[test]
-fn test_detect_blocked_exploration_blocks_pre_plan_too() {
-    let mut ctx = BlockingContext::new(DEFAULT_EXPLORATION_ALLOWANCE);
-    ctx.exploration_count = DEFAULT_EXPLORATION_ALLOWANCE;
-    assert!(
-        !ctx.plan_submitted,
-        "plan_submitted must default to false; the detector must not depend on it"
-    );
-    for tool_name in ["read_file", "list_files", "find_files", "stat_file", "search_code"] {
-        let tool = make_tool(tool_name, serde_json::json!({"path": "test.rs"}));
-        let result = detect_blocked_exploration(&tool, &ctx).unwrap();
-        assert!(
-            result.blocked,
-            "exploration via `{tool_name}` must hard-block at the budget regardless of \
-             plan_submitted (round-2 strip)"
-        );
-    }
-}
-
-#[test]
 fn test_mark_plan_submitted_is_idempotent() {
     // Subsequent calls must be no-ops so callers (the agent loop's
     // signal observer) don't have to guard against re-observation
@@ -338,45 +267,20 @@ fn test_on_write_success_resets_state() {
     ctx.on_write_success("test.rs", &mut read_guard);
     assert!(ctx.written_paths.contains("test.rs"));
     assert!(!ctx.write_failures.contains_key("test.rs"));
-    assert_eq!(ctx.exploration_allowance, DEFAULT_EXPLORATION_ALLOWANCE + 2);
+    // exploration_allowance bump is saturating; with the default
+    // `usize::MAX` allowance it stays at the ceiling.
+    assert!(ctx.exploration_allowance >= DEFAULT_EXPLORATION_ALLOWANCE);
     assert_eq!(read_guard.full_read_count("test.rs"), 0);
 }
 
-/// Pin the structural-blocker constants so future drift is intentional.
-///
-/// History: round 0 (`harness-dev-loop-efficiency`) raised the read
-/// caps ~3x to give explore/edit cycles headroom against an open
-/// `plan_submitted` gate. Round 2 (2026-05) tightened them again
-/// because the round-1 strip ungated the read block — without the
-/// gate the loose caps were hiding read-only loops rather than
-/// breaking them.
-///
-/// `EMPTY_PATH_BLOCK_LIMIT` and `CONSECUTIVE_ERROR_ITERATIONS_LIMIT`
-/// are deliberately kept tight as last-ditch wedge guards.
+/// Pin the size-of-wire write-chunk constants so future drift is
+/// intentional. These are wire-shape limits driven by the API's
+/// tool-input size, not behavioral heuristics — they survived the
+/// cook-loop-fix strip (2026-05) on purpose.
 #[test]
-fn relaxed_constants_are_consistent() {
-    use crate::constants::{
-        CMD_FAILURE_BLOCK_THRESHOLD, CONSECUTIVE_ERROR_ITERATIONS_LIMIT,
-        DEFAULT_EXPLORATION_ALLOWANCE, EMPTY_PATH_BLOCK_LIMIT, EXPLORATION_WARNING_MILD_OFFSET,
-        EXPLORATION_WARNING_STRONG_OFFSET, MAX_RANGE_READS_PER_FILE, MAX_READS_PER_FILE,
-        STALL_STREAK_THRESHOLD, WRITE_COOLDOWN_ITERATIONS, WRITE_FAILURE_BLOCK_THRESHOLD,
-        WRITE_FILE_CHUNK_BYTES, WRITE_FILE_HARD_MAX_BYTES,
-    };
+fn write_chunk_constants_are_pinned() {
+    use crate::constants::{WRITE_FILE_CHUNK_BYTES, WRITE_FILE_HARD_MAX_BYTES};
 
-    assert_eq!(DEFAULT_EXPLORATION_ALLOWANCE, 20);
-    assert_eq!(MAX_READS_PER_FILE, 3);
-    assert_eq!(MAX_RANGE_READS_PER_FILE, 5);
     assert_eq!(WRITE_FILE_CHUNK_BYTES, 32_000);
     assert_eq!(WRITE_FILE_HARD_MAX_BYTES, 32_000);
-    assert_eq!(WRITE_FAILURE_BLOCK_THRESHOLD, 6);
-    assert_eq!(WRITE_COOLDOWN_ITERATIONS, 1);
-    assert_eq!(CMD_FAILURE_BLOCK_THRESHOLD, 8);
-    assert_eq!(STALL_STREAK_THRESHOLD, 5);
-    assert_eq!(EXPLORATION_WARNING_MILD_OFFSET, 8);
-    assert_eq!(EXPLORATION_WARNING_STRONG_OFFSET, 4);
-
-    // These two stay tight on purpose — pathless writes and turns that
-    // are 100% errors never recover by adding more iterations.
-    assert_eq!(EMPTY_PATH_BLOCK_LIMIT, 3);
-    assert_eq!(CONSECUTIVE_ERROR_ITERATIONS_LIMIT, 5);
 }

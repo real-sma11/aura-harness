@@ -211,15 +211,15 @@ pub(super) fn emit_checkpoint_if_needed(
     streaming::emit(event_tx, AgentLoopEvent::Warning(msg));
 }
 
-/// Check and emit budget and exploration warnings.
+/// Check and emit budget warnings.
 ///
 /// In unlimited-iteration mode (`max_iterations == usize::MAX`), the
 /// iteration-utilization warnings are skipped — utilization would
 /// round to ~0 and the warnings would never fire anyway, but the
 /// short-circuit makes the intent explicit and avoids any cast-related
-/// precision surprises. Exploration warnings still run because they
-/// key off `exploration_allowance`, which is independent of the
-/// per-turn iteration cap.
+/// precision surprises. The exploration "approaching limit" warning
+/// was removed by the cook-loop-fix strip (2026-05) along with the
+/// hard exploration cap.
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn check_budget_warnings(
     config: &AgentLoopConfig,
@@ -235,14 +235,6 @@ pub(super) fn check_budget_warnings(
             helpers::append_warning(&mut state.messages, &warning);
             streaming::emit(event_tx, AgentLoopEvent::Warning(warning));
         }
-    }
-
-    if let Some(warning) = budget::check_exploration_warning(
-        &mut state.exploration_state,
-        config.exploration_allowance,
-    ) {
-        helpers::append_warning(&mut state.messages, &warning);
-        streaming::emit(event_tx, AgentLoopEvent::Warning(warning));
     }
 }
 

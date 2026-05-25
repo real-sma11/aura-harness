@@ -72,7 +72,7 @@ impl BlockingContext {
     pub(crate) fn on_write_success(&mut self, path: &str, read_guard: &mut ReadGuardState) {
         self.written_paths.insert(path.to_string());
         self.write_failures.remove(path);
-        self.exploration_allowance += 2;
+        self.exploration_allowance = self.exploration_allowance.saturating_add(2);
         read_guard.reset_for_path(path);
     }
 

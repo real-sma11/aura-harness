@@ -51,15 +51,13 @@ pub const MAX_ITERATIONS: usize = usize::MAX;
 /// Default exploration allowance (read-only tool calls before the
 /// hard block in `detect_blocked_exploration` fires).
 ///
-/// History: 12 -> 40 (round 0, "give realistic explore/edit cycles
-/// headroom"); 40 -> 20 (round 2 strip, 2026-05). The 40-cap was
-/// validated against an open phase gate — the hard block only fired
-/// after `submit_plan`, which round 1 disarmed. Reads went unbounded
-/// in practice. With the gate now unconditional (see
-/// `detect_blocked_exploration` doc comment), 20 reads is enough for
-/// any honest workflow and forces the read-to-write transition for
-/// runs that would otherwise loop.
-pub const DEFAULT_EXPLORATION_ALLOWANCE: usize = 20;
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05): the behavioral cap was removed because every gate
+/// that key'd off it was hiding read-only loops rather than
+/// breaking them. The detector remains in the codebase but is
+/// now effectively unreachable; the only real terminators are
+/// `EndTurn`, credit budget, and cooperative cancellation.
+pub const DEFAULT_EXPLORATION_ALLOWANCE: usize = usize::MAX;
 
 /// Auto-build cooldown: minimum iterations between automatic build checks.
 pub const AUTO_BUILD_COOLDOWN: usize = 2;
@@ -91,30 +89,40 @@ pub const THINKING_AUTO_ENABLE_THRESHOLD: u32 = 2048;
 
 /// Maximum full reads of the same file before blocking.
 ///
-/// History: 3 -> 10 (round 0, "realistic explore/edit cycles
-/// headroom"); 10 -> 3 (round 2 strip, 2026-05). The validation run
-/// that motivated round 2 read `outbox.rs` ~7 times across full and
-/// ranged reads without ever writing — the loose cap was actively
-/// hiding the loop instead of breaking it.
-pub const MAX_READS_PER_FILE: usize = 3;
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05): re-reading the same file is a cache hit for
+/// negligible tokens, not a behavioral failure mode worth
+/// gating on.
+pub const MAX_READS_PER_FILE: usize = usize::MAX;
 
 /// Maximum range reads of the same file before blocking.
 ///
-/// History: 5 -> 15 (round 0); 15 -> 5 (round 2 strip, 2026-05).
-/// Same rationale as [`MAX_READS_PER_FILE`].
-pub const MAX_RANGE_READS_PER_FILE: usize = 5;
+/// Neutralized to `usize::MAX`. Same rationale as
+/// [`MAX_READS_PER_FILE`].
+pub const MAX_RANGE_READS_PER_FILE: usize = usize::MAX;
 
 /// Consecutive command failures before blocking all commands.
-/// Raised from 5 to 8 to give realistic explore/edit cycles headroom.
-pub const CMD_FAILURE_BLOCK_THRESHOLD: usize = 8;
+///
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05). Commands either fail because the model needs to
+/// try a different approach (which it can decide on its own) or
+/// because the build is genuinely broken (the optional
+/// `validate_build_preflight` gate handles that).
+pub const CMD_FAILURE_BLOCK_THRESHOLD: usize = usize::MAX;
 
 /// Consecutive write failures on a single file before blocking writes to it.
-/// Raised from 3 to 6 to give realistic explore/edit cycles headroom.
-pub const WRITE_FAILURE_BLOCK_THRESHOLD: usize = 6;
+///
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05).
+pub const WRITE_FAILURE_BLOCK_THRESHOLD: usize = usize::MAX;
 
 /// Stall detection: identical write targets for this many iterations triggers fail-fast.
-/// Raised from 3 to 5 to give realistic explore/edit cycles headroom.
-pub const STALL_STREAK_THRESHOLD: usize = 5;
+///
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05). The streak detector remains compiled but cannot
+/// fire; the natural terminators (`EndTurn`, credit budget,
+/// cancellation) cover the cases this used to catch.
+pub const STALL_STREAK_THRESHOLD: usize = usize::MAX;
 
 /// Budget warning at 30% utilization.
 pub const BUDGET_WARNING_30: f64 = 0.30;
@@ -124,14 +132,6 @@ pub const BUDGET_WARNING_40_NO_WRITE: f64 = 0.40;
 
 /// Budget warning at 60% utilization (wrap up).
 pub const BUDGET_WARNING_60: f64 = 0.60;
-
-/// Exploration warning (mild) at allowance minus this value.
-/// Raised from 4 to 8 to give realistic explore/edit cycles headroom.
-pub const EXPLORATION_WARNING_MILD_OFFSET: usize = 8;
-
-/// Exploration warning (strong) at allowance minus this value.
-/// Raised from 2 to 4 to give realistic explore/edit cycles headroom.
-pub const EXPLORATION_WARNING_STRONG_OFFSET: usize = 4;
 
 /// Characters per token estimate for context budget calculations.
 pub const CHARS_PER_TOKEN: usize = 4;
@@ -152,8 +152,11 @@ pub const COMPACTION_TIER_30: f64 = 0.30;
 pub const COMPACTION_TIER_MICRO: f64 = 0.15;
 
 /// Write file cooldown in iterations after a write failure.
-/// Raised from 2 to 1 to give realistic explore/edit cycles headroom.
-pub const WRITE_COOLDOWN_ITERATIONS: usize = 1;
+///
+/// Neutralized to `0` by the cook-loop-fix strip (2026-05): the
+/// cooldown no longer schedules any wait, so the cooldown-block
+/// detector is a no-op.
+pub const WRITE_COOLDOWN_ITERATIONS: usize = 0;
 
 /// Tools classified as exploration (read-only, non-modifying).
 pub const EXPLORATION_TOOLS: &[&str] = &[
@@ -178,19 +181,18 @@ pub const WRITE_TOOLS: &[&str] =
 pub const COMMAND_TOOLS: &[&str] = &["run_command"];
 
 /// Consecutive iterations where every tool call errors before forcing a stop.
-pub const CONSECUTIVE_ERROR_ITERATIONS_LIMIT: usize = 5;
+///
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05).
+pub const CONSECUTIVE_ERROR_ITERATIONS_LIMIT: usize = usize::MAX;
 
 /// Consecutive iterations containing at least one pathless
 /// `write_file` / `edit_file` / `delete_file` block before forcing a
 /// stop.
 ///
-/// Pathless write blocks are a strong signal that the model has lost
-/// the path argument and is re-emitting the same malformed call in a
-/// loop. Stopping at this threshold is tighter than
-/// [`CONSECUTIVE_ERROR_ITERATIONS_LIMIT`] because pathless-write loops
-/// never recover on their own and every retry burns LLM tokens and
-/// inflates the DoD gate's empty-path counter.
-pub const EMPTY_PATH_BLOCK_LIMIT: usize = 3;
+/// Neutralized to `usize::MAX` by the cook-loop-fix strip
+/// (2026-05). The detector remains compiled but cannot fire.
+pub const EMPTY_PATH_BLOCK_LIMIT: usize = usize::MAX;
 
 // ---------------------------------------------------------------------------
 // Write-side chunk guard

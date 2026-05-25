@@ -1,9 +1,6 @@
 //! Budget tracking — exploration, token, and credit budget management.
 
-use crate::constants::{
-    BUDGET_WARNING_30, BUDGET_WARNING_40_NO_WRITE, BUDGET_WARNING_60,
-    EXPLORATION_WARNING_MILD_OFFSET, EXPLORATION_WARNING_STRONG_OFFSET,
-};
+use crate::constants::{BUDGET_WARNING_30, BUDGET_WARNING_40_NO_WRITE, BUDGET_WARNING_60};
 
 /// Budget tracking state.
 #[derive(Debug, Default)]
@@ -17,14 +14,17 @@ pub struct BudgetState {
 }
 
 /// Exploration tracking state.
+///
+/// The "approaching budget" warning fields were removed by the
+/// cook-loop-fix strip (2026-05) along with the
+/// `EXPLORATION_WARNING_*_OFFSET` constants. The remaining `count`
+/// field tracks total exploration tool calls for telemetry only —
+/// the hard block in `detect_blocked_exploration` is also
+/// neutralized via `DEFAULT_EXPLORATION_ALLOWANCE = usize::MAX`.
 #[derive(Debug, Default)]
 pub struct ExplorationState {
     /// Total exploration tool calls.
     pub count: usize,
-    /// Whether the mild warning has been sent.
-    pub warned_mild: bool,
-    /// Whether the strong warning has been sent.
-    pub warned_strong: bool,
 }
 
 /// Check if a budget warning should be injected, returning the message if so.
@@ -56,35 +56,6 @@ pub fn check_budget_warning(
         return Some(
             "NOTE: You have used 30% of your iteration budget. \
              Prioritize implementing your solution over further exploration."
-                .to_string(),
-        );
-    }
-
-    None
-}
-
-/// Check if an exploration warning should be injected.
-pub fn check_exploration_warning(state: &mut ExplorationState, allowance: usize) -> Option<String> {
-    if allowance > EXPLORATION_WARNING_STRONG_OFFSET
-        && state.count >= allowance - EXPLORATION_WARNING_STRONG_OFFSET
-        && !state.warned_strong
-    {
-        state.warned_strong = true;
-        return Some(
-            "STRONG WARNING: You are about to exhaust your exploration budget. \
-             Any further read-only tool calls will be blocked. Start making changes NOW."
-                .to_string(),
-        );
-    }
-
-    if allowance > EXPLORATION_WARNING_MILD_OFFSET
-        && state.count >= allowance - EXPLORATION_WARNING_MILD_OFFSET
-        && !state.warned_mild
-    {
-        state.warned_mild = true;
-        return Some(
-            "Note: You are approaching your exploration budget limit. \
-             Consider starting to implement with the information you have."
                 .to_string(),
         );
     }
@@ -155,44 +126,6 @@ mod tests {
         assert!(msg.is_some());
         assert!(msg.unwrap().contains("30%"));
         assert!(!budget.warned_40_no_write);
-    }
-
-    #[test]
-    fn test_exploration_warning_mild() {
-        // Mild offset is 8, so with allowance 40 the warning fires at count >= 32.
-        let mut state = ExplorationState {
-            count: 32,
-            ..Default::default()
-        };
-        let msg = check_exploration_warning(&mut state, 40);
-        assert!(msg.is_some());
-        assert!(state.warned_mild);
-    }
-
-    #[test]
-    fn test_exploration_warning_strong() {
-        // Strong offset is 4, so with allowance 40 the warning fires at count >= 36.
-        let mut state = ExplorationState {
-            count: 36,
-            warned_mild: true,
-            ..Default::default()
-        };
-        let msg = check_exploration_warning(&mut state, 40);
-        assert!(msg.is_some());
-        assert!(state.warned_strong);
-    }
-
-    #[test]
-    fn test_exploration_warning_not_duplicated() {
-        // At count 32 (mild threshold for allowance 40) with warned_mild
-        // already set, strong hasn't fired (needs >= 36), so no warning.
-        let mut state = ExplorationState {
-            count: 32,
-            warned_mild: true,
-            ..Default::default()
-        };
-        let msg = check_exploration_warning(&mut state, 40);
-        assert!(msg.is_none());
     }
 
     #[test]
@@ -278,17 +211,8 @@ mod tests {
     }
 
     #[test]
-    fn test_exploration_warning_small_allowance() {
-        let mut state = ExplorationState::default();
-        let msg = check_exploration_warning(&mut state, 2);
-        assert!(msg.is_none(), "Small allowance should not trigger warnings");
-    }
-
-    #[test]
     fn test_exploration_state_defaults() {
         let state = ExplorationState::default();
         assert_eq!(state.count, 0);
-        assert!(!state.warned_mild);
-        assert!(!state.warned_strong);
     }
 }

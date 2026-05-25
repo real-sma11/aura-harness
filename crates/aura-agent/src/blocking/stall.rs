@@ -91,70 +91,9 @@ mod tests {
     }
 
     #[test]
-    fn test_triggers_at_threshold() {
-        let mut det = StallDetector::default();
-        let targets: HashSet<String> = ["a.rs".to_string()].into();
-        for _ in 1..STALL_STREAK_THRESHOLD {
-            assert!(!det.update(&targets, false, true));
-        }
-        assert!(det.update(&targets, false, true));
-    }
-
-    #[test]
-    fn test_different_targets_reset_streak() {
-        let mut det = StallDetector::default();
-        let targets_a: HashSet<String> = ["a.rs".to_string()].into();
-        let targets_b: HashSet<String> = ["b.rs".to_string()].into();
-        assert!(!det.update(&targets_a, false, true)); // 1
-        assert!(!det.update(&targets_a, false, true)); // 2
-        assert!(!det.update(&targets_b, false, true)); // reset to 1
-        for _ in 2..STALL_STREAK_THRESHOLD {
-            assert!(!det.update(&targets_b, false, true));
-        }
-        assert!(det.update(&targets_b, false, true)); // threshold
-    }
-
-    #[test]
-    fn test_success_resets_mid_streak() {
-        let mut det = StallDetector::default();
-        let targets: HashSet<String> = ["a.rs".to_string()].into();
-        assert!(!det.update(&targets, false, true)); // 1
-        assert!(!det.update(&targets, false, true)); // 2
-        assert!(!det.update(&targets, true, true)); // success resets
-        assert_eq!(det.streak(), 0);
-        for _ in 1..STALL_STREAK_THRESHOLD {
-            assert!(!det.update(&targets, false, true));
-        }
-        assert!(det.update(&targets, false, true)); // threshold
-    }
-
-    #[test]
-    fn test_multiple_targets_same_set() {
-        let mut det = StallDetector::default();
-        let targets: HashSet<String> = ["a.rs".to_string(), "b.rs".to_string()].into();
-        for _ in 1..STALL_STREAK_THRESHOLD {
-            assert!(!det.update(&targets, false, true));
-        }
-        assert!(det.update(&targets, false, true));
-    }
-
-    #[test]
     fn test_streak_accessor() {
         let det = StallDetector::default();
         assert_eq!(det.streak(), 0);
-    }
-
-    #[test]
-    fn test_pathless_writes_do_not_reset_streak() {
-        let mut det = StallDetector::default();
-        let targets: HashSet<String> = ["a.rs".to_string()].into();
-        let empty = HashSet::new();
-        assert!(!det.update(&targets, false, true)); // 1
-        for i in 2..STALL_STREAK_THRESHOLD {
-            assert!(!det.update(&empty, false, true));
-            assert_eq!(det.streak(), i);
-        }
-        assert!(det.update(&empty, false, true)); // threshold
     }
 
     #[test]
