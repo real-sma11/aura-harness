@@ -43,7 +43,6 @@
 #![allow(clippy::option_if_let_else)]
 
 mod agent_loop;
-pub(crate) mod blocking;
 mod budget;
 pub(crate) mod build;
 pub mod constants;
@@ -55,7 +54,6 @@ mod kernel_domain_gateway;
 mod kernel_gateway;
 pub(crate) mod planning;
 pub mod prompts;
-mod read_guard;
 mod recording_stream;
 mod sanitize;
 pub(crate) mod self_review;

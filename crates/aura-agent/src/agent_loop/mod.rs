@@ -43,15 +43,12 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::blocking::detection::BlockingContext;
-use crate::blocking::stall::StallDetector;
 use crate::budget::{BudgetState, ExplorationState};
 use crate::constants::{
     AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, MAX_ITERATIONS, THINKING_AUTO_ENABLE_THRESHOLD,
     THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
 use crate::events::{AgentLoopEvent, DebugEvent};
-use crate::read_guard::ReadGuardState;
 use crate::types::{AgentLoopResult, AgentToolExecutor, BuildBaseline, TurnObserver};
 
 /// Configuration for the agent loop.
@@ -180,9 +177,8 @@ pub struct AgentLoopConfig {
     /// Optional handshake from a wrapping
     /// [`crate::task_executor::TaskToolExecutor`]: when the inner
     /// `Arc<AtomicBool>` flips to `true`, [`LoopState::begin_iteration`]
-    /// resets the exploration/read-guard counters and bumps the
-    /// allowance so the implementation phase has a fresh budget. `None`
-    /// for non-task callers (e.g. chat).
+    /// resets the exploration counter so the implementation phase has
+    /// a fresh budget. `None` for non-task callers (e.g. chat).
     pub phase_reset_signal: Option<Arc<AtomicBool>>,
     /// Disable Anthropic extended thinking on iteration 0.
     ///
@@ -723,36 +719,11 @@ pub(crate) struct ThinkingBudget {
     pub(crate) disable_thinking_this_iteration: bool,
 }
 
-/// Consecutive-iteration counters driving the loop's degraded-pattern
-/// abort policies (all-error streak, pathless-write streak, narration
-/// streak, read-only streak) and the live steering injections.
-///
-/// All five fields move and reset together — typically as a single
-/// "the model just produced a useful turn" signal — so grouping them
-/// keeps the related resets co-located and lets helpers in
-/// [`super::iteration`] / [`super::tool_execution`] receive a focused
-/// `&mut IterCounters` slice.
-pub(crate) struct IterCounters {
-    /// Consecutive iterations where every tool call returned an error.
-    pub(crate) consecutive_all_error_iterations: usize,
-    /// Consecutive iterations that contained at least one pathless
-    /// `write_file`/`edit_file`/`delete_file` block. Reset whenever an
-    /// iteration finishes with no pathless-write blocks. The cap on
-    /// [`crate::constants::EMPTY_PATH_BLOCK_LIMIT`] is neutralized
-    /// (`usize::MAX`) by the cook-loop-fix strip, so this counter is
-    /// kept for diagnostic logging only — it no longer terminates
-    /// the loop.
-    pub(crate) consecutive_empty_path_block_iterations: usize,
-}
-
 /// Mutable state carried across iterations of the agent loop.
 pub struct LoopState {
     pub(crate) result: AgentLoopResult,
     pub(crate) tool_cache: ToolResultCache,
-    pub(crate) blocking_ctx: BlockingContext,
-    pub(crate) read_guard: ReadGuardState,
     pub(crate) exploration_state: ExplorationState,
-    pub(crate) stall_detector: StallDetector,
     pub(crate) budget_state: BudgetState,
     pub(crate) had_any_write: bool,
     /// Set true the first iteration whose tool results contain any
@@ -784,7 +755,6 @@ pub struct LoopState {
     pub(crate) last_context_tokens_estimate: Option<u64>,
     pub(crate) messages: Vec<Message>,
     pub(crate) build_baseline: Option<BuildBaseline>,
-    pub(crate) counters: IterCounters,
 }
 
 impl LoopState {
@@ -792,10 +762,7 @@ impl LoopState {
         Self {
             result: AgentLoopResult::default(),
             tool_cache: ToolResultCache::default(),
-            blocking_ctx: BlockingContext::default(),
-            read_guard: ReadGuardState::default(),
             exploration_state: ExplorationState::default(),
-            stall_detector: StallDetector::default(),
             budget_state: BudgetState::default(),
             had_any_write: false,
             had_any_file_write: false,
@@ -815,10 +782,6 @@ impl LoopState {
             last_context_tokens_estimate: None,
             messages,
             build_baseline: None,
-            counters: IterCounters {
-                consecutive_all_error_iterations: 0,
-                consecutive_empty_path_block_iterations: 0,
-            },
         }
     }
 
@@ -829,7 +792,6 @@ impl LoopState {
     )]
     fn begin_iteration(&mut self, config: &AgentLoopConfig, iteration: usize) {
         self.build_cooldown = self.build_cooldown.saturating_sub(1);
-        self.blocking_ctx.decrement_cooldowns();
 
         // One-shot extended-thinking disable flag is re-evaluated each
         // iteration: cleared first, then re-set below for the cases
@@ -843,24 +805,19 @@ impl LoopState {
         // Observe-and-clear the optional handshake from a wrapping
         // `TaskToolExecutor`: when `submit_plan` is accepted the
         // executor flips this shared `Arc<AtomicBool>` to `true`, and
-        // the loop must zero out exploration/read-guard counters so the
+        // the loop must zero out the exploration counter so the
         // implement phase has a fresh budget instead of inheriting the
-        // exploration phase's exhausted one. `written_paths` is
-        // intentionally preserved so duplicate-write detection still
-        // works after the reset. `exploration_compaction_done` is
-        // cleared so proactive compaction can fire once more during
-        // the implement phase.
+        // exploration phase's exhausted one.
+        // `exploration_compaction_done` is cleared so proactive
+        // compaction can fire once more during the implement phase.
         if let Some(ref signal) = config.phase_reset_signal {
             if signal.swap(false, Ordering::AcqRel) {
                 tracing::info!(
-                    old_exploration_count = self.blocking_ctx.exploration_count,
-                    "submit_plan accepted: resetting exploration/read-guard counters"
+                    old_exploration_count = self.exploration_state.count,
+                    "submit_plan accepted: resetting exploration counter"
                 );
-                self.blocking_ctx.exploration_count = 0;
                 self.exploration_state.count = 0;
-                self.read_guard = ReadGuardState::default();
                 self.exploration_compaction_done = false;
-                self.blocking_ctx.mark_plan_submitted();
             }
         }
 

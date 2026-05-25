@@ -23,14 +23,8 @@ pub(super) struct ExecutedTools {
     pub(super) tool_calls: Vec<ToolCallInfo>,
     pub(super) all_results: Vec<ToolCallResult>,
     pub(super) side_messages: Vec<String>,
-    pub(super) is_stalled: bool,
     pub(super) blocked_ids: HashSet<String>,
     pub(super) cached_ids: HashSet<String>,
-    /// `true` when the iteration contained at least one
-    /// `write_file`/`edit_file`/`delete_file` blocked for missing
-    /// `path`. Used to drive
-    /// [`crate::constants::EMPTY_PATH_BLOCK_LIMIT`] early stop.
-    pub(super) saw_empty_path_block: bool,
 }
 
 /// Handle `StopReason::ToolUse` — cache, execute, emit, stall-check.
@@ -90,14 +84,13 @@ async fn execute_and_cache_tools(
         "Resolved cached vs executable tool calls"
     );
 
-    let (executed_results, side_messages, is_stalled, blocked_ids, saw_empty_path_block) =
-        if uncached_calls.is_empty() {
-            (Vec::new(), Vec::new(), false, HashSet::new(), false)
-        } else {
-            agent
-                .process_tool_results(&uncached_calls, executor, state, event_tx)
-                .await
-        };
+    let (executed_results, side_messages, blocked_ids) = if uncached_calls.is_empty() {
+        (Vec::new(), Vec::new(), HashSet::new())
+    } else {
+        agent
+            .process_tool_results(&uncached_calls, executor, state, event_tx)
+            .await
+    };
 
     update_cache(
         &mut state.tool_cache.exact,
@@ -113,10 +106,8 @@ async fn execute_and_cache_tools(
         tool_calls,
         all_results,
         side_messages,
-        is_stalled,
         blocked_ids,
         cached_ids,
-        saw_empty_path_block,
     })
 }
 
@@ -195,47 +186,8 @@ pub(super) fn truncate_preview(content: &str, limit: usize) -> String {
     }
 }
 
-fn emit_stop_error(
-    event_tx: Option<&Sender<AgentLoopEvent>>,
-    state: &mut LoopState,
-    code: &str,
-    msg: &str,
-) {
-    emit_stop_error_with_recoverability(event_tx, state, code, msg, false);
-}
-
-/// Emit a terminal error event and set `state.result.stalled`.
-///
-/// The `recoverable` flag flows through to
-/// [`crate::events::AgentLoopEvent::Error`] and ultimately the
-/// `HarnessOutbound::Error` that aura-os sees on the SSE wire. Pass
-/// `false` for hard structural failures (consecutive errors,
-/// pathless writes) and `true` for soft "the agent is stuck but the
-/// user can intervene" cases (`agent_stalled` from the
-/// [`crate::blocking::stall::StallDetector`]) so the chat client's
-/// stuck-stream watchdog renders Stop / Retry / Report instead of a
-/// dead-end "session error".
-fn emit_stop_error_with_recoverability(
-    event_tx: Option<&Sender<AgentLoopEvent>>,
-    state: &mut LoopState,
-    code: &str,
-    msg: &str,
-    recoverable: bool,
-) {
-    helpers::append_warning(&mut state.messages, msg);
-    streaming::emit(
-        event_tx,
-        AgentLoopEvent::Error {
-            code: code.to_string(),
-            message: msg.to_string(),
-            recoverable,
-        },
-    );
-    state.result.stalled = true;
-}
-
 pub(super) fn check_termination_conditions(
-    event_tx: Option<&Sender<AgentLoopEvent>>,
+    _event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
     tools: ExecutedTools,
 ) -> bool {
@@ -252,24 +204,6 @@ pub(super) fn check_termination_conditions(
             result_len = result.content.len(),
             "Rejected compacted/redacted tool input without incrementing consecutive errors"
         );
-    }
-
-    let all_agent_errors = !tools.saw_empty_path_block
-        && !tools.all_results.is_empty()
-        && tools
-            .all_results
-            .iter()
-            .all(|r| r.kind == aura_core::ToolResultKind::AgentError);
-    if all_agent_errors {
-        state.counters.consecutive_all_error_iterations += 1;
-    } else {
-        state.counters.consecutive_all_error_iterations = 0;
-    }
-
-    if tools.saw_empty_path_block {
-        state.counters.consecutive_empty_path_block_iterations += 1;
-    } else {
-        state.counters.consecutive_empty_path_block_iterations = 0;
     }
 
     // Phase B of harness-v2.2: latch the cumulative
@@ -305,62 +239,7 @@ pub(super) fn check_termination_conditions(
         tools.side_messages,
     );
 
-    if should_stop {
-        return true;
-    }
-
-    if tools.is_stalled {
-        // Phase 6 of agent-stuck-and-reset: the loop used to bail
-        // silently on stall (only `state.result.stalled = true` was
-        // set, and the `AgentLoopEvent::Error { code: "stall_detected",
-        // recoverable: false }` event happened to be emitted but with
-        // a code aura-os didn't classify as a stall). Promote to the
-        // canonical `agent_stalled` code with `recoverable: true` so
-        // the aura-os SSE remap surfaces it as a structured terminal
-        // error instead of a generic "stream dropped", and the
-        // client-side stuck-stream watchdog can render Stop / Retry /
-        // Report. The {N} substitution is `STALL_STREAK_THRESHOLD`
-        // (the only streak that can land here today) — exposing it in
-        // the message keeps the wording aligned with the policy
-        // constant if it ever changes.
-        let msg = format!(
-            "Agent loop made no forward progress for {} iterations \
-             (write target unchanged). Stopping so the chat can \
-             intervene; retry with a different approach or report \
-             the issue.",
-            crate::constants::STALL_STREAK_THRESHOLD,
-        );
-        emit_stop_error_with_recoverability(event_tx, state, "agent_stalled", &msg, true);
-        return true;
-    }
-
-    if state.counters.consecutive_empty_path_block_iterations
-        >= crate::constants::EMPTY_PATH_BLOCK_LIMIT
-    {
-        let msg = format!(
-            "CRITICAL: Agent emitted pathless `write_file`/`edit_file` \
-             calls for {} consecutive iterations. The `path` argument is \
-             required; retrying without one cannot recover. Stopping so \
-             the dev loop can retry with a fresh plan.",
-            state.counters.consecutive_empty_path_block_iterations
-        );
-        emit_stop_error(event_tx, state, "empty_path_blocks", &msg);
-        return true;
-    }
-
-    if state.counters.consecutive_all_error_iterations
-        >= crate::constants::CONSECUTIVE_ERROR_ITERATIONS_LIMIT
-    {
-        let msg = format!(
-            "CRITICAL: All tool calls have returned errors for {} consecutive iterations. \
-             The agent appears stuck. Stopping to prevent waste.",
-            state.counters.consecutive_all_error_iterations
-        );
-        emit_stop_error(event_tx, state, "consecutive_errors", &msg);
-        return true;
-    }
-
-    false
+    should_stop
 }
 
 fn extract_tool_calls(response: &ModelResponse) -> Vec<ToolCallInfo> {

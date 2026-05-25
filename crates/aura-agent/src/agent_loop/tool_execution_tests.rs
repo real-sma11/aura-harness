@@ -7,10 +7,8 @@ use crate::types::ToolCallResult;
 
 use super::search_cache::normalized_search_key;
 use super::tool_execution::{
-    check_termination_conditions, push_tool_result_message_with_context, split_cached,
-    truncate_preview, update_cache, ExecutedTools,
+    push_tool_result_message_with_context, split_cached, truncate_preview, update_cache,
 };
-use super::{AgentLoopConfig, LoopState};
 
 #[test]
 fn tool_results_are_emitted_before_context_texts() {
@@ -289,43 +287,5 @@ fn truncate_preview_uses_ascii_marker() {
     let preview = truncate_preview("abcdef", 3);
     assert_eq!(preview, "abc...");
     assert!(!preview.contains('\u{2026}'));
-}
-
-#[test]
-fn placeholder_rejection_does_not_trip_consecutive_errors_limit() {
-    let config = AgentLoopConfig::default();
-    let mut state = LoopState::new(&config, Vec::new());
-    state.counters.consecutive_all_error_iterations =
-        crate::constants::CONSECUTIVE_ERROR_ITERATIONS_LIMIT - 1;
-
-    let tools = ExecutedTools {
-        tool_calls: vec![ToolCallInfo {
-            id: "tool_redacted".to_string(),
-            name: "write_file".to_string(),
-            input: serde_json::json!({
-                "path": "src/lib.rs",
-                "_redacted": {
-                    "kind": "aura_compaction_redaction",
-                    "field": "content",
-                    "bytes": 42
-                }
-            }),
-        }],
-        all_results: vec![ToolCallResult::compaction_structural(
-            "tool_redacted",
-            "content is an elided history placeholder; supply the real file content",
-        )],
-        side_messages: Vec::new(),
-        is_stalled: false,
-        blocked_ids: Default::default(),
-        cached_ids: Default::default(),
-        saw_empty_path_block: false,
-    };
-
-    let stopped = check_termination_conditions(None, &mut state, tools);
-
-    assert!(!stopped);
-    assert_eq!(state.counters.consecutive_all_error_iterations, 0);
-    assert_eq!(state.messages.len(), 1);
 }
 

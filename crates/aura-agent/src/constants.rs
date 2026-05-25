@@ -76,43 +76,6 @@ pub const THINKING_MIN_BUDGET: u32 = 6144;
 /// returns `None` for that one turn.
 pub const THINKING_AUTO_ENABLE_THRESHOLD: u32 = 2048;
 
-/// Maximum full reads of the same file before blocking.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05): re-reading the same file is a cache hit for
-/// negligible tokens, not a behavioral failure mode worth
-/// gating on.
-pub const MAX_READS_PER_FILE: usize = usize::MAX;
-
-/// Maximum range reads of the same file before blocking.
-///
-/// Neutralized to `usize::MAX`. Same rationale as
-/// [`MAX_READS_PER_FILE`].
-pub const MAX_RANGE_READS_PER_FILE: usize = usize::MAX;
-
-/// Consecutive command failures before blocking all commands.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05). Commands either fail because the model needs to
-/// try a different approach (which it can decide on its own) or
-/// because the build is genuinely broken (the optional
-/// `validate_build_preflight` gate handles that).
-pub const CMD_FAILURE_BLOCK_THRESHOLD: usize = usize::MAX;
-
-/// Consecutive write failures on a single file before blocking writes to it.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05).
-pub const WRITE_FAILURE_BLOCK_THRESHOLD: usize = usize::MAX;
-
-/// Stall detection: identical write targets for this many iterations triggers fail-fast.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05). The streak detector remains compiled but cannot
-/// fire; the natural terminators (`EndTurn`, credit budget,
-/// cancellation) cover the cases this used to catch.
-pub const STALL_STREAK_THRESHOLD: usize = usize::MAX;
-
 /// Budget warning at 30% utilization.
 pub const BUDGET_WARNING_30: f64 = 0.30;
 
@@ -140,13 +103,6 @@ pub const COMPACTION_TIER_30: f64 = 0.30;
 /// Micro compaction tier threshold.
 pub const COMPACTION_TIER_MICRO: f64 = 0.15;
 
-/// Write file cooldown in iterations after a write failure.
-///
-/// Neutralized to `0` by the cook-loop-fix strip (2026-05): the
-/// cooldown no longer schedules any wait, so the cooldown-block
-/// detector is a no-op.
-pub const WRITE_COOLDOWN_ITERATIONS: usize = 0;
-
 /// Tools classified as exploration (read-only, non-modifying).
 pub const EXPLORATION_TOOLS: &[&str] = &[
     "read_file",
@@ -168,20 +124,6 @@ pub const WRITE_TOOLS: &[&str] =
 
 /// Tools that run commands.
 pub const COMMAND_TOOLS: &[&str] = &["run_command"];
-
-/// Consecutive iterations where every tool call errors before forcing a stop.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05).
-pub const CONSECUTIVE_ERROR_ITERATIONS_LIMIT: usize = usize::MAX;
-
-/// Consecutive iterations containing at least one pathless
-/// `write_file` / `edit_file` / `delete_file` block before forcing a
-/// stop.
-///
-/// Neutralized to `usize::MAX` by the cook-loop-fix strip
-/// (2026-05). The detector remains compiled but cannot fire.
-pub const EMPTY_PATH_BLOCK_LIMIT: usize = usize::MAX;
 
 // ---------------------------------------------------------------------------
 // Write-side chunk guard

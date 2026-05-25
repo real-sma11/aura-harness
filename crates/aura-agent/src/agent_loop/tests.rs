@@ -548,13 +548,14 @@ async fn test_agent_loop_handles_summary_compaction() {
 // phase_reset_signal + LoopState::begin_iteration tests
 // ------------------------------------------------------------------
 
-/// The plan's headline regression check: drive `blocking_ctx`
-/// exploration up, flip the shared `Arc<AtomicBool>`, run one
-/// `begin_iteration` tick, then assert (a) the exploration counter is
-/// zero, and (b) `ReadGuardState` is empty. The implement-phase
-/// allowance bonus was deleted along with `exploration_allowance`
-/// (the hard cap was already neutralized to `usize::MAX`), so the
-/// reset is now purely a counter clear.
+/// The reset signal handshake: drive the exploration counter up,
+/// flip the shared `Arc<AtomicBool>`, run one `begin_iteration`
+/// tick, then assert the exploration counter is cleared. The
+/// `ReadGuardState` / `BlockingContext` resets that used to be
+/// exercised here were removed along with the dead detector
+/// modules (cook-loop-fix follow-up, 2026-05) — the reset is now
+/// purely an exploration-counter clear plus
+/// `exploration_compaction_done` rearm.
 #[test]
 fn phase_reset_clears_exploration_budget() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -567,41 +568,23 @@ fn phase_reset_clears_exploration_budget() {
     };
     let mut state = super::LoopState::new(&config, vec![]);
 
-    state.blocking_ctx.exploration_count = 40;
     state.exploration_state.count = 40;
-    state.read_guard.record_full_read("foo.rs");
-    state.read_guard.record_full_read("foo.rs");
-    state.read_guard.record_range_read("bar.rs");
     state.exploration_compaction_done = true;
-
-    state
-        .blocking_ctx
-        .written_paths
-        .insert("written.rs".into());
 
     signal.store(true, Ordering::Release);
 
     state.begin_iteration(&config, 5);
 
-    assert_eq!(state.blocking_ctx.exploration_count, 0);
     assert_eq!(state.exploration_state.count, 0);
-
-    assert_eq!(state.read_guard.full_read_count("foo.rs"), 0);
-    assert_eq!(state.read_guard.range_read_count("bar.rs"), 0);
-
     assert!(!state.exploration_compaction_done);
     assert!(
         !signal.load(Ordering::Acquire),
         "signal must be consumed by begin_iteration"
     );
-    assert!(
-        state.blocking_ctx.written_paths.contains("written.rs"),
-        "written_paths must be preserved across signal reset"
-    );
 }
 
 /// Companion: when the signal is wired but not flipped, the reset
-/// branch must not fire — the loop's normal counters keep ticking.
+/// branch must not fire — the exploration counter keeps ticking.
 #[test]
 fn begin_iteration_does_not_reset_when_signal_unset() {
     use std::sync::atomic::AtomicBool;
@@ -613,12 +596,10 @@ fn begin_iteration_does_not_reset_when_signal_unset() {
         ..AgentLoopConfig::default()
     };
     let mut state = super::LoopState::new(&config, vec![]);
-    state.blocking_ctx.exploration_count = 10;
     state.exploration_state.count = 10;
 
     state.begin_iteration(&config, 5);
 
-    assert_eq!(state.blocking_ctx.exploration_count, 10);
     assert_eq!(state.exploration_state.count, 10);
 }
 
@@ -631,11 +612,11 @@ fn begin_iteration_no_op_when_no_signal_configured() {
         ..AgentLoopConfig::default()
     };
     let mut state = super::LoopState::new(&config, vec![]);
-    state.blocking_ctx.exploration_count = 40;
+    state.exploration_state.count = 40;
 
     state.begin_iteration(&config, 5);
 
-    assert_eq!(state.blocking_ctx.exploration_count, 40);
+    assert_eq!(state.exploration_state.count, 40);
 }
 
 /// Sanity: with the read-only / force-tool steering removed by the
@@ -658,38 +639,6 @@ fn build_request_always_emits_tool_choice_auto() {
         matches!(request.tool_choice, ToolChoice::Auto),
         "tool_choice must always be Auto after the cook-loop-fix strip; got {:?}",
         request.tool_choice,
-    );
-}
-
-/// Regression guard for the submit_plan deadlock fix: the agent
-/// loop's signal observer must flip `BlockingContext::plan_submitted`
-/// in addition to resetting the counters, so downstream telemetry
-/// keeps observing the implement-phase transition. The exploration
-/// hard block that this latch used to gate has since been removed
-/// along with `exploration_allowance` threading, but the latch
-/// itself is preserved for handshake purposes.
-#[test]
-fn phase_reset_arms_plan_submitted_latch() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    let signal = Arc::new(AtomicBool::new(false));
-    let config = AgentLoopConfig {
-        phase_reset_signal: Some(Arc::clone(&signal)),
-        ..AgentLoopConfig::default()
-    };
-    let mut state = super::LoopState::new(&config, vec![]);
-    assert!(
-        !state.blocking_ctx.plan_submitted,
-        "latch must default to false so pre-plan exploration stays soft"
-    );
-
-    signal.store(true, Ordering::Release);
-    state.begin_iteration(&config, 1);
-
-    assert!(
-        state.blocking_ctx.plan_submitted,
-        "begin_iteration must arm the latch when it observes the reset signal"
     );
 }
 
