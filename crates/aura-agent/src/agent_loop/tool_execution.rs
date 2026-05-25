@@ -290,6 +290,33 @@ pub(super) fn check_termination_conditions(
         state.counters.consecutive_read_only_iterations += 1;
     }
 
+    // Phase B of harness-v2.2: latch the cumulative
+    // `had_any_file_write` / `task_done_completed` flags consulted by
+    // `dispatch_stop_reason` when `dev_loop_completion_required` is on.
+    //
+    // `state.had_any_write` is set by `tool_pipeline::track_tool_effects`
+    // earlier in the iteration on any successful path-carrying write
+    // tool. Mirroring it here keeps the two flags in lockstep without
+    // duplicating the write-detection logic. Phase E (apply_patch)
+    // will add its own progress hook in the same place.
+    if state.had_any_write {
+        state.had_any_file_write = true;
+    }
+    // We derive `task_done_completed` from `stop_loop` on a `task_done`
+    // tool call instead of plumbing `LoopState` into the executor's
+    // `handle_task_done`. `stop_loop = true` + `is_error = false` is
+    // already the handler's "all DoD gates passed" handshake; reading
+    // it here keeps the handler signature small and avoids touching
+    // every non-dev-loop caller of `handle_task_done`.
+    let task_done_success = tools.tool_calls.iter().any(|tc| tc.name == "task_done")
+        && tools
+            .all_results
+            .iter()
+            .any(|r| !r.is_error && r.stop_loop);
+    if task_done_success {
+        state.task_done_completed = true;
+    }
+
     push_tool_result_message_with_context(
         &mut state.messages,
         tools.all_results,

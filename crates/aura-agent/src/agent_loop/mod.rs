@@ -197,21 +197,30 @@ pub struct AgentLoopConfig {
     /// `read_file`. Default `false` for chat / generic callers
     /// where deliberation on the first turn is desirable.
     pub disable_thinking_iteration_0: bool,
-    /// Intercept premature `EndTurn` when the model has done read-only
-    /// tool calls without writing.
+    /// When true, this loop owns its completion contract — `EndTurn`
+    /// alone is not completion. The loop will intercept up to
+    /// [`crate::constants::END_TURN_INTERCEPT_CAP`] `EndTurn`s with
+    /// escalating force-progress messages before allowing termination.
     ///
-    /// When `true` (the policy used by [`crate::agent_runner`] for
-    /// dev-loop tasks), an `EndTurn` response while
-    /// `consecutive_read_only_iterations > 0` injects a FORCE-PROGRESS
-    /// user message and continues the loop instead of breaking. The
-    /// counter is bumped to [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`]
-    /// so the next iteration triggers Phase 2's `tool_choice` override
-    /// and further EndTurn intercepts stop firing — one intercept per
-    /// stuck point, never an infinite loop.
+    /// Set `true` by [`crate::agent_runner`] for dev-loop tasks. The
+    /// dispatch path checks [`LoopState::had_any_file_write`] and
+    /// [`LoopState::task_done_completed`] — if neither has fired,
+    /// `dispatch_stop_reason` injects an escalating nudge instead of
+    /// breaking the loop:
+    ///   - attempt 1: polite reminder to write or call `task_done`,
+    ///   - attempt 2: + disable extended thinking for next turn,
+    ///   - attempt 3: + bump
+    ///     [`IterCounters::consecutive_read_only_iterations`] to
+    ///     [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`] so the
+    ///     next iteration triggers Phase 2's `tool_choice = Required`.
+    ///
+    /// After the cap, the loop exits cleanly and post-hoc validation
+    /// (`validate_execution`) catches the empty-write outcome so the
+    /// decomposition path takes over.
     ///
     /// Default `false` for chat / generic callers where `EndTurn`
     /// after a read or two is the legitimate end of the turn.
-    pub intercept_premature_end_turn: bool,
+    pub dev_loop_completion_required: bool,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -268,7 +277,7 @@ impl Default for AgentLoopConfig {
             subagents_chars: 0,
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
-            intercept_premature_end_turn: false,
+            dev_loop_completion_required: false,
         }
     }
 }
@@ -609,19 +618,25 @@ impl AgentLoop {
     /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
     ///
     /// `EndTurn` / `StopSequence` normally terminate the loop. When
-    /// [`AgentLoopConfig::intercept_premature_end_turn`] is enabled
-    /// (dev-loop policy) AND the model has been doing read-only tool
-    /// calls without writing (Phase 2's
-    /// `consecutive_read_only_iterations > 0`), premature end_turn
-    /// would silently abandon the task and surface downstream as
-    /// `NeedsDecomposition (failed_paths=0)`. Inject a FORCE-PROGRESS
-    /// steering message, bump the counter to
-    /// [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`] so the
-    /// next iteration triggers Phase 2's `tool_choice` override, and
-    /// continue the loop. The bump also disables further EndTurn
-    /// intercepts in this run (the `< THRESHOLD` guard fails), so the
-    /// intercept fires exactly once per stuck point. Chat / generic
-    /// callers leave the flag `false` and keep the old behavior.
+    /// [`AgentLoopConfig::dev_loop_completion_required`] is enabled
+    /// (dev-loop policy), the loop owns its completion contract:
+    /// `EndTurn` alone is not completion. While neither
+    /// [`LoopState::had_any_file_write`] nor
+    /// [`LoopState::task_done_completed`] has fired, the loop will
+    /// intercept up to [`crate::constants::END_TURN_INTERCEPT_CAP`]
+    /// `EndTurn`s with escalating force-progress nudges:
+    ///   - attempt 1: polite reminder,
+    ///   - attempt 2: + clamp extended thinking for the next iteration,
+    ///   - attempt 3: + bump
+    ///     [`IterCounters::consecutive_read_only_iterations`] to
+    ///     [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`] so the
+    ///     next iteration triggers Phase 2's `tool_choice = Required`.
+    ///
+    /// After the cap is hit the loop exits cleanly and post-hoc
+    /// validation (`validate_execution`) catches the empty-write
+    /// outcome so the decomposition path takes over. Chat / generic
+    /// callers leave the flag `false` and keep the immediate-exit
+    /// behavior.
     async fn dispatch_stop_reason(
         &self,
         response: &aura_reasoner::ModelResponse,
@@ -631,26 +646,31 @@ impl AgentLoop {
     ) -> bool {
         match response.stop_reason {
             StopReason::EndTurn | StopReason::StopSequence => {
-                let counter = state.counters.consecutive_read_only_iterations;
-                if self.config.intercept_premature_end_turn
-                    && counter > 0
-                    && counter < crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD
+                if self.config.dev_loop_completion_required
+                    && !state.had_any_file_write
+                    && !state.task_done_completed
+                    && state.counters.endturn_intercept_count
+                        < crate::constants::END_TURN_INTERCEPT_CAP
                 {
-                    let msg = format!(
-                        "FORCE-PROGRESS: You returned end_turn after {counter} read-only \
-                         iterations without producing any file changes or calling task_done. \
-                         Your next turn MUST be write_file / edit_file / delete_file with a \
-                         real path, or task_done (use no_changes_needed: true if exploration \
-                         shows no change is required)."
-                    );
+                    state.counters.endturn_intercept_count += 1;
+                    let attempt = state.counters.endturn_intercept_count;
+                    let msg = build_progress_demand(attempt);
                     info!(
-                        consecutive_read_only_iterations = counter,
-                        "intercepting premature end_turn; injecting force-progress and continuing"
+                        attempt,
+                        "dev_loop_completion_required: intercepting EndTurn before any write or task_done"
                     );
                     crate::helpers::append_warning(&mut state.messages, &msg);
                     streaming::emit(event_tx, AgentLoopEvent::Warning(msg));
-                    state.counters.consecutive_read_only_iterations =
-                        crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD;
+                    if attempt >= 2 {
+                        state.thinking.disable_thinking_this_iteration = true;
+                    }
+                    if attempt >= 3 {
+                        // Trigger Phase 2's `tool_choice = Required` path
+                        // on the next iteration by saturating the
+                        // read-only counter at the force threshold.
+                        state.counters.consecutive_read_only_iterations =
+                            crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD;
+                    }
                     return false;
                 }
                 true
@@ -711,6 +731,36 @@ impl AgentLoop {
         }
 
         Err(iteration::LlmCallError::PromptTooLong(last_error))
+    }
+}
+
+/// Build the escalating force-progress nudge for the
+/// [`AgentLoopConfig::dev_loop_completion_required`] EndTurn intercept.
+///
+/// Three severity tiers, gated on [`IterCounters::endturn_intercept_count`]:
+///   1 = polite reminder,
+///   2 = clamp warning (extended thinking is being disabled next turn),
+///   3 = forced-tool warning (next turn forces a tool call; any further
+///       EndTurn after this exits the loop and fails the task).
+///
+/// Phase E of harness-v2.2 will swap `write_file / edit_file / delete_file`
+/// for `apply_patch` in these messages; until then the granular tools
+/// remain the dev-loop write surface.
+fn build_progress_demand(attempt: usize) -> String {
+    match attempt {
+        1 => "You ended your turn without writing any files or calling task_done. \
+              The dev-loop requires either a file write or task_done before completion. \
+              Your next response MUST contain exactly one tool call."
+            .to_string(),
+        2 => "Second EndTurn without progress. Extended thinking is now disabled for \
+              the next turn. Your next response MUST be a single tool call: write_file / \
+              edit_file / delete_file with a real path, or task_done (use \
+              no_changes_needed: true if exploration shows no change is required)."
+            .to_string(),
+        _ => "Third EndTurn without progress. The next turn will FORCE a tool call. \
+              Choose one: write_file / edit_file / delete_file / task_done. Any further \
+              EndTurn after this will exit the loop and fail the task."
+            .to_string(),
     }
 }
 
@@ -814,6 +864,14 @@ pub(crate) struct IterCounters {
     ///   `tool_choice = Required` and disable extended thinking for
     ///   the next turn so the model cannot defer to more deliberation.
     pub(crate) consecutive_read_only_iterations: usize,
+    /// How many times `dispatch_stop_reason` has intercepted an
+    /// `EndTurn` in this run while
+    /// [`AgentLoopConfig::dev_loop_completion_required`] is `true`.
+    /// Capped at [`crate::constants::END_TURN_INTERCEPT_CAP`]; after
+    /// the cap the loop exits and post-hoc validation catches the
+    /// empty-write outcome. Zero on construction, never reset within
+    /// a run.
+    pub(crate) endturn_intercept_count: usize,
 }
 
 /// Mutable state carried across iterations of the agent loop.
@@ -826,6 +884,28 @@ pub struct LoopState {
     pub(crate) stall_detector: StallDetector,
     pub(crate) budget_state: BudgetState,
     pub(crate) had_any_write: bool,
+    /// Set true the first iteration whose tool results contain any
+    /// `FileOp` (any successful `write_file` / `edit_file` /
+    /// `delete_file`, or — Phase E — `apply_patch`). Cumulative across
+    /// the run — never reset. Gates the
+    /// [`AgentLoopConfig::dev_loop_completion_required`] `EndTurn`
+    /// intercept: once a write has happened, `EndTurn` is allowed to
+    /// terminate the loop cleanly.
+    pub(crate) had_any_file_write: bool,
+    /// Set true when `handle_task_done` successfully returns
+    /// `stop_loop = true` (i.e. all DoD gates passed). Cumulative
+    /// across the run — never reset. Like `had_any_file_write`, this
+    /// short-circuits the dev-loop EndTurn intercept so a clean
+    /// `task_done` completion is never re-nudged.
+    ///
+    /// Wired in `tool_execution::check_termination_conditions` by
+    /// observing a non-error tool result whose source tool is
+    /// `task_done` and whose `stop_loop` flag is set. We deliberately
+    /// avoid plumbing `LoopState` into `handle_task_done` itself — the
+    /// stop-loop flag is a one-bit handshake that already crosses the
+    /// task-executor boundary, so reading it on the loop side keeps
+    /// the handler signature small.
+    pub(crate) task_done_completed: bool,
     pub(crate) checkpoint_emitted: bool,
     pub(crate) exploration_compaction_done: bool,
     pub(crate) build_cooldown: usize,
@@ -847,6 +927,8 @@ impl LoopState {
             stall_detector: StallDetector::default(),
             budget_state: BudgetState::default(),
             had_any_write: false,
+            had_any_file_write: false,
+            task_done_completed: false,
             checkpoint_emitted: false,
             exploration_compaction_done: false,
             build_cooldown: 0,
@@ -868,6 +950,7 @@ impl LoopState {
                 consecutive_narration_tokens: 0,
                 last_turn_had_tool_call: true,
                 consecutive_read_only_iterations: 0,
+                endturn_intercept_count: 0,
             },
         }
     }
@@ -951,6 +1034,21 @@ impl LoopState {
         if self.counters.consecutive_read_only_iterations
             >= crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD
         {
+            self.thinking.disable_thinking_this_iteration = true;
+        }
+
+        // Phase B of harness-v2.2: the attempt-2 EndTurn intercept
+        // nudge promises "extended thinking is now disabled for the
+        // next turn". `dispatch_stop_reason` runs at the END of an
+        // iteration, so the flag it sets gets cleared at the top of
+        // the next `begin_iteration`. Re-arm here based on the
+        // sticky [`IterCounters::endturn_intercept_count`] so the
+        // message and the actual outbound request stay in sync.
+        // Attempt 3 piggybacks on the read-only force-tool path
+        // above (it bumps `consecutive_read_only_iterations` to the
+        // force threshold), so this branch only has to cover the
+        // attempt-2 case explicitly.
+        if self.counters.endturn_intercept_count >= 2 {
             self.thinking.disable_thinking_this_iteration = true;
         }
 

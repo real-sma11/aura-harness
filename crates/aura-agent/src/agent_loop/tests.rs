@@ -2,8 +2,8 @@
 
 use aura_reasoner::{
     ContentBlock, Message, MockProvider, MockResponse, ModelProvider, ModelRequest,
-    ModelRequestKind, ModelResponse, ProviderTrace, ReasonerError, StopReason, ToolDefinition,
-    Usage,
+    ModelRequestKind, ModelResponse, ProviderTrace, ReasonerError, Role, StopReason,
+    ToolDefinition, Usage,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -853,74 +853,103 @@ fn phase_reset_arms_plan_submitted_latch() {
     );
 }
 
+/// Recording mock provider used by the Phase B dev-loop completion
+/// tests. Returns each configured response in sequence (falling back
+/// to a default EndTurn after the configured list is drained, like
+/// `MockProvider`) and records the `max_tokens` of every request so
+/// tests can prove that thinking-disable kicked in on the right
+/// iterations.
+struct RecordingMockProvider {
+    responses: Mutex<Vec<MockResponse>>,
+    max_tokens_seen: Mutex<Vec<u32>>,
+}
+
+impl RecordingMockProvider {
+    fn new(responses: Vec<MockResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses),
+            max_tokens_seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn max_tokens(&self) -> Vec<u32> {
+        self.max_tokens_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for RecordingMockProvider {
+    fn name(&self) -> &'static str {
+        "recording-mock"
+    }
+
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ReasonerError> {
+        self.max_tokens_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.max_tokens.get());
+        let response = {
+            let mut responses = self
+                .responses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if responses.is_empty() {
+                MockResponse {
+                    stop_reason: StopReason::EndTurn,
+                    content: vec![ContentBlock::text("default")],
+                    usage: Usage::new(50, 10),
+                }
+            } else {
+                responses.remove(0)
+            }
+        };
+        Ok(ModelResponse::new(
+            response.stop_reason,
+            Message::new(Role::Assistant, response.content),
+            response.usage,
+            ProviderTrace::new("recording-mock", 0),
+        ))
+    }
+
+    async fn health_check(&self) -> bool {
+        true
+    }
+}
+
 #[tokio::test]
-async fn premature_end_turn_after_reads_injects_force_progress_and_continues() {
-    // Regression test for harness-v2.1 EndTurn intercept.
+async fn dev_loop_endturn_with_no_writes_continues_until_intercept_cap() {
+    // Phase B of harness-v2.2 — replaces the v2.1 one-shot
+    // EndTurn intercept band-aid with the structural rule below.
     //
-    // Before the fix: dispatch_stop_reason returned `true` on EndTurn
-    // regardless of state, so a model that did a read then returned
-    // text-only would terminate the loop with file_ops empty, which
-    // validate_execution downstream surfaces as
-    // "task reached implementation phase but no file operations
-    // completed -- needs decomposition (failed_paths=0)".
+    // Pinned sequence for a dev-loop task that never writes:
+    //   Iter 0: EndTurn -> intercept #1 (polite reminder)
+    //   Iter 1: EndTurn -> intercept #2 (clamp thinking next turn)
+    //   Iter 2: EndTurn -> intercept #3 (force tool_choice next turn)
+    //   Iter 3: EndTurn -> cap reached, loop exits cleanly
     //
-    // After the fix: when the model end_turn's after read-only tool
-    // calls, the loop injects a FORCE-PROGRESS user message and runs
-    // another iteration so Phase 2's existing thresholds (or a
-    // subsequent intercept) can drive the model to write.
-    //
-    // Pinned sequence:
-    //   Iter 0: read_file (ToolUse)        -> counter -> 1
-    //   Iter 1: text only (EndTurn)        -> INTERCEPT fires, counter -> 2
-    //   Iter 2: write_file (ToolUse)       -> counter -> 0
-    //   Iter 3: text only (EndTurn)        -> counter==0, exits normally
-    let executor = MockExecutor {
-        results: vec![
-            ToolCallResult::success("call_read", "fn foo() {}"),
-            ToolCallResult::success("call_write", "wrote 12 bytes"),
-        ],
-    };
+    // post-hoc `validate_execution` then catches the empty-write
+    // outcome — that part lives outside this test.
+    let executor = MockExecutor { results: vec![] };
 
-    let read_response = MockResponse {
-        stop_reason: StopReason::ToolUse,
-        content: vec![ContentBlock::tool_use(
-            "call_read",
-            "read_file",
-            serde_json::json!({"path": "src/lib.rs"}),
-        )],
-        usage: Usage::new(100, 20),
-    };
-    let premature_end_turn = MockResponse {
+    let endturn = |text: &str, usage_out: u64| MockResponse {
         stop_reason: StopReason::EndTurn,
-        content: vec![ContentBlock::text(
-            "I've read enough. I think the task is already implemented.",
-        )],
-        usage: Usage::new(150, 30),
+        content: vec![ContentBlock::text(text)],
+        usage: Usage::new(100, usage_out),
     };
-    let write_response = MockResponse {
-        stop_reason: StopReason::ToolUse,
-        content: vec![ContentBlock::tool_use(
-            "call_write",
-            "write_file",
-            serde_json::json!({"path": "src/new.rs", "content": "pub fn bar() {}"}),
-        )],
-        usage: Usage::new(200, 40),
-    };
-    let final_end_turn = MockResponse {
-        stop_reason: StopReason::EndTurn,
-        content: vec![ContentBlock::text("Done.")],
-        usage: Usage::new(250, 10),
-    };
-
-    let provider = MockProvider::new()
-        .with_response(read_response)
-        .with_response(premature_end_turn)
-        .with_response(write_response)
-        .with_response(final_end_turn);
+    let responses = vec![
+        endturn("I'm thinking about the task.", 20),
+        endturn("Still considering my approach.", 25),
+        endturn("Almost there, just need to plan.", 30),
+        endturn("OK, no concrete write yet.", 35),
+    ];
+    let provider = RecordingMockProvider::new(responses);
 
     let config = AgentLoopConfig {
         system_prompt: "test".to_string(),
-        intercept_premature_end_turn: true,
+        dev_loop_completion_required: true,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);
@@ -945,25 +974,316 @@ async fn premature_end_turn_after_reads_injects_force_progress_and_continues() {
         .unwrap();
 
     assert_eq!(
-        result.iterations, 4,
-        "loop must run through the intercept and the subsequent write before exiting; \
-         pre-fix this would have been 2"
+        result.iterations,
+        crate::constants::END_TURN_INTERCEPT_CAP + 1,
+        "dev-loop EndTurn intercept must fire exactly END_TURN_INTERCEPT_CAP times \
+         before the loop is allowed to exit; pre-Phase-B this was 1 (v2.1 band-aid \
+         only fired once and then exited)"
     );
 
-    // Drain the event stream and confirm the FORCE-PROGRESS warning
-    // was emitted on the EndTurn intercept.
-    let mut saw_intercept_warning = false;
+    // No write tool ever ran, so the run's recorded file_changes must
+    // be empty. This indirectly pins `had_any_file_write == false`
+    // (the latch reads from `state.had_any_write`, which only flips
+    // on a successful path-carrying write).
+    assert!(
+        result.file_changes.is_empty(),
+        "no write tool was called, so the result must carry no file changes"
+    );
+
+    // Drain warnings emitted via the event stream and confirm we saw
+    // exactly three force-progress nudges with the attempt-1 / -2 / -3
+    // wording. The order they arrive in the channel matches the
+    // dispatch order at the end of iterations 0, 1, 2.
+    let mut warnings = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if let AgentLoopEvent::Warning(msg) = event {
-            if msg.contains("FORCE-PROGRESS: You returned end_turn") {
-                saw_intercept_warning = true;
-                break;
+            // Only collect the intercept nudges, not other warnings
+            // (e.g. budget-related) that might land in this channel.
+            if msg.contains("EndTurn")
+                || msg.contains("ended your turn")
+                || msg.contains("Choose one")
+            {
+                warnings.push(msg);
             }
         }
     }
-    assert!(
-        saw_intercept_warning,
-        "intercept must emit the FORCE-PROGRESS warning so transcripts and Phase 2 \
-         observability stay in sync"
+    assert_eq!(
+        warnings.len(),
+        crate::constants::END_TURN_INTERCEPT_CAP,
+        "exactly END_TURN_INTERCEPT_CAP intercept warnings must be emitted on the \
+         event stream so transcripts surface the escalation; got: {warnings:?}"
     );
+    assert!(
+        warnings[0].contains("Your next response MUST contain exactly one tool call"),
+        "attempt-1 must be the polite reminder; got: {}",
+        warnings[0]
+    );
+    assert!(
+        warnings[1].contains("Extended thinking is now disabled"),
+        "attempt-2 must clamp thinking; got: {}",
+        warnings[1]
+    );
+    assert!(
+        warnings[2].contains("Third EndTurn") && warnings[2].contains("FORCE a tool call"),
+        "attempt-3 must escalate to forced tool choice; got: {}",
+        warnings[2]
+    );
+
+    // The same three nudges must also be appended into the message
+    // history (so the model actually sees them on the next request).
+    let messages_text: String = result
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages_text.contains("ended your turn without writing any files"),
+        "attempt-1 nudge must be in the message history: {messages_text}"
+    );
+    assert!(
+        messages_text.contains("Second EndTurn without progress"),
+        "attempt-2 nudge must be in the message history"
+    );
+    assert!(
+        messages_text.contains("Third EndTurn without progress"),
+        "attempt-3 nudge must be in the message history"
+    );
+
+    // Thinking must be enabled on iters 0 and 1, then clamped from
+    // iter 2 onward (the attempt-2 nudge promises it for the NEXT
+    // turn, which is iter 2). `build_request` clamps `max_tokens` to
+    // `THINKING_AUTO_ENABLE_THRESHOLD` (2048) when disabling thinking
+    // and otherwise lets it sit at the full thinking budget.
+    let observed = provider.max_tokens();
+    assert_eq!(
+        observed.len(),
+        4,
+        "RecordingMockProvider must see exactly 4 requests; got {observed:?}"
+    );
+    assert!(
+        observed[0] > crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        "iter 0 must run with thinking enabled (max_tokens > {}, got {})",
+        crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        observed[0]
+    );
+    assert!(
+        observed[1] > crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        "iter 1 must still run with thinking enabled (max_tokens > {}, got {})",
+        crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        observed[1]
+    );
+    assert!(
+        observed[2] <= crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        "iter 2 must run with thinking disabled per the attempt-2 nudge \
+         (max_tokens <= {}, got {})",
+        crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        observed[2]
+    );
+    assert!(
+        observed[3] <= crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        "iter 3 must keep thinking disabled per the attempt-3 nudge \
+         (max_tokens <= {}, got {})",
+        crate::constants::THINKING_AUTO_ENABLE_THRESHOLD,
+        observed[3]
+    );
+}
+
+#[tokio::test]
+async fn dev_loop_endturn_after_write_terminates_cleanly() {
+    // Once any file write lands, `dev_loop_completion_required`
+    // must allow EndTurn to terminate the loop on its own — no
+    // intercept, no escalation.
+    //
+    //   Iter 0: write_file (ToolUse, success)   -> had_any_file_write=true
+    //   Iter 1: text only  (EndTurn)            -> exits cleanly
+    let executor = MockExecutor {
+        results: vec![ToolCallResult::success("call_write", "wrote 12 bytes")],
+    };
+
+    let provider = MockProvider::new()
+        .with_response(MockResponse {
+            stop_reason: StopReason::ToolUse,
+            content: vec![ContentBlock::tool_use(
+                "call_write",
+                "write_file",
+                serde_json::json!({"path": "src/new.rs", "content": "pub fn bar() {}"}),
+            )],
+            usage: Usage::new(100, 20),
+        })
+        .with_response(MockResponse {
+            stop_reason: StopReason::EndTurn,
+            content: vec![ContentBlock::text("Done.")],
+            usage: Usage::new(150, 10),
+        });
+
+    let config = AgentLoopConfig {
+        system_prompt: "test".to_string(),
+        dev_loop_completion_required: true,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("implement bar")];
+    let tools = vec![ToolDefinition::new(
+        "write_file",
+        "Write a file",
+        serde_json::json!({"type": "object"}),
+    )];
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = agent
+        .run_with_events(&provider, &executor, messages, tools, Some(tx), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.iterations, 2,
+        "loop must exit on the EndTurn that follows the write; no intercept"
+    );
+    while let Ok(event) = rx.try_recv() {
+        if let AgentLoopEvent::Warning(msg) = event {
+            assert!(
+                !(msg.contains("ended your turn without writing")
+                    || msg.contains("Second EndTurn without progress")
+                    || msg.contains("Third EndTurn without progress")),
+                "no dev-loop intercept nudge may fire once a write has happened; got: {msg}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn chat_mode_endturn_terminates_immediately() {
+    // Regression guard for the Phase B chat-mode invariant: a normal
+    // chat session ("read one file, answer the question") must still
+    // exit cleanly on the first EndTurn. `dev_loop_completion_required`
+    // defaults to false; the intercept must not fire.
+    //
+    //   Iter 0: read_file (ToolUse)   -> consecutive_read_only counter -> 1
+    //   Iter 1: text only (EndTurn)   -> exits IMMEDIATELY (chat mode)
+    let executor = MockExecutor {
+        results: vec![ToolCallResult::success("call_read", "fn foo() {}")],
+    };
+
+    let provider = MockProvider::new()
+        .with_response(MockResponse {
+            stop_reason: StopReason::ToolUse,
+            content: vec![ContentBlock::tool_use(
+                "call_read",
+                "read_file",
+                serde_json::json!({"path": "src/lib.rs"}),
+            )],
+            usage: Usage::new(100, 20),
+        })
+        .with_response(MockResponse {
+            stop_reason: StopReason::EndTurn,
+            content: vec![ContentBlock::text("It's a one-line stub.")],
+            usage: Usage::new(150, 30),
+        });
+
+    let config = AgentLoopConfig {
+        system_prompt: "test".to_string(),
+        // dev_loop_completion_required defaults to false — explicit
+        // here for documentation.
+        ..AgentLoopConfig::default()
+    };
+    assert!(!config.dev_loop_completion_required);
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("what does src/lib.rs contain?")];
+    let tools = vec![ToolDefinition::new(
+        "read_file",
+        "Read a file",
+        serde_json::json!({"type": "object"}),
+    )];
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = agent
+        .run_with_events(&provider, &executor, messages, tools, Some(tx), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.iterations, 2,
+        "chat mode must exit on the EndTurn that follows the read"
+    );
+    while let Ok(event) = rx.try_recv() {
+        if let AgentLoopEvent::Warning(msg) = event {
+            assert!(
+                !(msg.contains("ended your turn without writing")
+                    || msg.contains("Second EndTurn without progress")
+                    || msg.contains("Third EndTurn without progress")),
+                "chat mode must not emit dev-loop intercept nudges; got: {msg}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dev_loop_endturn_after_task_done_terminates_cleanly() {
+    // A successful `task_done` (DoD gates passed) flips
+    // `task_done_completed = true` via the `stop_loop` handshake on
+    // the resulting tool call. Even with no write in this run, the
+    // dev-loop intercept must NOT fire — `task_done` is the
+    // explicit "no-changes-needed" escape.
+    //
+    //   Iter 0: task_done (ToolUse, stop_loop=true) -> exits via tool stop
+    let task_done_result = ToolCallResult {
+        tool_use_id: "call_done".to_string(),
+        content: r#"{"status":"completed"}"#.to_string(),
+        is_error: false,
+        kind: aura_core::ToolResultKind::Ok,
+        stop_loop: true,
+        file_changes: Vec::new(),
+    };
+    let executor = MockExecutor {
+        results: vec![task_done_result],
+    };
+
+    let provider = MockProvider::new().with_response(MockResponse {
+        stop_reason: StopReason::ToolUse,
+        content: vec![ContentBlock::tool_use(
+            "call_done",
+            "task_done",
+            serde_json::json!({"no_changes_needed": true, "notes": "nothing to change"}),
+        )],
+        usage: Usage::new(100, 20),
+    });
+
+    let config = AgentLoopConfig {
+        system_prompt: "test".to_string(),
+        dev_loop_completion_required: true,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("verify the bar is already implemented")];
+    let tools = vec![ToolDefinition::new(
+        "task_done",
+        "Signal task completion",
+        serde_json::json!({"type": "object"}),
+    )];
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = agent
+        .run_with_events(&provider, &executor, messages, tools, Some(tx), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.iterations, 1,
+        "task_done with stop_loop=true must exit on its own iteration; no intercept"
+    );
+    while let Ok(event) = rx.try_recv() {
+        if let AgentLoopEvent::Warning(msg) = event {
+            assert!(
+                !(msg.contains("ended your turn without writing")
+                    || msg.contains("Second EndTurn without progress")
+                    || msg.contains("Third EndTurn without progress")),
+                "successful task_done must not emit a dev-loop intercept nudge; got: {msg}"
+            );
+        }
+    }
 }

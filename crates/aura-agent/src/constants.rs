@@ -244,3 +244,15 @@ pub const READ_ONLY_INJECTION_THRESHOLD: usize = 4;
 /// (preferably a write). Anthropic blocks forced tool use while
 /// extended thinking is enabled, so the two flips ride together.
 pub const READ_ONLY_FORCE_TOOL_THRESHOLD: usize = 6;
+
+// ---------------------------------------------------------------------------
+// Dev-loop EndTurn completion contract (Phase B of harness-v2.2)
+// ---------------------------------------------------------------------------
+
+/// Cap on how many times `dispatch_stop_reason` may intercept a
+/// `StopReason::EndTurn` for a dev-loop task that has not yet
+/// produced a file write or called `task_done`. Each intercept escalates
+/// severity: 1 = polite reminder, 2 = clamp thinking, 3 = force tool_choice.
+/// After the cap, the loop exits and post-hoc validation
+/// (`validate_execution`) catches the empty-write outcome.
+pub const END_TURN_INTERCEPT_CAP: usize = 3;
