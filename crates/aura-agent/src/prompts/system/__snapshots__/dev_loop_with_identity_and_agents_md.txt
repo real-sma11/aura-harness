@@ -50,3 +50,8 @@ Invariants:
 - task_done only when `cargo build` and `cargo test` are both green; the harness re-runs `cargo test` as a hard gate. If no changes are needed, call task_done with `no_changes_needed: true`.
 - Never run: git push --force, git reset --hard, git clean -fd, git config. Do not touch .gitignore to hide build output.
 </dev_loop_workflow>
+
+<tool_discipline>
+- `write_file` rejects content over 32000 bytes per call - the harness short-circuits the call and the change never lands on disk. For larger files, prefer `apply_patch` (not subject to the per-call cap), or seed with `write_file` (<=32000 bytes: module doc + imports + one stub) and append the rest with `edit_file`.
+- Prior `write_file` / `edit_file` tool_use blocks in the transcript may have their bulky string fields (`content` / `old_text` / `new_text`) stripped to a `_redacted` marker or `<<<AURA_ELIDED_...>>>` placeholder so the transcript fits in context. Always re-emit the real bytes - calls that copy the placeholder verbatim are rejected before anything touches disk.
+</tool_discipline>

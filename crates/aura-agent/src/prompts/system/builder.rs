@@ -124,12 +124,14 @@ impl SystemPromptBuilder {
 
     /// Append the `<tool_discipline>` section.
     ///
-    /// PR C: no-op (the prose was deleted by the 2026-05 cook-loop
-    /// strip). The method stays on the builder so the canonical
-    /// section list mirrors the planned schema; if discipline prose
-    /// ever returns the renderer wraps it in
-    /// `<tool_discipline>...</tool_discipline>` without touching call
-    /// sites.
+    /// PR C kept this method as a slot when the renderer returned
+    /// `None`; the follow-up backfill refills the body with the
+    /// narrow set of tool-call patterns the harness still enforces
+    /// at runtime (the 32_000-byte `write_file` chunk guard and the
+    /// `_redacted` / `<<<AURA_ELIDED_…>>>` placeholder rejection on
+    /// `write_file` / `edit_file`). See
+    /// [`super::sections::tool_discipline`] for the audit trail
+    /// covering which rules were intentionally left out.
     #[must_use]
     pub fn tool_discipline(mut self) -> Self {
         if let Some(text) = tool_discipline_section::render() {

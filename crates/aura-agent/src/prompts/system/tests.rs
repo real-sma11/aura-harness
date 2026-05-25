@@ -113,21 +113,35 @@ fn agentic_prompt_promotes_no_changes_needed_in_rules() {
 }
 
 #[test]
-fn agentic_prompt_no_longer_includes_tool_call_discipline_section() {
+fn agentic_prompt_emits_tool_discipline_envelope_for_live_runtime_gates() {
     let project = test_project("/nonexistent");
     let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
+        prompt.contains("<tool_discipline>"),
+        "tool_discipline section must be live again after the backfill: {prompt}"
+    );
+    assert!(
+        prompt.contains("</tool_discipline>"),
+        "tool_discipline envelope must close: {prompt}"
+    );
+    assert!(
+        prompt.contains("32000 bytes"),
+        "tool_discipline must surface the write_file chunk cap: {prompt}"
+    );
+    assert!(
+        prompt.contains("_redacted"),
+        "tool_discipline must surface the compaction-redaction guard: {prompt}"
+    );
+    // Stripped-rule regression guards: the rules the harness no longer
+    // enforces must not reappear via the new body.
+    assert!(
         !prompt.contains("Tool-call discipline:"),
-        "tool-call discipline section was supposed to be removed: {prompt}"
+        "old plaintext header must not return: {prompt}"
     );
     assert!(
-        !prompt.contains("32000 bytes per call"),
-        "write_file chunk-guard prose was supposed to be removed: {prompt}"
-    );
-    assert!(
-        !prompt.contains("<tool_discipline>"),
-        "empty <tool_discipline> tag must not be emitted: {prompt}"
+        !prompt.contains("cargo check"),
+        "cargo subcommand denial is no longer enforced and must not return: {prompt}"
     );
 }
 
@@ -408,16 +422,13 @@ fn dev_loop_prompt_with_identity_emits_every_section_in_order() {
         "<agent_system_prompt>",
         "<project_context>",
         "<dev_loop_workflow>",
+        "<tool_discipline>",
     ] {
         assert!(
             prompt.contains(tag),
             "{tag} missing from identity-populated dev-loop prompt: {prompt}"
         );
     }
-    assert!(
-        !prompt.contains("<tool_discipline>"),
-        "<tool_discipline> stays unrendered when its renderer returns None"
-    );
 
     let order = [
         "<agent_identity>",
@@ -425,6 +436,7 @@ fn dev_loop_prompt_with_identity_emits_every_section_in_order() {
         "<agent_system_prompt>",
         "<project_context>",
         "<dev_loop_workflow>",
+        "<tool_discipline>",
     ];
     let mut last = 0usize;
     for tag in order {
