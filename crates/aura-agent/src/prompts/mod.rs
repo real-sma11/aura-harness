@@ -17,8 +17,7 @@ pub use enrichment::{
 };
 pub use fix::{build_fix_prompt_with_history, build_stub_fix_prompt, BuildFixPromptParams};
 pub use system::{
-    agentic_execution_system_prompt, build_chat_system_prompt, build_fix_system_prompt,
-    CHAT_SYSTEM_PROMPT_BASE, CONTEXT_SUMMARY_SYSTEM_PROMPT,
+    agentic_execution_system_prompt, build_chat_system_prompt, CHAT_SYSTEM_PROMPT_BASE,
 };
 pub use turn_kernel_system::default_system_prompt;
 
@@ -30,16 +29,6 @@ pub struct ProjectInfo<'a> {
     pub folder_path: &'a str,
     pub build_command: Option<&'a str>,
     pub test_command: Option<&'a str>,
-}
-
-/// Minimal agent identity descriptor.
-#[derive(Debug)]
-pub struct AgentInfo<'a> {
-    pub name: &'a str,
-    pub role: &'a str,
-    pub personality: &'a str,
-    pub system_prompt: &'a str,
-    pub skills: &'a [String],
 }
 
 /// Minimal spec descriptor.

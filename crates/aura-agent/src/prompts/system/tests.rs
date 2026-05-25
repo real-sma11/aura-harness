@@ -11,44 +11,11 @@ fn test_project(folder: &str) -> ProjectInfo<'_> {
 }
 
 #[test]
-fn fix_system_prompt_contains_json_instructions() {
-    let prompt = build_fix_system_prompt();
-    assert!(prompt.contains("valid JSON object"));
-    assert!(prompt.contains("search_replace"));
-}
-
-#[test]
 fn agentic_prompt_includes_build_command() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
     assert!(prompt.contains("cargo build"));
     assert!(prompt.contains("cargo test"));
-}
-
-#[test]
-fn agentic_prompt_includes_agent_preamble() {
-    let project = test_project("/nonexistent");
-    let skills = vec!["Rust".to_string(), "Python".to_string()];
-    let agent = AgentInfo {
-        name: "TestAgent",
-        role: "backend engineer",
-        personality: "Precise and methodical.",
-        system_prompt: "",
-        skills: &skills,
-    };
-    let prompt = agentic_execution_system_prompt(&project, Some(&agent), None);
-    assert!(prompt.contains("TestAgent"));
-    assert!(prompt.contains("backend engineer"));
-    assert!(prompt.contains("Precise and methodical."));
-    assert!(prompt.contains("Rust, Python"));
-}
-
-#[test]
-fn agentic_prompt_includes_workspace_context() {
-    let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, Some("Contains 5 crate members"));
-    assert!(prompt.contains("Workspace Context"));
-    assert!(prompt.contains("5 crate members"));
 }
 
 #[test]
@@ -59,7 +26,7 @@ fn agentic_prompt_includes_definition_of_done_hard_gate() {
     // is broken or the test suite is failing — so the assertions
     // pin the shorter rendering instead of the old section header.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
     assert!(
         prompt.contains("hard gate"),
         "task_done hard-gate language missing: {prompt}"
@@ -80,7 +47,7 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
     // agents to skip pre-existing failures, which contradicts the
     // hard gate.
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
     assert!(
         !prompt.contains("IGNORE them"),
         "system prompt still tells agent to IGNORE pre-existing failures"
@@ -98,7 +65,7 @@ fn agentic_prompt_no_longer_tells_agent_to_ignore_pre_existing_failures() {
 #[test]
 fn agentic_prompt_no_longer_advertises_exploration_budget() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(
         !prompt.contains("EXPLORATION BUDGET"),
@@ -124,7 +91,7 @@ fn agentic_prompt_no_longer_advertises_exploration_budget() {
 #[test]
 fn agentic_prompt_pins_explicit_five_step_workflow() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(prompt.contains("Workflow:"), "Workflow header missing");
     assert!(
@@ -167,7 +134,7 @@ fn agentic_prompt_pins_explicit_five_step_workflow() {
 #[test]
 fn agentic_prompt_promotes_no_changes_needed_in_rules() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(
         prompt.contains("If exploration reveals the task is already done"),
@@ -187,7 +154,7 @@ fn agentic_prompt_promotes_no_changes_needed_in_rules() {
 #[test]
 fn agentic_prompt_no_longer_includes_tool_call_discipline_section() {
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(
         !prompt.contains("Tool-call discipline:"),
@@ -227,7 +194,7 @@ fn agentic_prompt_uses_test_command_env_override_when_set() {
     std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "pytest -q -k smoke");
 
     let project = test_project("/nonexistent");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
     assert!(
         prompt.contains("pytest -q -k smoke"),
         "env override must surface in the prompt"
@@ -444,7 +411,7 @@ fn agentic_prompt_includes_agents_md_when_present() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(prompt.contains(AGENTS_MD_SECTION_HEADER));
     assert!(prompt.contains("Use raw string literals for multi-line Rust strings."));
@@ -461,7 +428,7 @@ fn agentic_prompt_omits_agents_md_when_absent() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
@@ -472,10 +439,155 @@ fn agentic_prompt_omits_agents_md_when_absent() {
 #[test]
 fn agentic_prompt_skips_agents_md_when_folder_missing() {
     let project = test_project("/definitely/does/not/exist/aura/agentic/test");
-    let prompt = agentic_execution_system_prompt(&project, None, None);
+    let prompt = agentic_execution_system_prompt(&project);
 
     assert!(
         !prompt.contains(AGENTS_MD_SECTION_HEADER),
         "non-existent folder_path must not surface an AGENTS.md section in the agentic prompt"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Golden snapshot tests
+//
+// PR A snapshot lock: capture the exact bytes produced by the dev-loop and
+// chat builders so the deletions in this PR (and the byte-identical
+// refactors in PR B) can prove they did not change the model-facing
+// payload. Snapshots live alongside this test file under
+// `__snapshots__/<name>.txt`.
+//
+// Bootstrap: run once with `UPDATE_SNAPSHOTS=1` to write the actual output
+// to disk. Subsequent runs read the file and assert byte-identical match.
+//
+// Non-determinism in the inputs (the per-test `tempfile::tempdir()` path,
+// the host platform string) is scrubbed to fixed placeholders before
+// comparison so the snapshot is stable across machines.
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_DIR: &str = "__snapshots__";
+
+fn snapshot_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/prompts/system")
+        .join(SNAPSHOT_DIR)
+        .join(format!("{name}.txt"))
+}
+
+fn assert_snapshot(name: &str, actual: &str) {
+    let path = snapshot_path(name);
+    if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create snapshot dir");
+        }
+        std::fs::write(&path, actual).expect("write snapshot");
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "snapshot {} could not be read ({err}); rerun the test with `UPDATE_SNAPSHOTS=1` to generate it",
+            path.display()
+        )
+    });
+    // Git's `core.autocrlf=true` (the default on Windows) rewrites the
+    // checked-out file with CRLF endings even though the repo stores LF.
+    // Strip them on read so the byte-for-byte assertion still passes
+    // regardless of which platform checks out the snapshot.
+    let expected_norm = expected.replace("\r\n", "\n");
+    assert_eq!(
+        expected_norm, actual,
+        "snapshot {} mismatch",
+        path.display()
+    );
+}
+
+/// Replace machine-specific paths and platform-info text with stable
+/// placeholders so the snapshot is reproducible across hosts.
+fn scrub(s: &str, dir: &str) -> String {
+    let mut out = s.replace(dir, "<TEMPDIR>");
+    let norm = dir.replace('\\', "/");
+    if norm != dir {
+        out = out.replace(&norm, "<TEMPDIR>");
+    }
+    let platform = platform_info_string();
+    out = out.replace(platform, "<PLATFORM_INFO>");
+    out
+}
+
+fn demo_project(folder: &str) -> ProjectInfo<'_> {
+    ProjectInfo {
+        name: "Demo",
+        description: "A demo project.",
+        folder_path: folder,
+        build_command: Some("cargo build"),
+        test_command: Some("cargo test"),
+    }
+}
+
+/// Save / restore the `AURA_DOD_TEST_COMMAND` env var around `f` so a
+/// concurrent test that sets it doesn't bleed into our snapshot output.
+/// Mirrors the pattern in
+/// `agentic_prompt_uses_test_command_env_override_when_set`.
+fn with_test_command_override_unset<F: FnOnce()>(f: F) {
+    let key = crate::task_executor::TEST_COMMAND_OVERRIDE_ENV;
+    let prev = std::env::var(key).ok();
+    std::env::remove_var(key);
+    f();
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+}
+
+#[test]
+fn snapshot_dev_loop_default() {
+    with_test_command_override_unset(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().to_string_lossy().into_owned();
+        let project = demo_project(&folder);
+        let prompt = agentic_execution_system_prompt(&project);
+        let scrubbed = scrub(&prompt, &folder);
+        assert_snapshot("dev_loop_default", &scrubbed);
+    });
+}
+
+#[test]
+fn snapshot_dev_loop_with_agents_md() {
+    with_test_command_override_unset(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "Always run cargo check before tests.\nNo emojis.\n",
+        )
+        .unwrap();
+        let folder = dir.path().to_string_lossy().into_owned();
+        let project = demo_project(&folder);
+        let prompt = agentic_execution_system_prompt(&project);
+        let scrubbed = scrub(&prompt, &folder);
+        assert_snapshot("dev_loop_with_agents_md", &scrubbed);
+    });
+}
+
+#[test]
+fn snapshot_chat_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().to_string_lossy().into_owned();
+    let project = demo_project(&folder);
+    let prompt = build_chat_system_prompt(&project, "");
+    let scrubbed = scrub(&prompt, &folder);
+    assert_snapshot("chat_default", &scrubbed);
+}
+
+#[test]
+fn snapshot_chat_with_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("AGENTS.md"),
+        "Always run cargo check before tests.\nNo emojis.\n",
+    )
+    .unwrap();
+    let folder = dir.path().to_string_lossy().into_owned();
+    let project = demo_project(&folder);
+    let prompt = build_chat_system_prompt(&project, "");
+    let scrubbed = scrub(&prompt, &folder);
+    assert_snapshot("chat_with_agents_md", &scrubbed);
 }

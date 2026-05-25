@@ -20,8 +20,8 @@ use crate::file_ops::FileOp;
 use crate::planning::{TaskPhase, TaskPlan};
 use crate::prompts::{
     agentic_execution_system_prompt, build_agentic_task_context, build_chat_system_prompt,
-    default_caps, extract_hints, resolve_hints, AgentInfo, FsWorkspace, ProjectInfo, SessionInfo,
-    SpecInfo, TaskInfo,
+    default_caps, extract_hints, resolve_hints, FsWorkspace, ProjectInfo, SessionInfo, SpecInfo,
+    TaskInfo,
 };
 use crate::task_context;
 use crate::task_executor::TaskToolExecutor;
@@ -132,7 +132,7 @@ pub struct AgentRunnerConfig {
 impl Default for AgentRunnerConfig {
     fn default() -> Self {
         Self {
-            max_agentic_iterations: 40,
+            max_agentic_iterations: 200,
             max_shell_task_retries: 4,
             task_execution_max_tokens: 16_384,
             // Stripped (2026-05): cut from 10_000 to 2_000.
@@ -172,7 +172,6 @@ pub struct AgenticTaskParams<'a> {
     pub spec: &'a SpecInfo<'a>,
     pub task: &'a TaskInfo<'a>,
     pub session: &'a SessionInfo<'a>,
-    pub agent: Option<&'a AgentInfo<'a>>,
     pub work_log: &'a [String],
     pub completed_deps: &'a [TaskInfo<'a>],
     pub workspace_map: &'a str,
@@ -264,13 +263,7 @@ impl AgentRunner {
             params.member_count,
         );
 
-        let workspace_info = if params.workspace_map.is_empty() {
-            None
-        } else {
-            Some(params.workspace_map)
-        };
-        let system_prompt =
-            agentic_execution_system_prompt(params.project, params.agent, workspace_info);
+        let system_prompt = agentic_execution_system_prompt(params.project);
 
         // Reuse the caller-supplied full task context bundle when
         // present (the `execute_task_tracked` path pre-builds it so

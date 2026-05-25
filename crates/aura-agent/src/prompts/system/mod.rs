@@ -1,4 +1,4 @@
-use super::{AgentInfo, ProjectInfo};
+use super::ProjectInfo;
 
 pub mod sections;
 
@@ -38,94 +38,12 @@ For conversational questions about architecture, debugging, or best practices, r
 
 Use markdown formatting for code blocks and structured responses. Be concise. Do NOT use emojis in your responses."#;
 
-pub const CONTEXT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize conversations concisely.";
-
-// ---------------------------------------------------------------------------
-// Fix system prompt
-// ---------------------------------------------------------------------------
-
-#[must_use]
-pub fn build_fix_system_prompt() -> String {
-    String::from(
-        r#"
-You are an expert software engineer fixing build/test errors in existing code.
-
-CRITICAL: You MUST respond with ONLY a valid JSON object. No explanation,
-reasoning, commentary, or markdown fences before or after the JSON. Your
-entire response must be parseable as a single JSON value.
-
-Rules:
-- "notes": brief summary of what you fixed
-- "file_ops": array of file operations
-- "follow_up_tasks": optional array of {"title", "description"}; omit or use []
-- Do NOT use emojis in any text fields
-
-CODE QUALITY:
-- Do NOT add comments that just narrate what the code does. Avoid obvious
-  comments like "// Import the module", "// Create the handler", "// Return
-  the result". Comments should only explain non-obvious intent, trade-offs,
-  or constraints that the code itself cannot convey.
-- Never use code comments as a thinking scratchpad.
-
-## File Operation Types
-
-You have FOUR operation types. **Prefer "search_replace" for fixes.**
-
-### search_replace (PREFERRED for fixes)
-Use when changing specific parts of an existing file. Each replacement has:
-- "search": the EXACT text to find (must be a verbatim substring of the current file).
-  Include enough surrounding context (3-5 lines) to ensure a unique match.
-- "replace": the text to substitute in place of "search".
-
-The "search" string MUST match exactly ONE location in the file. If it matches
-zero or more than one location, the operation fails. Include sufficient context
-lines to disambiguate.
-
-Example:
-{"op":"search_replace","path":"src/foo.rs","replacements":[
-  {"search":"fn old_name(x: i32) {\n    x + 1\n}","replace":"fn new_name(x: i32) {\n    x + 2\n}"}
-]}
-
-### modify (use sparingly)
-Use ONLY when rewriting more than ~50% of a file. Provides complete new file content.
-{"op":"modify","path":"src/foo.rs","content":"...entire file..."}
-
-### create
-Use for new files. {"op":"create","path":"src/bar.rs","content":"...entire file..."}
-
-### delete
-Use to remove files. {"op":"delete","path":"src/old.rs"}
-
-## Language-Specific Rules (MUST FOLLOW)
-
-### Rust (.rs files)
-- NEVER use non-ASCII characters (em dashes, smart quotes, ellipsis, etc.) anywhere in source code. Use ASCII equivalents only.
-- For test fixtures and multi-line strings: use Rust raw string literals (r followed by one or more # then a quote).
-- For constructing JSON in tests: prefer serde_json::json!() macro over string literals.
-- Remember that \n inside a JSON string value (in your response) becomes a literal newline in the Rust source file. If you want the Rust string to contain a newline escape, you need \\n in your JSON.
-- Do NOT call methods that don't exist on a type. Check the codebase snapshot for actual APIs.
-- When you see "no field named X on type Y" or "no method named X found for Y", look up the actual struct definition in the codebase snapshot to find the correct field/method name. Do not guess alternatives. If the struct is not in the snapshot, check the "Actual API Reference" section or the error context.
-
-### TypeScript/JavaScript (.ts/.tsx/.js/.jsx files)
-- Use forward slashes in import paths, never backslashes.
-- Ensure all imported modules exist or are declared as dependencies.
-
-Response schema:
-{"notes":"...","file_ops":[{"op":"search_replace","path":"src/foo.rs","replacements":[{"search":"old code","replace":"new code"}]}],"follow_up_tasks":[]}
-"#,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Agentic execution system prompt
 // ---------------------------------------------------------------------------
 
 #[must_use]
-pub fn agentic_execution_system_prompt(
-    project: &ProjectInfo<'_>,
-    agent: Option<&AgentInfo<'_>>,
-    workspace_info: Option<&str>,
-) -> String {
+pub fn agentic_execution_system_prompt(project: &ProjectInfo<'_>) -> String {
     let build_cmd = project.build_command.unwrap_or("(not configured)");
     // Prefer the operator's env override so the prompt shows the agent the
     // exact command the DoD gate will actually run. This keeps the agent's
@@ -141,11 +59,10 @@ pub fn agentic_execution_system_prompt(
         .or(project.test_command)
         .unwrap_or("(not configured)");
 
-    let preamble = build_agent_preamble(agent);
     let platform_info = platform_info_string();
 
     let mut prompt = format!(
-        r#"{preamble}You are an expert software engineer executing a single implementation task.
+        r#"You are an expert software engineer executing a single implementation task.
 You have tools to read, edit, and run commands in the workspace.
 
 {platform_info}
@@ -205,43 +122,7 @@ CODE QUALITY:
 
     append_agents_md(&mut prompt, project.folder_path);
 
-    if let Some(ws_info) = workspace_info {
-        prompt.push_str(&workspace_context_section(ws_info));
-    }
-
     prompt
-}
-
-fn build_agent_preamble(agent: Option<&AgentInfo<'_>>) -> String {
-    let mut preamble = String::new();
-    let Some(a) = agent else { return preamble };
-
-    if !a.system_prompt.is_empty() {
-        preamble.push_str(a.system_prompt);
-        preamble.push_str("\n\n");
-    }
-    let has_identity = !a.name.is_empty() || !a.role.is_empty() || !a.personality.is_empty();
-    if has_identity {
-        preamble.push_str("You are");
-        if !a.name.is_empty() {
-            preamble.push_str(&format!(" {}", a.name));
-        }
-        if !a.role.is_empty() {
-            preamble.push_str(&format!(", a {}", a.role));
-        }
-        preamble.push('.');
-        if !a.personality.is_empty() {
-            preamble.push_str(&format!(" {}", a.personality));
-        }
-        preamble.push_str("\n\n");
-    }
-    if !a.skills.is_empty() {
-        preamble.push_str(&format!(
-            "Your capabilities include: {}.\n\n",
-            a.skills.join(", ")
-        ));
-    }
-    preamble
 }
 
 const fn platform_info_string() -> &'static str {
@@ -255,20 +136,6 @@ const fn platform_info_string() -> &'static str {
     } else {
         "Platform: Linux. Shell commands run via `sh -c`."
     }
-}
-
-fn workspace_context_section(ws_info: &str) -> String {
-    let crate_count = ws_info
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("multiple");
-    format!(
-        r"
-## Workspace Context
-This is a Rust workspace with {crate_count} crate members. Read the source you need before editing — the bundled codebase snapshot was removed, use `read_file` / `search_code` to verify type signatures, method names, and struct fields.
-"
-    )
 }
 
 // ---------------------------------------------------------------------------

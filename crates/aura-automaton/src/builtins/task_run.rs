@@ -312,7 +312,6 @@ impl TaskRunAutomaton {
             spec: &spec_info,
             task: &task_info,
             session: &session_info,
-            agent: None,
             work_log: cfg.work_log.as_slice(),
             completed_deps: &[],
             workspace_map: "",
