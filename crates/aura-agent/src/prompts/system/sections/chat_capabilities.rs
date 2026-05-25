@@ -1,17 +1,17 @@
 //! `<chat_capabilities>`-bound section.
 //!
-//! Hosts the prose that historically lived in
-//! `prompts::system::CHAT_SYSTEM_PROMPT_BASE` — the "You are Aura, an
-//! AI software engineering assistant ..." block consumed by chat-path
-//! builders. For PR B [`render`] returns the legacy constant verbatim;
-//! the constant itself stays declared in [`super::super`] so external
-//! re-exports (`crate::prompts::CHAT_SYSTEM_PROMPT_BASE`) continue to
-//! resolve unchanged. PR C will (a) flip the wrapper to
-//! `<chat_capabilities>...</chat_capabilities>` and (b) move the
-//! constant ownership here.
+//! PR C wraps the historical `CHAT_SYSTEM_PROMPT_BASE` prose in the
+//! canonical `<chat_capabilities>...</chat_capabilities>` envelope so
+//! the chat-path system prompt mirrors the dev-loop path's bracketed
+//! schema. The constant itself still lives in [`super::super`] so
+//! external re-exports (`crate::prompts::CHAT_SYSTEM_PROMPT_BASE`)
+//! resolve unchanged.
 
 /// Render the chat-capabilities section verbatim. Always non-empty.
 #[must_use]
 pub(crate) fn render() -> String {
-    super::super::CHAT_SYSTEM_PROMPT_BASE.to_string()
+    format!(
+        "<chat_capabilities>\n{body}\n</chat_capabilities>",
+        body = super::super::CHAT_SYSTEM_PROMPT_BASE,
+    )
 }

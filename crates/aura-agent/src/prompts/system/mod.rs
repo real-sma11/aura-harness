@@ -1,22 +1,25 @@
 //! System-prompt assembly for the dev-loop and chat paths.
 //!
-//! PR B reshapes this module from a pair of `format!` blobs into a
-//! thin façade over [`SystemPromptBuilder`] + per-section modules in
-//! [`sections`]. The bytes produced by [`agentic_execution_system_prompt`]
-//! and [`build_chat_system_prompt`] are unchanged — the four PR A
-//! golden snapshots in `__snapshots__/` are the contract. PR C will
-//! flip every section's wrapper to the canonical `<tag>...</tag>`
-//! schema with one intentional snapshot regeneration.
+//! PR C flips the per-section renderers to the canonical
+//! `<tag>...</tag>` schema and consolidates both paths behind
+//! [`SystemPromptBuilder`]. The dev-loop and chat builders share the
+//! same section pool — they differ only in which sections they
+//! include and in which order — so adding a new section happens in
+//! exactly one place (`sections/` + a `.builder.method()` call).
 //!
-//! What still lives at this top level:
+//! Section ordering (insertion order = output order, blank-line
+//! separated):
 //!
-//! - [`CHAT_SYSTEM_PROMPT_BASE`]: the chat capabilities prose. Kept
-//!   here so external `crate::prompts::CHAT_SYSTEM_PROMPT_BASE`
-//!   re-exports continue to resolve. PR C will hoist ownership into
-//!   [`sections::chat_capabilities`].
-//! - The chat-side `append_tech_stack` / `append_directory_listing` /
-//!   `append_config_previews` helpers — the plan defers their move
-//!   into a section module to PR C alongside the chat refactor.
+//! - Dev loop: `agent_identity → agent_skills → agent_system_prompt
+//!   → project_context → agents_md → dev_loop_workflow →
+//!   tool_discipline`.
+//! - Chat: `chat_capabilities → agent_identity → agent_skills →
+//!   agent_system_prompt → project_context → agents_md`. The chat
+//!   path uses `chat_capabilities` *instead of*
+//!   `dev_loop_workflow` + `tool_discipline`.
+//!
+//! Empty sections (None / blank / empty list) are dropped, so the
+//! assembled bytes never contain an empty tag.
 
 use super::{AgentInfo, ProjectInfo};
 
@@ -28,7 +31,7 @@ pub use builder::{probe_agents_md, AgentsMdProbe, SystemPromptBuilder};
 #[cfg(test)]
 pub(crate) use sections::dev_loop_workflow::platform_info_string;
 #[cfg(test)]
-pub(crate) use sections::{AGENTS_MD_MAX_BYTES, AGENTS_MD_SECTION_HEADER};
+pub(crate) use sections::{AGENTS_MD_MAX_BYTES, AGENTS_MD_SECTION_TAG_PREFIX};
 
 pub const CHAT_SYSTEM_PROMPT_BASE: &str = r#"You are Aura, an AI software engineering assistant embedded in a project management and code execution platform.
 
@@ -72,11 +75,13 @@ Use markdown formatting for code blocks and structured responses. Be concise. Do
 
 /// Build the dev-loop system prompt.
 ///
-/// PR B re-adds the optional `agent` parameter so identity / skills /
-/// operator-authored prompt can flow through into the assembled output
-/// once aura-os populates the wire fields in PR C. Callers that have
-/// no agent context (the dev-loop / task-run automatons today) pass
-/// `None` and the rendered bytes match the PR A snapshots verbatim.
+/// PR C threads the optional `agent` parameter through to the
+/// identity / skills / operator-prompt sections so a populated
+/// [`AgentInfo`] produces the corresponding `<agent_identity>`,
+/// `<agent_skills>`, and `<agent_system_prompt>` blocks. Callers
+/// without an agent context pass `None` and those sections are
+/// dropped silently — the remaining sections (`project_context`,
+/// `agents_md`, `dev_loop_workflow`, `tool_discipline`) always emit.
 #[must_use]
 pub fn agentic_execution_system_prompt(
     project: &ProjectInfo<'_>,
@@ -105,9 +110,10 @@ pub fn agentic_execution_system_prompt(
         .agent_identity(identity)
         .agent_skills(&skills_owned)
         .agent_system_prompt(agent_system_prompt)
+        .project_context(project)
+        .agents_md_from_workspace(project.folder_path)
         .dev_loop_workflow(build_cmd, test_cmd)
         .tool_discipline()
-        .agents_md_from_workspace(project.folder_path)
         .build()
 }
 
@@ -115,6 +121,17 @@ pub fn agentic_execution_system_prompt(
 // Chat system prompt builder
 // ---------------------------------------------------------------------------
 
+/// Build the chat-path system prompt.
+///
+/// PR C drops the chat-only workspace-overview helpers
+/// (`append_tech_stack` / `append_directory_listing` /
+/// `append_config_previews`) per the simplification plan — the chat
+/// path now emits the same labelled section set as the dev loop,
+/// just with `<chat_capabilities>` in place of
+/// `<dev_loop_workflow>` + `<tool_discipline>`. A non-empty
+/// `custom_system_prompt` is still prepended verbatim above the
+/// builder output so operator overrides survive the bracketed-schema
+/// migration.
 #[must_use]
 pub fn build_chat_system_prompt(project: &ProjectInfo<'_>, custom_system_prompt: &str) -> String {
     let mut prompt = String::new();
@@ -129,109 +146,7 @@ pub fn build_chat_system_prompt(project: &ProjectInfo<'_>, custom_system_prompt:
             .agents_md_from_workspace(project.folder_path)
             .build(),
     );
-    // PR B keeps the chat-only workspace-overview helpers (tech stack,
-    // directory listing, config previews) at this top level. PR C will
-    // either fold them into a `chat_workspace_overview` section module
-    // or delete them outright; for now we just call them after the
-    // builder so the byte layout is unchanged.
-    append_tech_stack(&mut prompt, project.folder_path);
     prompt
-}
-
-fn append_tech_stack(prompt: &mut String, folder_path: &str) {
-    let folder = std::path::Path::new(folder_path);
-    if !folder.is_dir() {
-        return;
-    }
-
-    let mut stack: Vec<&str> = Vec::new();
-    let markers: &[(&str, &str)] = &[
-        ("Cargo.toml", "Rust"),
-        ("package.json", "Node.js/TypeScript"),
-        ("pyproject.toml", "Python"),
-        ("requirements.txt", "Python"),
-        ("go.mod", "Go"),
-        ("pom.xml", "Java/Maven"),
-        ("build.gradle", "Java/Gradle"),
-        ("Gemfile", "Ruby"),
-        ("composer.json", "PHP"),
-        ("mix.exs", "Elixir"),
-    ];
-    for (file, tech) in markers {
-        if folder.join(file).exists() && !stack.contains(tech) {
-            stack.push(tech);
-        }
-    }
-    if !stack.is_empty() {
-        prompt.push_str(&format!("- **Tech Stack**: {}\n", stack.join(", ")));
-    }
-
-    append_directory_listing(prompt, folder);
-    append_config_previews(prompt, folder);
-}
-
-fn append_directory_listing(prompt: &mut String, folder: &std::path::Path) {
-    let entries = match std::fs::read_dir(folder) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    let mut items: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.')
-            || name == "node_modules"
-            || name == "target"
-            || name == "__pycache__"
-            || name == "dist"
-            || name == "build"
-        {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-        items.push(if is_dir { format!("{name}/") } else { name });
-    }
-    items.sort();
-    if !items.is_empty() {
-        let listing = items
-            .iter()
-            .take(30)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        prompt.push_str(&format!("\n### Project Structure\n{listing}\n"));
-    }
-}
-
-fn append_config_previews(prompt: &mut String, folder: &std::path::Path) {
-    let config_files: &[&str] = &[
-        "Cargo.toml",
-        "package.json",
-        "tsconfig.json",
-        "pyproject.toml",
-    ];
-    let mut config_budget: usize = 2000;
-    let mut config_sections: Vec<String> = Vec::new();
-    for &cf in config_files {
-        if config_budget == 0 {
-            break;
-        }
-        let path = folder.join(cf);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let preview: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
-            let preview = if preview.len() > config_budget {
-                preview[..config_budget].to_string()
-            } else {
-                preview
-            };
-            config_budget = config_budget.saturating_sub(preview.len());
-            config_sections.push(format!("**{cf}**:\n```\n{preview}\n```"));
-        }
-    }
-    if !config_sections.is_empty() {
-        prompt.push_str("\n### Key Config Files\n");
-        prompt.push_str(&config_sections.join("\n"));
-        prompt.push('\n');
-    }
 }
 
 #[cfg(test)]

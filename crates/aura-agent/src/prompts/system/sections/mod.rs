@@ -21,4 +21,4 @@ pub mod tool_discipline;
 pub use agents_md::{probe_agents_md, AgentsMdProbe};
 
 #[cfg(test)]
-pub(crate) use agents_md::{AGENTS_MD_MAX_BYTES, AGENTS_MD_SECTION_HEADER};
+pub(crate) use agents_md::{AGENTS_MD_MAX_BYTES, AGENTS_MD_SECTION_TAG_PREFIX};

@@ -1,16 +1,26 @@
 //! `SystemPromptBuilder` — the single producer of dev-loop and chat
-//! system prompts (Phase 2a of the simplification plan).
+//! system prompts.
 //!
-//! For PR B the builder concatenates the per-section renderers in
-//! [`super::sections`] verbatim, leaving the four PR A golden
-//! snapshots passing byte-for-byte. PR C will flip every section's
-//! wrapper to the canonical `<tag>...</tag>` schema in a single
-//! intentional snapshot regeneration.
+//! PR C flips every section to the canonical `<tag>...</tag>` schema.
+//! Each section's [`super::sections`] module emits a self-contained
+//! tag-wrapped body with no surrounding whitespace; the builder joins
+//! the non-empty sections with a single blank line so the assembled
+//! prompt reads as an ordered, labelled sequence:
 //!
-//! The builder is the *only* module that knows the canonical section
-//! ordering; callers (`agentic_execution_system_prompt`,
-//! `build_chat_system_prompt`) just compose the section list. That
-//! way PR C's schema flip is a one-file change inside this directory.
+//! ```text
+//! <agent_identity>...</agent_identity>
+//!
+//! <agent_skills>...</agent_skills>
+//!
+//! <project_context>...</project_context>
+//!
+//! <agents_md path="AGENTS.md">...</agents_md>
+//!
+//! <dev_loop_workflow>...</dev_loop_workflow>
+//! ```
+//!
+//! Empty sections (`None` from a renderer or an empty skills list)
+//! are dropped — the builder never emits an empty tag.
 
 use super::sections::{
     self, agent_identity as agent_identity_section, agent_skills as agent_skills_section,
@@ -23,16 +33,16 @@ use crate::prompts::{AgentIdentity, ProjectInfo};
 /// Builder accumulating prompt section bytes in insertion order.
 ///
 /// Each section method renders its body via the matching
-/// [`super::sections`] submodule and pushes the resulting `String` (if
-/// non-empty) onto an internal vector. [`SystemPromptBuilder::build`]
-/// joins them with no separator — the per-section bodies bake their
-/// own leading / trailing newlines so the join is byte-identical with
-/// the legacy in-place `String::push_str` chains.
+/// [`super::sections`] submodule and pushes the resulting tag-wrapped
+/// `String` (if non-empty) onto an internal vector.
+/// [`SystemPromptBuilder::build`] joins the sections with a single
+/// blank line (`"\n\n"`) so the canonical ordering shows up as a
+/// readable sequence of labelled blocks.
 ///
 /// Empty inputs (None / empty list / blank string) translate to "skip
-/// this section entirely", which is what every PR B caller exercises:
-/// `agent_identity` / `agent_skills` / `agent_system_prompt` /
-/// `tool_discipline` all push nothing today.
+/// this section entirely", which keeps the assembled prompt free of
+/// `<agent_identity></agent_identity>` artefacts when the wire
+/// payload is uninitialised.
 #[derive(Debug, Default)]
 pub struct SystemPromptBuilder {
     sections: Vec<String>,
@@ -72,13 +82,11 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Append the chat-style project-context block.
-    ///
-    /// Always emits content (Name / Description / Folder / Build /
-    /// Test). The dev-loop builder doesn't call this in PR B because
-    /// its build / test commands and platform info are still inlined
-    /// into [`SystemPromptBuilder::dev_loop_workflow`] for byte-identical
-    /// output; PR C consolidates the two paths.
+    /// Append the `<project_context>` block (project metadata + host
+    /// platform notice). Always emits content; both the dev-loop and
+    /// chat paths call this in PR C so the agent sees a consistent
+    /// project descriptor regardless of which builder preset assembled
+    /// the prompt.
     #[must_use]
     pub fn project_context(mut self, project: &ProjectInfo<'_>) -> Self {
         self.sections
@@ -87,9 +95,10 @@ impl SystemPromptBuilder {
     }
 
     /// Probe the workspace root for `AGENTS.md` (case-insensitive),
-    /// append the file content as a dedicated section when found and
-    /// within the byte cap, and remember the [`AgentsMdProbe`] outcome
-    /// so callers can introspect the verdict via
+    /// append the file content wrapped in
+    /// `<agents_md path="...">...</agents_md>` when found and within
+    /// the byte cap, and remember the [`AgentsMdProbe`] outcome so
+    /// callers can introspect the verdict via
     /// [`SystemPromptBuilder::agents_md_probe`].
     #[must_use]
     pub fn agents_md_from_workspace(mut self, folder_path: &str) -> Self {
@@ -102,8 +111,10 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Append the dev-loop workflow + apply_patch + git-safety + code-quality
-    /// block. `build_cmd` and `test_cmd` are spliced in verbatim.
+    /// Append the `<dev_loop_workflow>` block (workflow + apply_patch
+    /// envelope + git safety + code quality). `build_cmd` and
+    /// `test_cmd` are spliced into the prose verbatim so the agent's
+    /// mental model matches the DoD gate's invocation.
     #[must_use]
     pub fn dev_loop_workflow(mut self, build_cmd: &str, test_cmd: &str) -> Self {
         self.sections
@@ -111,11 +122,14 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Append the tool-discipline section.
+    /// Append the `<tool_discipline>` section.
     ///
-    /// PR B: no-op (the prose was deleted by the 2026-05 cook-loop
+    /// PR C: no-op (the prose was deleted by the 2026-05 cook-loop
     /// strip). The method stays on the builder so the canonical
-    /// section list mirrors the planned `<tag>` schema.
+    /// section list mirrors the planned schema; if discipline prose
+    /// ever returns the renderer wraps it in
+    /// `<tool_discipline>...</tool_discipline>` without touching call
+    /// sites.
     #[must_use]
     pub fn tool_discipline(mut self) -> Self {
         if let Some(text) = tool_discipline_section::render() {
@@ -124,8 +138,9 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Append the chat-capabilities prose
-    /// ([`super::CHAT_SYSTEM_PROMPT_BASE`]) verbatim.
+    /// Append the `<chat_capabilities>` section
+    /// ([`super::CHAT_SYSTEM_PROMPT_BASE`] wrapped in the canonical
+    /// tag). Always non-empty.
     #[must_use]
     pub fn chat_capabilities(mut self) -> Self {
         self.sections.push(chat_capabilities_section::render());
@@ -140,16 +155,17 @@ impl SystemPromptBuilder {
         self.last_agents_md_probe.as_ref()
     }
 
-    /// Concatenate every accumulated section in insertion order. The
-    /// section bodies own their leading / trailing whitespace, so the
-    /// join is just a `String::join("")`.
+    /// Concatenate every accumulated section with a single blank line
+    /// between non-empty entries (`"\n\n"`). Each section already
+    /// owns its `<tag>...</tag>` envelope; the builder is only
+    /// responsible for spacing.
     #[must_use]
     pub fn build(self) -> String {
-        self.sections.join("")
+        self.sections.join("\n\n")
     }
 }
 
 // Convenience re-export so external crates that want the probe enum
-// (e.g. for surfacing on the run event stream in PR C) don't need to
-// reach into `super::sections` directly.
+// (e.g. for surfacing on the run event stream) don't need to reach
+// into `super::sections` directly.
 pub use sections::{probe_agents_md, AgentsMdProbe};

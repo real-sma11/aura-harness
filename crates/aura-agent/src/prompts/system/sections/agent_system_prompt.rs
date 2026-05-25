@@ -1,9 +1,9 @@
 //! `<agent_system_prompt>`-bound section.
 //!
-//! Renders the operator-authored system prompt verbatim when present,
-//! otherwise emits nothing. Like the other identity-related sections,
-//! every PR B production call site passes `None` so the builder output
-//! stays byte-identical with PR A.
+//! PR C wraps the operator-authored system prompt in
+//! `<agent_system_prompt>...</agent_system_prompt>`. The body is
+//! emitted verbatim (trimmed of surrounding whitespace) so the agent
+//! sees exactly what the operator wrote.
 
 /// Render the agent-system-prompt section, or `None` when absent / blank.
 #[must_use]
@@ -12,8 +12,5 @@ pub(crate) fn render(prompt: Option<&str>) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    let mut out = String::from("\n## Agent System Prompt\n");
-    out.push_str(body);
-    out.push('\n');
-    Some(out)
+    Some(format!("<agent_system_prompt>\n{body}\n</agent_system_prompt>"))
 }

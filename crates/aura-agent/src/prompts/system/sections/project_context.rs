@@ -1,37 +1,41 @@
 //! `<project_context>`-bound section.
 //!
-//! For PR B this emits the chat-style "## Current Project" prose block
-//! that `build_chat_system_prompt` historically appended inline, so
-//! the chat snapshots stay byte-identical. Dev-loop callers do not
-//! invoke this section in PR B (their build/test commands and platform
-//! info are still inlined into [`super::dev_loop_workflow`] for
-//! byte-identical output).
+//! PR C consolidates the project metadata + host platform notice into
+//! a single `<project_context>...</project_context>` envelope shared by
+//! the dev-loop and chat paths. Platform info previously lived inline
+//! inside [`super::dev_loop_workflow`]; moving it here lets the
+//! workflow block stay focused on the loop's mechanics while still
+//! surfacing the host-shell warning to the agent.
 //!
-//! PR C will flip this to the canonical `<project_context>
-//! ...</project_context>` schema and start using it from the dev-loop
-//! path as well.
+//! The body is a key/value listing. Blank fields are omitted so a
+//! project row with no description / no build / test commands doesn't
+//! emit `description: \n` etc.
 
 use crate::prompts::ProjectInfo;
 
-/// Render the chat-style project-context block.
+/// Render the project-context block.
 ///
-/// Format mirrors the legacy `build_chat_system_prompt` inline
-/// `format!("\n\n## Current Project\n- ...")` exactly, including the
-/// leading blank line and the `(not set)` placeholders for missing
-/// build / test commands.
+/// `name` / `folder` / `platform` are always emitted. `description` /
+/// `build_command` / `test_command` are omitted when blank / unset so
+/// the rendered body stays compact for under-configured projects.
 #[must_use]
 pub(crate) fn render(project: &ProjectInfo<'_>) -> String {
-    format!(
-        "\n\n## Current Project\n\
-         - **Name**: {name}\n\
-         - **Description**: {description}\n\
-         - **Folder**: {folder}\n\
-         - **Build**: {build}\n\
-         - **Test**: {test}\n",
-        name = project.name,
-        description = project.description,
-        folder = project.folder_path,
-        build = project.build_command.unwrap_or("(not set)"),
-        test = project.test_command.unwrap_or("(not set)"),
-    )
+    let mut body = String::new();
+    body.push_str(&format!("project_name: {}\n", project.name));
+    let description = project.description.trim();
+    if !description.is_empty() {
+        body.push_str(&format!("description: {description}\n"));
+    }
+    body.push_str(&format!("folder: {}\n", project.folder_path));
+    if let Some(build) = project.build_command.map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str(&format!("build_command: {build}\n"));
+    }
+    if let Some(test) = project.test_command.map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str(&format!("test_command: {test}\n"));
+    }
+    body.push_str(&format!(
+        "platform: {}\n",
+        super::dev_loop_workflow::platform_info_string()
+    ));
+    format!("<project_context>\n{body}</project_context>")
 }

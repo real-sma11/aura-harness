@@ -25,10 +25,11 @@ use std::path::Path;
 /// agent never reads a half-instruction.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = 64 * 1024;
 
-/// Header used when an AGENTS.md is found at the workspace root. Kept
-/// as a `const` so callers and tests can both reference the canonical
-/// wording instead of duplicating the literal.
-pub(crate) const AGENTS_MD_SECTION_HEADER: &str = "## Project AGENTS.md";
+/// Opening tag used when an AGENTS.md is found at the workspace root.
+/// PR C flips the section from the legacy `## Project AGENTS.md`
+/// markdown header to the canonical `<agents_md path="...">` envelope.
+/// Tests assert on this string instead of duplicating the literal.
+pub(crate) const AGENTS_MD_SECTION_TAG_PREFIX: &str = "<agents_md path=\"";
 
 /// Filename variants the probe walks in order. The first read that
 /// succeeds and fits the byte cap wins. We try a small explicit set
@@ -146,14 +147,7 @@ pub fn probe_agents_md(folder_path: &str) -> AgentsMdProbe {
 pub(crate) fn append(prompt: &mut String, folder_path: &str) -> AgentsMdProbe {
     let AgentsMdRead { probe, content } = read(folder_path);
     log_probe(&probe);
-    if let (
-        AgentsMdProbe::Found {
-            ref variant,
-            ..
-        },
-        Some(body),
-    ) = (&probe, content)
-    {
+    if let (AgentsMdProbe::Found { ref variant, .. }, Some(body)) = (&probe, content) {
         prompt.push_str(&render_section(variant, &body));
     }
     probe
@@ -197,14 +191,23 @@ fn log_probe(probe: &AgentsMdProbe) {
 }
 
 fn render_section(variant: &str, content: &str) -> String {
-    format!(
-        "\n{header}\n\
-         The following instructions come from the project's `{variant}` file \
-         at the workspace root. Treat them as authoritative project-author \
-         guidance and follow them throughout this session.\n\n\
-         ```\n{content}\n```\n",
-        header = AGENTS_MD_SECTION_HEADER,
-    )
+    // PR C: the AGENTS.md body is the source of truth from the
+    // operator, so we drop the "Treat them as authoritative ..."
+    // preamble that the markdown-header rendering used and inline the
+    // file body inside an `<agents_md path="<variant>">` envelope. The
+    // `path=` attribute records which casing variant matched first so
+    // case-sensitive vs case-insensitive filesystems are
+    // distinguishable from the rendered prompt alone.
+    let mut out = String::with_capacity(content.len() + 64);
+    out.push_str(AGENTS_MD_SECTION_TAG_PREFIX);
+    out.push_str(variant);
+    out.push_str("\">\n");
+    out.push_str(content);
+    if !content.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("</agents_md>");
+    out
 }
 
 #[cfg(test)]
@@ -313,7 +316,8 @@ mod tests {
         let probe = append(&mut prompt, &folder);
 
         assert!(matches!(probe, AgentsMdProbe::Found { .. }));
-        assert!(prompt.contains(AGENTS_MD_SECTION_HEADER));
+        assert!(prompt.contains(AGENTS_MD_SECTION_TAG_PREFIX));
+        assert!(prompt.contains("</agents_md>"));
         assert!(prompt.contains("rule body"));
     }
 

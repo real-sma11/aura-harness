@@ -1,10 +1,8 @@
 //! `<agent_skills>`-bound section.
 //!
-//! Empty-list = no output, which is what every PR B caller currently
-//! produces (the wire field defaults to `Vec::new()` and never gets
-//! populated until PR C). The section module exists so the wire and
-//! builder API land in this PR while the rendered bytes still match
-//! the PR A snapshots.
+//! PR C wraps the skills list in `<agent_skills>...</agent_skills>`.
+//! Returns `None` (the builder drops the section) when the list is
+//! empty or contains only whitespace entries.
 
 /// Render the agent-skills section, or `None` when the list is empty.
 #[must_use]
@@ -15,10 +13,10 @@ pub(crate) fn render(skills: &[String]) -> Option<String> {
         .filter(|s| !s.is_empty());
     let first = filtered.next()?;
 
-    let mut out = String::from("\n## Agent Skills\n");
-    out.push_str(&format!("- {first}\n"));
+    let mut body = String::new();
+    body.push_str(&format!("- {first}\n"));
     for skill in filtered {
-        out.push_str(&format!("- {skill}\n"));
+        body.push_str(&format!("- {skill}\n"));
     }
-    Some(out)
+    Some(format!("<agent_skills>\n{body}</agent_skills>"))
 }
