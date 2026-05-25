@@ -28,12 +28,12 @@ fn agentic_prompt_includes_definition_of_done_hard_gate() {
         "task_done hard-gate language missing: {prompt}"
     );
     assert!(
-        prompt.contains("Do not call `task_done`"),
+        prompt.contains("task_done only when"),
         "task_done deferral instruction missing: {prompt}"
     );
     assert!(
-        prompt.contains("test suite"),
-        "test-suite reference missing: {prompt}"
+        prompt.contains("cargo test"),
+        "test command reference missing from hard-gate line: {prompt}"
     );
 }
 
@@ -75,34 +75,25 @@ fn agentic_prompt_no_longer_advertises_exploration_budget() {
 }
 
 #[test]
-fn agentic_prompt_pins_explicit_five_step_workflow() {
+fn agentic_prompt_leads_with_action_oriented_move_set() {
     let project = test_project("/nonexistent");
     let prompt = agentic_execution_system_prompt(&project, None);
 
-    assert!(prompt.contains("Workflow:"), "Workflow header missing");
     assert!(
-        prompt.contains("1. Explore (read_file / search_code / list_files)"),
-        "step 1 (Explore) missing or rephrased: {prompt}"
+        prompt.contains("Edit code with apply_patch. Finish with task_done."),
+        "action-oriented lead line missing: {prompt}"
     );
     assert!(
-        prompt.contains("2. (Optional) submit_plan"),
-        "step 2 (optional submit_plan) missing or rephrased: {prompt}"
+        !prompt.contains("Workflow:"),
+        "old numbered Workflow header should be gone: {prompt}"
     );
     assert!(
-        prompt.contains("3. Make changes with apply_patch"),
-        "step 3 (apply_patch) missing or rephrased: {prompt}"
+        !prompt.contains("1. Explore"),
+        "old step-1 Explore prose should be gone: {prompt}"
     );
     assert!(
-        prompt.contains("4. Run the build / tests"),
-        "step 4 (build/tests) missing or rephrased: {prompt}"
-    );
-    assert!(
-        prompt.contains("5. Call task_done when the build and the full test suite are green."),
-        "step 5 (task_done) missing or rephrased: {prompt}"
-    );
-    assert!(
-        prompt.contains("call task_done with `no_changes_needed: true`"),
-        "step 5 no_changes_needed branch missing: {prompt}"
+        !prompt.contains("submit_plan"),
+        "prompt no longer advertises submit_plan: {prompt}"
     );
 }
 
@@ -112,12 +103,12 @@ fn agentic_prompt_promotes_no_changes_needed_in_rules() {
     let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
-        prompt.contains("If exploration shows the task is already done"),
-        "no_changes_needed prose missing: {prompt}"
+        prompt.contains("no_changes_needed: true"),
+        "no_changes_needed branch missing from invariants: {prompt}"
     );
     assert!(
-        prompt.contains("The DoD test gate still runs"),
-        "DoD test gate clarification missing: {prompt}"
+        prompt.contains("If no changes are needed"),
+        "no_changes_needed conditional phrasing missing: {prompt}"
     );
 }
 

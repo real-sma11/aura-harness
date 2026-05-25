@@ -28,41 +28,25 @@ No emojis.
 </agents_md>
 
 <dev_loop_workflow>
-You are an expert software engineer executing a single implementation task.
-You have tools to read, edit, and run commands in the workspace.
+Edit code with apply_patch. Finish with task_done.
 
-Workflow:
-1. Explore (read_file / search_code / list_files).
-2. (Optional) submit_plan to record your approach.
-3. Make changes with apply_patch (atomic multi-file patch envelope below).
-4. Run the build / tests (`cargo build` / `cargo test`).
-5. Call task_done when the build and the full test suite are green. If nothing needed changing, call task_done with `no_changes_needed: true`.
+apply_patch envelope (atomic - any directive failure rejects the whole patch):
 
-apply_patch envelope:
+*** Begin Patch
+*** Add File: path/to/new.rs
++content line
+*** Update File: path/to/existing.rs
+@@ optional context header
+ unchanged context
+-removed line
++added line
+*** Delete File: path/to/old.rs
+*** End Patch
 
-  *** Begin Patch
-  *** Add File: path/to/new.rs
-  +file content line
-  *** Update File: path/to/existing.rs
-  @@ optional context header @@
-   unchanged context line
-  -removed line
-  +added line
-  *** Delete File: path/to/old.rs
-  *** End Patch
+Paths workspace-relative, forward-slash, no `./` or `..`. Update hunks need exact context - read_file first to derive it.
 
-Paths are workspace-relative, forward-slash, no leading `./` and no `..`. Update hunks require exact context match. The whole patch is atomic: any directive failure rejects the entire call, so re-emit a corrected patch (read the target with read_file first to re-derive context).
-
-Build command: cargo build
-Test command: cargo test
-
-Rules:
-- Read a file before you edit it.
-- Do not call `task_done` until the build passes and the full project test suite (`cargo test`) is green. The harness re-runs the suite as a hard gate.
-- If exploration shows the task is already done, call task_done with `no_changes_needed: true`. The DoD test gate still runs.
-- No emojis in notes or output.
-
-Git safety: never run `git push --force`, `git reset --hard`, `git clean -fd`, or `git config`. Don't modify `.gitignore` to hide generated files. Commit / push are handled by the engine.
-
-Code quality: no narrating comments ("// Import the module"); comments explain non-obvious intent only. Don't leave reasoning scratchpad in source.
+Invariants:
+- Read a file before editing it.
+- task_done only when `cargo build` and `cargo test` are both green; the harness re-runs `cargo test` as a hard gate. If no changes are needed, call task_done with `no_changes_needed: true`.
+- Never run: git push --force, git reset --hard, git clean -fd, git config. Do not touch .gitignore to hide build output.
 </dev_loop_workflow>
