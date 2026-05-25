@@ -852,3 +852,118 @@ fn phase_reset_arms_plan_submitted_latch() {
          post-plan exploration hard block can fire"
     );
 }
+
+#[tokio::test]
+async fn premature_end_turn_after_reads_injects_force_progress_and_continues() {
+    // Regression test for harness-v2.1 EndTurn intercept.
+    //
+    // Before the fix: dispatch_stop_reason returned `true` on EndTurn
+    // regardless of state, so a model that did a read then returned
+    // text-only would terminate the loop with file_ops empty, which
+    // validate_execution downstream surfaces as
+    // "task reached implementation phase but no file operations
+    // completed -- needs decomposition (failed_paths=0)".
+    //
+    // After the fix: when the model end_turn's after read-only tool
+    // calls, the loop injects a FORCE-PROGRESS user message and runs
+    // another iteration so Phase 2's existing thresholds (or a
+    // subsequent intercept) can drive the model to write.
+    //
+    // Pinned sequence:
+    //   Iter 0: read_file (ToolUse)        -> counter -> 1
+    //   Iter 1: text only (EndTurn)        -> INTERCEPT fires, counter -> 2
+    //   Iter 2: write_file (ToolUse)       -> counter -> 0
+    //   Iter 3: text only (EndTurn)        -> counter==0, exits normally
+    let executor = MockExecutor {
+        results: vec![
+            ToolCallResult::success("call_read", "fn foo() {}"),
+            ToolCallResult::success("call_write", "wrote 12 bytes"),
+        ],
+    };
+
+    let read_response = MockResponse {
+        stop_reason: StopReason::ToolUse,
+        content: vec![ContentBlock::tool_use(
+            "call_read",
+            "read_file",
+            serde_json::json!({"path": "src/lib.rs"}),
+        )],
+        usage: Usage::new(100, 20),
+    };
+    let premature_end_turn = MockResponse {
+        stop_reason: StopReason::EndTurn,
+        content: vec![ContentBlock::text(
+            "I've read enough. I think the task is already implemented.",
+        )],
+        usage: Usage::new(150, 30),
+    };
+    let write_response = MockResponse {
+        stop_reason: StopReason::ToolUse,
+        content: vec![ContentBlock::tool_use(
+            "call_write",
+            "write_file",
+            serde_json::json!({"path": "src/new.rs", "content": "pub fn bar() {}"}),
+        )],
+        usage: Usage::new(200, 40),
+    };
+    let final_end_turn = MockResponse {
+        stop_reason: StopReason::EndTurn,
+        content: vec![ContentBlock::text("Done.")],
+        usage: Usage::new(250, 10),
+    };
+
+    let provider = MockProvider::new()
+        .with_response(read_response)
+        .with_response(premature_end_turn)
+        .with_response(write_response)
+        .with_response(final_end_turn);
+
+    let config = AgentLoopConfig {
+        system_prompt: "test".to_string(),
+        intercept_premature_end_turn: true,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("implement bar")];
+    let tools = vec![
+        ToolDefinition::new(
+            "read_file",
+            "Read a file",
+            serde_json::json!({"type": "object"}),
+        ),
+        ToolDefinition::new(
+            "write_file",
+            "Write a file",
+            serde_json::json!({"type": "object"}),
+        ),
+    ];
+
+    let (tx, mut rx) = mpsc::channel(64);
+    let result = agent
+        .run_with_events(&provider, &executor, messages, tools, Some(tx), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.iterations, 4,
+        "loop must run through the intercept and the subsequent write before exiting; \
+         pre-fix this would have been 2"
+    );
+
+    // Drain the event stream and confirm the FORCE-PROGRESS warning
+    // was emitted on the EndTurn intercept.
+    let mut saw_intercept_warning = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentLoopEvent::Warning(msg) = event {
+            if msg.contains("FORCE-PROGRESS: You returned end_turn") {
+                saw_intercept_warning = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_intercept_warning,
+        "intercept must emit the FORCE-PROGRESS warning so transcripts and Phase 2 \
+         observability stay in sync"
+    );
+}

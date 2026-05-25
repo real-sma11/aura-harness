@@ -197,6 +197,21 @@ pub struct AgentLoopConfig {
     /// `read_file`. Default `false` for chat / generic callers
     /// where deliberation on the first turn is desirable.
     pub disable_thinking_iteration_0: bool,
+    /// Intercept premature `EndTurn` when the model has done read-only
+    /// tool calls without writing.
+    ///
+    /// When `true` (the policy used by [`crate::agent_runner`] for
+    /// dev-loop tasks), an `EndTurn` response while
+    /// `consecutive_read_only_iterations > 0` injects a FORCE-PROGRESS
+    /// user message and continues the loop instead of breaking. The
+    /// counter is bumped to [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`]
+    /// so the next iteration triggers Phase 2's `tool_choice` override
+    /// and further EndTurn intercepts stop firing — one intercept per
+    /// stuck point, never an infinite loop.
+    ///
+    /// Default `false` for chat / generic callers where `EndTurn`
+    /// after a read or two is the legitimate end of the turn.
+    pub intercept_premature_end_turn: bool,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -253,6 +268,7 @@ impl Default for AgentLoopConfig {
             subagents_chars: 0,
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
+            intercept_premature_end_turn: false,
         }
     }
 }
@@ -591,6 +607,21 @@ impl AgentLoop {
     }
 
     /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
+    ///
+    /// `EndTurn` / `StopSequence` normally terminate the loop. When
+    /// [`AgentLoopConfig::intercept_premature_end_turn`] is enabled
+    /// (dev-loop policy) AND the model has been doing read-only tool
+    /// calls without writing (Phase 2's
+    /// `consecutive_read_only_iterations > 0`), premature end_turn
+    /// would silently abandon the task and surface downstream as
+    /// `NeedsDecomposition (failed_paths=0)`. Inject a FORCE-PROGRESS
+    /// steering message, bump the counter to
+    /// [`crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD`] so the
+    /// next iteration triggers Phase 2's `tool_choice` override, and
+    /// continue the loop. The bump also disables further EndTurn
+    /// intercepts in this run (the `< THRESHOLD` guard fails), so the
+    /// intercept fires exactly once per stuck point. Chat / generic
+    /// callers leave the flag `false` and keep the old behavior.
     async fn dispatch_stop_reason(
         &self,
         response: &aura_reasoner::ModelResponse,
@@ -599,7 +630,31 @@ impl AgentLoop {
         state: &mut LoopState,
     ) -> bool {
         match response.stop_reason {
-            StopReason::EndTurn | StopReason::StopSequence => true,
+            StopReason::EndTurn | StopReason::StopSequence => {
+                let counter = state.counters.consecutive_read_only_iterations;
+                if self.config.intercept_premature_end_turn
+                    && counter > 0
+                    && counter < crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD
+                {
+                    let msg = format!(
+                        "FORCE-PROGRESS: You returned end_turn after {counter} read-only \
+                         iterations without producing any file changes or calling task_done. \
+                         Your next turn MUST be write_file / edit_file / delete_file with a \
+                         real path, or task_done (use no_changes_needed: true if exploration \
+                         shows no change is required)."
+                    );
+                    info!(
+                        consecutive_read_only_iterations = counter,
+                        "intercepting premature end_turn; injecting force-progress and continuing"
+                    );
+                    crate::helpers::append_warning(&mut state.messages, &msg);
+                    streaming::emit(event_tx, AgentLoopEvent::Warning(msg));
+                    state.counters.consecutive_read_only_iterations =
+                        crate::constants::READ_ONLY_FORCE_TOOL_THRESHOLD;
+                    return false;
+                }
+                true
+            }
             StopReason::MaxTokens => !iteration::handle_max_tokens(&self.config, response, state),
             StopReason::ToolUse => {
                 tool_execution::handle_tool_use(self, response, executor, event_tx, state).await

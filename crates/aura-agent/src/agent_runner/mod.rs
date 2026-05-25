@@ -617,6 +617,18 @@ pub fn configure_loop_config(
         // instead of "Thought for 2m"-bursting. Chat / non-task
         // callers leave this off (the default).
         disable_thinking_iteration_0: true,
+        // Harness v2.1: intercept premature end_turn when the model
+        // has done read-only tool calls without writing. Phase 1's
+        // failure surface ("task reached implementation phase but no
+        // file operations completed -- needs decomposition") was
+        // dominated by the loop exiting on EndTurn before any write
+        // happened. Dev-loop tasks have a hard "must write or
+        // task_done" contract, so we override EndTurn into a
+        // FORCE-PROGRESS injection + tool_choice override on the next
+        // iteration. Chat / non-task callers leave this off (the
+        // default) so a "read one file and answer" turn still ends
+        // cleanly.
+        intercept_premature_end_turn: true,
         ..AgentLoopConfig::default()
     }
 }
