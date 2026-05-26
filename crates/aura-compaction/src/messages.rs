@@ -2,7 +2,24 @@
 
 use aura_reasoner::{ContentBlock, Message, ModelRequestKind, Role, ToolResultContent};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use tracing::debug;
+
+/// Read-only tools whose results are safe to fold by `content_hash`.
+///
+/// Must stay in sync with `aura_agent::constants::CACHEABLE_TOOLS`.
+/// Duplicated here (rather than imported) because `aura-agent` already
+/// depends on `aura-compaction` and the reverse direction would
+/// introduce a cycle. The set is small and stable enough that drift is
+/// easy to spot in review.
+const READ_ONLY_DEDUP_TOOLS: &[&str] = &[
+    "read_file",
+    "list_files",
+    "stat_file",
+    "find_files",
+    "search_code",
+];
 
 const CHARS_PER_TOKEN: usize = 4;
 const COMPACTION_TIER_HISTORY: f64 = 0.85;
@@ -736,6 +753,159 @@ pub fn compact_older_messages(messages: &mut [Message], config: &CompactionConfi
     }
 }
 
+/// Stable hex digest matching the one stamped by
+/// `aura_tools::fs_tools::read::content_hash_hex`. Re-derived locally
+/// from the rendered ToolResult bytes because compaction sees the
+/// `Message`-level shape (with no metadata side-channel) — and because
+/// `DefaultHasher` is deterministic for the same bytes, the hash
+/// produced here matches the one originally stamped by the read tool
+/// for the same content.
+fn dedup_content_hash_hex(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Build a `tool_use_id -> tool_name` index by scanning every
+/// `ContentBlock::ToolUse` in `messages`. The companion
+/// `ContentBlock::ToolResult` only carries `tool_use_id`, so dedup
+/// needs the index to filter by `READ_ONLY_DEDUP_TOOLS`.
+fn tool_use_name_index(messages: &[Message]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                map.insert(id.clone(), name.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Look up the `path` argument from the `ContentBlock::ToolUse` whose
+/// `id == tool_use_id`. Used to populate the `path` field of the dedup
+/// marker so the model can still reason about which file the folded
+/// read referred to. Returns `None` if the input has no `path` string
+/// (e.g. `search_code`).
+fn tool_use_input_path(messages: &[Message], tool_use_id: &str) -> Option<String> {
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, input, .. } = block {
+                if id == tool_use_id {
+                    return input
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect a previously-emitted dedup marker so a second pass over the
+/// same `messages` doesn't fold it into a marker-of-a-marker. The
+/// marker shape is `{ "_redacted": "<read_only_tool>", ... }`; any
+/// other `_redacted` shape (e.g. the write-input shape produced by
+/// [`RedactionMarker`]) is ignored here.
+fn is_dedup_marker_text(text: &str) -> bool {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let Some(redacted) = map.get("_redacted").and_then(Value::as_str) else {
+        return false;
+    };
+    READ_ONLY_DEDUP_TOOLS.contains(&redacted)
+}
+
+/// Collapse older read-only tool results whose `content_hash` matches
+/// a later occurrence to a short structured marker, keeping the newest
+/// copy verbatim. Returns the number of folds applied.
+///
+/// Walks newest-to-oldest. For each `ContentBlock::ToolResult` whose
+/// matching `ContentBlock::ToolUse` names a tool in
+/// [`READ_ONLY_DEDUP_TOOLS`], the helper hashes the rendered tool
+/// output text and tracks `(tool_name, content_hash)` in a set. The
+/// first time a hash is seen, the message is kept verbatim and the
+/// hash is recorded; on every subsequent (older) occurrence of the
+/// same `(tool_name, content_hash)` pair, the tool result's text is
+/// replaced with a one-line JSON marker:
+///
+/// ```json
+/// {"_redacted":"read_file","path":"<path>","content_hash":"<hash>","note":"see later identical read"}
+/// ```
+///
+/// The message structure (role, `tool_use_id`, `is_error`) is left
+/// untouched so the assistant/tool-result pairing the Anthropic API
+/// requires stays intact — only the text content shrinks. Existing
+/// dedup markers are detected via [`is_dedup_marker_text`] and skipped
+/// so re-running compaction does not collapse markers into
+/// markers-of-markers.
+pub(crate) fn dedup_read_results_by_content_hash(messages: &mut [Message]) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let name_index = tool_use_name_index(messages);
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut folded = 0usize;
+
+    let len = messages.len();
+    for i in (0..len).rev() {
+        let block_count = messages[i].content.len();
+        for block_idx in 0..block_count {
+            let (tool_use_id, rendered_text) = {
+                let block = &messages[i].content[block_idx];
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                let text = match content {
+                    ToolResultContent::Text(t) => t.clone(),
+                    ToolResultContent::Json(v) => serde_json::to_string(v).unwrap_or_default(),
+                };
+                (tool_use_id.clone(), text)
+            };
+
+            if is_dedup_marker_text(&rendered_text) {
+                continue;
+            }
+
+            let Some(tool_name) = name_index.get(&tool_use_id).cloned() else {
+                continue;
+            };
+            if !READ_ONLY_DEDUP_TOOLS.contains(&tool_name.as_str()) {
+                continue;
+            }
+
+            let hash = dedup_content_hash_hex(rendered_text.as_bytes());
+            let key = (tool_name.clone(), hash.clone());
+            if seen.contains(&key) {
+                let path = tool_use_input_path(messages, &tool_use_id).unwrap_or_default();
+                let marker = serde_json::json!({
+                    "_redacted": tool_name,
+                    "path": path,
+                    "content_hash": hash,
+                    "note": "see later identical read",
+                });
+                if let ContentBlock::ToolResult { content, .. } =
+                    &mut messages[i].content[block_idx]
+                {
+                    *content = ToolResultContent::Text(marker.to_string());
+                    folded += 1;
+                }
+            } else {
+                seen.insert(key);
+            }
+        }
+    }
+    folded
+}
+
 /// Choose and apply a compaction tier using context-window utilization
 /// and explicit request-body caps.
 #[allow(clippy::needless_pass_by_value)]
@@ -753,6 +923,14 @@ pub fn compact_messages(input: CompactionInput<'_>) -> CompactionReport {
             preserve_recent = tier.preserve_recent,
             "Compacting context"
         );
+        // Phase 2: fold older read-only tool results that the model
+        // has already re-read more recently. Runs before
+        // `compact_older_messages` so the truncation step never sees
+        // (and therefore never re-redacts) an already-folded marker.
+        let folded = dedup_read_results_by_content_hash(input.messages);
+        if folded > 0 {
+            debug!(folded, "content_hash dedup folded older read-only tool results");
+        }
         compact_older_messages(input.messages, &tier);
     }
 
@@ -1566,6 +1744,227 @@ mod tests {
                 },
                 other => panic!("expected ToolResult, got {other:?}"),
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2: content_hash dedup of read-only tool results.
+    //
+    // The fixtures below build hand-crafted ToolUse/ToolResult message
+    // pairs (rather than going through the agent loop) so the dedup
+    // helper can be exercised in isolation. Each test pins down a
+    // single contract documented in the matching `assert!`.
+    // ------------------------------------------------------------------
+
+    fn read_tool_use(id: &str, path: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::tool_use(
+                id,
+                "read_file",
+                serde_json::json!({ "path": path }),
+            )],
+        }
+    }
+
+    fn read_tool_result(id: &str, body: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::tool_result(
+                id,
+                ToolResultContent::Text(body.to_string()),
+                false,
+            )],
+        }
+    }
+
+    fn write_tool_use(id: &str, path: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::tool_use(
+                id,
+                "write_file",
+                serde_json::json!({ "path": path, "content": "..." }),
+            )],
+        }
+    }
+
+    fn write_tool_result(id: &str, body: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::tool_result(
+                id,
+                ToolResultContent::Text(body.to_string()),
+                false,
+            )],
+        }
+    }
+
+    #[test]
+    fn dedup_collapses_older_identical_read_keeps_newest() {
+        let body = "fn main() {\n    println!(\"hi\");\n}\n".repeat(20);
+        let mut messages = vec![
+            read_tool_use("tu_older", "src/main.rs"),
+            read_tool_result("tu_older", &body),
+            Message::assistant("intermediate step"),
+            read_tool_use("tu_newer", "src/main.rs"),
+            read_tool_result("tu_newer", &body),
+        ];
+
+        let folded = dedup_read_results_by_content_hash(&mut messages);
+        assert_eq!(folded, 1, "exactly the older identical read should fold");
+
+        // Newer (last) read stays verbatim.
+        match &messages[4].content[0] {
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(t) => assert_eq!(t, &body, "newest read must be verbatim"),
+                other => panic!("expected Text, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        // Older read becomes the structured marker.
+        match &messages[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(t) => {
+                    let parsed: Value = serde_json::from_str(t)
+                        .expect("marker must be valid JSON so downstream serde survives");
+                    assert_eq!(parsed["_redacted"], "read_file");
+                    assert_eq!(parsed["path"], "src/main.rs");
+                    assert_eq!(parsed["note"], "see later identical read");
+                    assert!(
+                        parsed["content_hash"].as_str().is_some_and(|h| !h.is_empty()),
+                        "marker must carry the content_hash of the folded read"
+                    );
+                    assert!(
+                        t.len() < body.len() / 2,
+                        "marker must be substantially shorter than the original"
+                    );
+                }
+                other => panic!("expected Text marker, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_does_not_touch_write_tool_results() {
+        // Two write_file tool results with byte-identical text. Even
+        // though their hashes match, `write_file` is not in the
+        // read-only dedup set so neither result must be folded.
+        let body = "write succeeded: src/lib.rs (32 bytes)";
+        let mut messages = vec![
+            write_tool_use("tu_w1", "src/lib.rs"),
+            write_tool_result("tu_w1", body),
+            Message::assistant("step"),
+            write_tool_use("tu_w2", "src/lib.rs"),
+            write_tool_result("tu_w2", body),
+        ];
+
+        let folded = dedup_read_results_by_content_hash(&mut messages);
+        assert_eq!(folded, 0, "write_file results must never be folded");
+
+        for idx in [1usize, 4] {
+            match &messages[idx].content[0] {
+                ContentBlock::ToolResult { content, .. } => match content {
+                    ToolResultContent::Text(t) => {
+                        assert_eq!(t, body, "write_file result at idx {idx} must stay verbatim");
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                },
+                other => panic!("expected ToolResult, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn dedup_preserves_message_count_and_tool_use_ids() {
+        let body_a = "lots of bytes A".repeat(50);
+        let body_b = "lots of bytes B".repeat(50);
+        let mut messages = vec![
+            read_tool_use("tu_a1", "a.rs"),
+            read_tool_result("tu_a1", &body_a),
+            read_tool_use("tu_b1", "b.rs"),
+            read_tool_result("tu_b1", &body_b),
+            Message::assistant("midway"),
+            read_tool_use("tu_a2", "a.rs"),
+            read_tool_result("tu_a2", &body_a),
+            read_tool_use("tu_b2", "b.rs"),
+            read_tool_result("tu_b2", &body_b),
+        ];
+        let before_len = messages.len();
+        let before_use_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| match m.content.first() {
+                Some(ContentBlock::ToolUse { id, .. }) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let before_result_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| match m.content.first() {
+                Some(ContentBlock::ToolResult { tool_use_id, .. }) => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let folded = dedup_read_results_by_content_hash(&mut messages);
+        assert_eq!(folded, 2, "two older reads (one per body) should fold");
+        assert_eq!(messages.len(), before_len, "length must be preserved");
+
+        let after_use_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| match m.content.first() {
+                Some(ContentBlock::ToolUse { id, .. }) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let after_result_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| match m.content.first() {
+                Some(ContentBlock::ToolResult { tool_use_id, .. }) => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            after_use_ids, before_use_ids,
+            "tool_use ids must remain in the same positions"
+        );
+        assert_eq!(
+            after_result_ids, before_result_ids,
+            "tool_use_ids on ToolResult blocks must remain in the same positions"
+        );
+    }
+
+    #[test]
+    fn dedup_respects_distinct_hashes() {
+        // Two read_file results with *different* content. Neither
+        // should be folded; both stay verbatim.
+        let body_a = "alpha bytes".repeat(30);
+        let body_b = "bravo bytes".repeat(30);
+        let mut messages = vec![
+            read_tool_use("tu_a", "a.rs"),
+            read_tool_result("tu_a", &body_a),
+            read_tool_use("tu_b", "b.rs"),
+            read_tool_result("tu_b", &body_b),
+        ];
+
+        let folded = dedup_read_results_by_content_hash(&mut messages);
+        assert_eq!(folded, 0, "distinct hashes must not be folded");
+
+        match &messages[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(t) => assert_eq!(t, &body_a),
+                other => panic!("expected Text, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        match &messages[3].content[0] {
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(t) => assert_eq!(t, &body_b),
+                other => panic!("expected Text, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
         }
     }
 
