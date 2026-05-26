@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use aura_reasoner::{
     ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, Role, StopReason,
-    ToolChoice, ToolDefinition,
+    ThinkingEffort, ToolChoice, ToolDefinition,
 };
 use aura_tools::IntentClassifier;
 use chrono::Utc;
@@ -757,6 +757,20 @@ pub struct LoopState {
     /// task-executor boundary, so reading it on the loop side keeps
     /// the handler signature small.
     pub(crate) task_done_completed: bool,
+    /// Phase 2: set to `true` the iteration after a successful
+    /// `submit_plan` accept has been observed via
+    /// [`AgentLoopConfig::phase_reset_signal`]. Cumulative across the
+    /// run — never reset. Drives [`Self::compute_thinking_effort`] to
+    /// drop to `Low` once a plan exists, mirroring codex's
+    /// post-plan `reasoning.effort=low` behaviour.
+    ///
+    /// We deliberately reuse the existing `phase_reset_signal`
+    /// handshake (set by `handle_submit_plan` in the task executor)
+    /// instead of inventing a parallel signal path. The first
+    /// iteration's flip is the task-start pre-seed (see
+    /// `agent_runner::execute_task_tracked`), so we only treat
+    /// observations on `iteration > 0` as real submit_plan acceptances.
+    pub(crate) submit_plan_called: bool,
     pub(crate) checkpoint_emitted: bool,
     pub(crate) exploration_compaction_done: bool,
     pub(crate) build_cooldown: usize,
@@ -789,6 +803,7 @@ impl LoopState {
             had_any_write: false,
             had_any_file_write: false,
             task_done_completed: false,
+            submit_plan_called: false,
             checkpoint_emitted: false,
             exploration_compaction_done: false,
             build_cooldown: 0,
@@ -849,6 +864,17 @@ impl LoopState {
                 );
                 self.exploration_state.count = 0;
                 self.exploration_compaction_done = false;
+                // Phase 2: latch the "submit_plan was accepted" signal
+                // for the effort policy. The reset signal is also flipped
+                // at task start (pre-seeded `true` in
+                // `agent_runner::execute_task_tracked` so the first
+                // iteration's reset path fires), so we only treat
+                // observations on `iteration > 0` as real submit_plan
+                // acceptances. Iteration 0's flip is the task-start
+                // pre-seed and must not toggle the effort policy.
+                if iteration > 0 {
+                    self.submit_plan_called = true;
+                }
             }
         }
 
@@ -883,6 +909,48 @@ impl LoopState {
                 (f64::from(self.thinking.budget) * config.thinking_taper_factor) as u32;
             self.thinking.budget = self.thinking.budget.max(config.thinking_min_budget);
         }
+    }
+
+    /// Phase 2: dev-loop reasoning-effort policy applied per iteration.
+    /// Codex sets `reasoning.effort` explicitly per Responses API call
+    /// (codex-rs/core/src/client.rs:698-714); the rules below are the
+    /// dev-loop analog tailored to aura's `write_file`/`edit_file`/
+    /// `delete_file` surface plus the Phase 1.B continuation runtime.
+    ///
+    /// Resolution order (first match wins):
+    ///
+    /// 1. Iteration 0 with `disable_thinking_iteration_0` → `Off`.
+    ///    Preserves the existing "fast tool call before first read"
+    ///    behaviour the runner opts into for dev-loop tasks.
+    /// 2. Iteration 0 otherwise → `Medium` (analysis turn).
+    /// 3. `had_any_file_write` → `Low` (forward motion has happened,
+    ///    cap the deliberation budget).
+    /// 4. `submit_plan_called` → `Low` (the plan exists; codex drops
+    ///    to low effort once the agent is committed to an
+    ///    implementation phase).
+    /// 5. A continuation steering message was just injected
+    ///    (`continuation.consecutive_no_write > 0`, Phase 1.B) → `Low`
+    ///    (the harness is already pushing forward — don't let the
+    ///    model burn 2m of thinking on a re-read).
+    /// 6. Otherwise → `Medium`.
+    fn compute_thinking_effort(
+        &self,
+        config: &AgentLoopConfig,
+        iteration: usize,
+    ) -> ThinkingEffort {
+        if iteration == 0 {
+            if config.disable_thinking_iteration_0 {
+                return ThinkingEffort::Off;
+            }
+            return ThinkingEffort::Medium;
+        }
+        if self.had_any_file_write
+            || self.submit_plan_called
+            || self.continuation.consecutive_no_write > 0
+        {
+            return ThinkingEffort::Low;
+        }
+        ThinkingEffort::Medium
     }
 
     fn build_request(
@@ -1009,11 +1077,24 @@ impl LoopState {
             self.thinking.budget
         };
 
+        // Phase 2: dev-loop callers opt into the explicit
+        // `reasoning.effort` policy. Non-dev-loop (chat / generic)
+        // callers stay on the legacy `max_tokens > 2048` auto-enable
+        // path by leaving `thinking_effort = None`, so this commit is
+        // backwards-compatible for everyone except the dev loop the
+        // codex-pattern adoption is targeting.
+        let thinking_effort = if config.dev_loop_completion_required {
+            Some(self.compute_thinking_effort(config, iteration))
+        } else {
+            None
+        };
+
         ModelRequest::builder(&config.model, &config.system_prompt)
             .messages(self.messages.clone())
             .tools(effective_tools)
             .tool_choice(tool_choice)
             .max_tokens(effective_max_tokens)
+            .thinking_effort(thinking_effort)
             .auth_token(config.auth_token.clone())
             .upstream_provider_family(config.upstream_provider_family.clone())
             .aura_project_id(config.aura_project_id.clone())

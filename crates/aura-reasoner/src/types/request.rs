@@ -23,6 +23,30 @@ pub struct ThinkingConfig {
     pub budget_tokens: u32,
 }
 
+/// Phase 2: explicit per-request reasoning effort knob, codex's
+/// `reasoning.effort` analog (see
+/// [codex-rs/core/src/client.rs:698-714](https://github.com/.../codex-rs/core/src/client.rs)).
+///
+/// Callers opt in by setting `ModelRequest::thinking_effort = Some(...)`.
+/// **Backwards-compatibility note:** when `thinking_effort` is `None`, the
+/// Anthropic provider falls through to the legacy `max_tokens > 2048`
+/// auto-enable path so existing callers do not change behaviour during
+/// rollout. New callers (e.g. the dev-loop) should set this explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingEffort {
+    /// Extended thinking disabled for this request.
+    Off,
+    /// Standard mode, ~1024-token budget. Fast tool calls without
+    /// burning a multi-minute deliberation pass.
+    Low,
+    /// Adaptive mode, ~4096-token budget. Default for analysis turns.
+    Medium,
+    /// Adaptive mode with a budget proportional to `max_tokens`
+    /// (clamped to `8192..=16000`). Use sparingly — this is the
+    /// "burn a lot of thinking" knob.
+    High,
+}
+
 // ============================================================================
 // Strong-typed request primitives
 // ============================================================================
@@ -229,6 +253,13 @@ pub struct ModelRequest {
     /// thinking with the given budget. When `None`, provider-default behavior
     /// applies.
     pub thinking: Option<ThinkingConfig>,
+    /// Phase 2: explicit reasoning-effort policy applied per request.
+    ///
+    /// When `Some(_)`, the Anthropic provider uses the matching budget
+    /// preset (see [`ThinkingEffort`]). When `None`, the provider falls
+    /// through to the legacy `max_tokens > 2048` auto-enable path so
+    /// non-migrated callers keep their current behaviour.
+    pub thinking_effort: Option<ThinkingEffort>,
     /// Optional JWT auth token for proxy routing.
     pub auth_token: Option<String>,
     /// Optional upstream provider family hint for managed proxy routing.
@@ -275,6 +306,7 @@ pub struct ModelRequestBuilder {
     max_tokens: u32,
     temperature: Option<f32>,
     thinking: Option<ThinkingConfig>,
+    thinking_effort: Option<ThinkingEffort>,
     auth_token: Option<String>,
     upstream_provider_family: Option<String>,
     aura_project_id: Option<String>,
@@ -299,6 +331,7 @@ impl ModelRequestBuilder {
             max_tokens: 4096,
             temperature: None,
             thinking: None,
+            thinking_effort: None,
             auth_token: None,
             upstream_provider_family: None,
             aura_project_id: None,
@@ -357,6 +390,15 @@ impl ModelRequestBuilder {
     #[must_use]
     pub const fn thinking(mut self, config: ThinkingConfig) -> Self {
         self.thinking = Some(config);
+        self
+    }
+
+    /// Phase 2: set the explicit reasoning-effort policy for this
+    /// request. Pass `None` to keep the legacy `max_tokens`-coupled
+    /// auto-enable behaviour for the Anthropic provider.
+    #[must_use]
+    pub const fn thinking_effort(mut self, effort: Option<ThinkingEffort>) -> Self {
+        self.thinking_effort = effort;
         self
     }
 
@@ -441,6 +483,7 @@ impl ModelRequestBuilder {
             max_tokens,
             temperature,
             thinking: self.thinking,
+            thinking_effort: self.thinking_effort,
             auth_token: self.auth_token,
             upstream_provider_family: self.upstream_provider_family,
             aura_project_id: self.aura_project_id,

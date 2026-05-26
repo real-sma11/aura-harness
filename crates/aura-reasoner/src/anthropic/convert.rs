@@ -3,8 +3,8 @@ use super::api_types::{
     ApiToolChoice,
 };
 use crate::{
-    ContentBlock, ImageSource, Message, ModelRequest, Role, ToolChoice, ToolDefinition,
-    ToolResultContent,
+    ContentBlock, ImageSource, Message, ModelRequest, Role, ThinkingEffort, ToolChoice,
+    ToolDefinition, ToolResultContent,
 };
 
 /// Resolve extended thinking config for a given model.
@@ -39,12 +39,35 @@ fn thinking_mode_for_model(model: &str) -> Option<ThinkingMode> {
 pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<ApiThinkingConfig> {
     let thinking_mode = thinking_mode_for_model(model)?;
 
+    // Phase 2: explicit reasoning-effort knob takes precedence over the
+    // legacy `max_tokens > 2048` auto-enable path. Codex sets
+    // `reasoning.effort` per request (codex-rs/core/src/client.rs:698-714);
+    // when a caller opts in via `ModelRequest::thinking_effort = Some(_)`,
+    // bypass both the explicit `ThinkingConfig` honoring AND the
+    // max_tokens-coupled heuristic, and use the calibrated budget that
+    // matches the requested effort. `None` falls through to the legacy
+    // behaviour below so non-migrated callers keep their current shape.
+    if let Some(effort) = request.thinking_effort {
+        return match effort {
+            ThinkingEffort::Off => None,
+            ThinkingEffort::Low => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: Some(1024),
+            }),
+            ThinkingEffort::Medium => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: Some(4096),
+            }),
+            ThinkingEffort::High => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: Some((request.max_tokens.get() / 2).clamp(8192, 16000)),
+            }),
+        };
+    }
+
     if let Some(ref cfg) = request.thinking {
         return Some(ApiThinkingConfig {
-            thinking_type: match thinking_mode {
-                ThinkingMode::Adaptive => "adaptive".to_string(),
-                ThinkingMode::Enabled => "enabled".to_string(),
-            },
+            thinking_type: thinking_mode_label(thinking_mode).to_string(),
             budget_tokens: match thinking_mode {
                 ThinkingMode::Adaptive => None,
                 ThinkingMode::Enabled => Some(cfg.budget_tokens),
@@ -54,10 +77,7 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
 
     if request.max_tokens.get() > 2048 {
         Some(ApiThinkingConfig {
-            thinking_type: match thinking_mode {
-                ThinkingMode::Adaptive => "adaptive".to_string(),
-                ThinkingMode::Enabled => "enabled".to_string(),
-            },
+            thinking_type: thinking_mode_label(thinking_mode).to_string(),
             budget_tokens: match thinking_mode {
                 ThinkingMode::Adaptive => None,
                 ThinkingMode::Enabled => Some((request.max_tokens.get() / 2).clamp(1024, 16000)),
@@ -68,17 +88,32 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
     }
 }
 
+fn thinking_mode_label(mode: ThinkingMode) -> &'static str {
+    match mode {
+        ThinkingMode::Adaptive => "adaptive",
+        ThinkingMode::Enabled => "enabled",
+    }
+}
+
 pub(super) fn resolve_output_config(
     request: &ModelRequest,
     model: &str,
 ) -> Option<ApiOutputConfig> {
     let thinking = resolve_thinking(request, model)?;
-    if thinking.thinking_type == "adaptive" {
-        Some(ApiOutputConfig {
+    if thinking.thinking_type != "adaptive" {
+        return None;
+    }
+    // Phase 2: only force `output_config.effort = "high"` when the
+    // caller explicitly opted into [`ThinkingEffort::High`], or when the
+    // legacy auto-enable path fired (`thinking_effort: None`). Low /
+    // Medium / Off opt-in callers must NOT inherit the forced-high
+    // effort — that's exactly the override that amplifies the doom
+    // loop's read iterations.
+    match request.thinking_effort {
+        Some(ThinkingEffort::Off | ThinkingEffort::Low | ThinkingEffort::Medium) => None,
+        Some(ThinkingEffort::High) | None => Some(ApiOutputConfig {
             effort: "high".to_string(),
-        })
-    } else {
-        None
+        }),
     }
 }
 

@@ -19,7 +19,7 @@ pub use content_profile::{
 pub use message::Message;
 pub use request::{
     MaxTokens, ModelName, ModelRequest, ModelRequestBuilder, PromptCacheRetention, Temperature,
-    ThinkingConfig,
+    ThinkingConfig, ThinkingEffort,
 };
 pub use response::{ModelResponse, ProviderTrace, StopReason, Usage};
 pub use streaming::{

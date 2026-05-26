@@ -583,6 +583,50 @@ fn phase_reset_clears_exploration_budget() {
     );
 }
 
+/// Phase 2: the `phase_reset_signal` flip on iteration > 0 must
+/// latch `submit_plan_called` so the effort policy can drop to
+/// `Low` once a plan has actually been accepted. The iteration-0
+/// flip is the task-start pre-seed (see
+/// `agent_runner::execute_task_tracked`) and must NOT latch the
+/// signal — confirms the heuristic that separates "task start" from
+/// "real submit_plan accept".
+#[test]
+fn submit_plan_signal_latches_only_on_iteration_after_zero() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let signal = Arc::new(AtomicBool::new(false));
+    let config = AgentLoopConfig {
+        phase_reset_signal: Some(Arc::clone(&signal)),
+        ..AgentLoopConfig::default()
+    };
+    let mut state = super::LoopState::new(&config, vec![]);
+
+    // Task-start pre-seed: iteration 0 observes the flip but the
+    // latch stays off (this is the runner zeroing exploration, not
+    // a real submit_plan accept).
+    signal.store(true, Ordering::Release);
+    state.begin_iteration(&config, 0);
+    assert!(
+        !state.submit_plan_called,
+        "iteration-0 reset is the task-start pre-seed; must not latch"
+    );
+
+    // Real submit_plan accept (executor flips the signal mid-run):
+    // iteration > 0 observes it and the latch turns on.
+    signal.store(true, Ordering::Release);
+    state.begin_iteration(&config, 4);
+    assert!(
+        state.submit_plan_called,
+        "iteration > 0 reset is a real submit_plan accept; must latch"
+    );
+
+    // Latch is cumulative — subsequent iterations keep it set even
+    // when the signal is not flipped again.
+    state.begin_iteration(&config, 5);
+    assert!(state.submit_plan_called, "latch is cumulative");
+}
+
 /// Companion: when the signal is wired but not flipped, the reset
 /// branch must not fire — the exploration counter keeps ticking.
 #[test]
@@ -617,6 +661,148 @@ fn begin_iteration_no_op_when_no_signal_configured() {
     state.begin_iteration(&config, 5);
 
     assert_eq!(state.exploration_state.count, 40);
+}
+
+// ------------------------------------------------------------------
+// Phase 2 — `compute_thinking_effort` dev-loop policy
+// ------------------------------------------------------------------
+
+/// `disable_thinking_iteration_0: true` + iteration 0 → `Off`,
+/// regardless of any other state. Preserves the runner's
+/// fast-first-tool-call behaviour while routing through the new
+/// codex-style effort knob instead of the legacy max_tokens clamp.
+#[test]
+fn effort_off_when_disable_thinking_iteration_0() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig {
+        disable_thinking_iteration_0: true,
+        ..AgentLoopConfig::default()
+    };
+    let state = super::LoopState::new(&config, vec![]);
+    assert_eq!(
+        state.compute_thinking_effort(&config, 0),
+        ThinkingEffort::Off
+    );
+}
+
+/// Default analysis turn (iteration 0 without
+/// `disable_thinking_iteration_0`) gets `Medium` so the agent has
+/// budget to plan before its first tool call. Mirrors codex's
+/// default `reasoning.effort = medium`.
+#[test]
+fn effort_medium_on_iteration_0_no_disable() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig {
+        disable_thinking_iteration_0: false,
+        ..AgentLoopConfig::default()
+    };
+    let state = super::LoopState::new(&config, vec![]);
+    assert_eq!(
+        state.compute_thinking_effort(&config, 0),
+        ThinkingEffort::Medium
+    );
+}
+
+/// Once the first write_file/edit_file/delete_file has landed, drop
+/// to `Low`. Caps the thinking spiral that amplifies follow-up
+/// iterations after forward motion has already happened.
+#[test]
+fn effort_low_after_first_write() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig::default();
+    let mut state = super::LoopState::new(&config, vec![]);
+    state.had_any_file_write = true;
+    assert_eq!(
+        state.compute_thinking_effort(&config, 3),
+        ThinkingEffort::Low
+    );
+}
+
+/// Once `submit_plan` has been accepted (signal observed on
+/// iteration > 0), drop to `Low`. Codex's analogous behaviour is to
+/// keep effort low during the implementation phase.
+#[test]
+fn effort_low_after_submit_plan() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig::default();
+    let mut state = super::LoopState::new(&config, vec![]);
+    state.submit_plan_called = true;
+    assert_eq!(
+        state.compute_thinking_effort(&config, 2),
+        ThinkingEffort::Low
+    );
+}
+
+/// After a continuation steering message was just injected by the
+/// Phase 1.B runtime (`consecutive_no_write > 0`), drop to `Low`.
+/// The harness is already pushing the model forward — extra
+/// deliberation budget would feed the same read-loop the
+/// continuation prompt is trying to break.
+#[test]
+fn effort_low_after_continuation_injected() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig::default();
+    let mut state = super::LoopState::new(&config, vec![]);
+    state.continuation.consecutive_no_write = 1;
+    assert_eq!(
+        state.compute_thinking_effort(&config, 4),
+        ThinkingEffort::Low
+    );
+}
+
+/// Non-iteration-0 iterations without writes, plans, or continuation
+/// pressure default to `Medium`. Confirms the policy doesn't
+/// silently fall to `Low` without one of the explicit triggers.
+#[test]
+fn effort_medium_default_after_iteration_zero() {
+    use aura_reasoner::ThinkingEffort;
+
+    let config = AgentLoopConfig::default();
+    let state = super::LoopState::new(&config, vec![]);
+    assert_eq!(
+        state.compute_thinking_effort(&config, 3),
+        ThinkingEffort::Medium
+    );
+}
+
+/// `build_request` only opts into the explicit effort knob for
+/// dev-loop callers. Chat / generic callers leave `thinking_effort`
+/// `None` so they keep the legacy `max_tokens > 2048` auto-enable
+/// path. This is the backwards-compatibility seam called out in the
+/// commit message.
+#[test]
+fn build_request_emits_thinking_effort_only_for_dev_loop() {
+    let chat_config = AgentLoopConfig {
+        dev_loop_completion_required: false,
+        ..AgentLoopConfig::default()
+    };
+    let chat_state = super::LoopState::new(&chat_config, vec![]);
+    let chat_req = chat_state
+        .build_request(&chat_config, &[], 2)
+        .expect("build_request must succeed for chat");
+    assert!(
+        chat_req.thinking_effort.is_none(),
+        "chat callers must NOT opt into the new effort knob (preserves legacy behaviour)"
+    );
+
+    let dev_config = AgentLoopConfig {
+        dev_loop_completion_required: true,
+        disable_thinking_iteration_0: true,
+        ..AgentLoopConfig::default()
+    };
+    let dev_state = super::LoopState::new(&dev_config, vec![]);
+    let dev_req = dev_state
+        .build_request(&dev_config, &[], 0)
+        .expect("build_request must succeed for dev-loop");
+    assert!(
+        dev_req.thinking_effort.is_some(),
+        "dev-loop callers must opt into the explicit effort knob"
+    );
 }
 
 /// Sanity: with the read-only / force-tool steering removed by the

@@ -97,8 +97,8 @@ pub use types::{
     ModelContentProfile, ModelContractVerdict, ModelContractViolationReason, ModelName,
     ModelRequest, ModelRequestContractViolation, ModelRequestKind, ModelRequestMetadata,
     ModelResponse, PartialToolUse, PromptCacheRetention, ProviderTrace, Role, StopReason,
-    StreamAccumulator, StreamContentType, StreamEvent, Temperature, ThinkingConfig, ToolChoice,
-    ToolDefinition, ToolResultContent, Usage,
+    StreamAccumulator, StreamContentType, StreamEvent, Temperature, ThinkingConfig,
+    ThinkingEffort, ToolChoice, ToolDefinition, ToolResultContent, Usage,
 };
 
 use futures_util::Stream;

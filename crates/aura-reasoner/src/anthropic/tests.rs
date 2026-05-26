@@ -6,8 +6,8 @@ use super::convert::{
 use super::{AnthropicConfig, AnthropicProvider, ApiError};
 use crate::{
     ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, PromptCacheRetention,
-    ReasonerError, Role, StopReason, StreamEvent, ThinkingConfig, ToolChoice, ToolDefinition,
-    ToolResultContent,
+    ReasonerError, Role, StopReason, StreamEvent, ThinkingConfig, ThinkingEffort, ToolChoice,
+    ToolDefinition, ToolResultContent,
 };
 use futures_util::StreamExt;
 use std::time::Duration;
@@ -450,6 +450,124 @@ fn test_resolve_thinking_none_for_unsupported_claude_3_variants() {
         .unwrap();
     let thinking = resolve_thinking(&request, "claude-3-haiku");
     assert!(thinking.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — `ThinkingEffort` knob (codex `reasoning.effort` analog)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thinking_effort_off_emits_no_config() {
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Off))
+        .try_build()
+        .unwrap();
+    assert!(resolve_thinking(&request, TEST_DEFAULT_MODEL).is_none());
+    assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
+}
+
+#[test]
+fn thinking_effort_low_emits_fixed_1024_budget() {
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Low))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("Low emits a config");
+    assert_eq!(thinking.thinking_type, "adaptive");
+    assert_eq!(thinking.budget_tokens, Some(1024));
+    // Low must NOT inherit the forced effort=high override — that's
+    // exactly the spiral amplifier we want to cap.
+    assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
+}
+
+#[test]
+fn thinking_effort_medium_emits_fixed_4096_budget() {
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Medium))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("Medium emits a config");
+    assert_eq!(thinking.thinking_type, "adaptive");
+    assert_eq!(thinking.budget_tokens, Some(4096));
+    assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
+}
+
+#[test]
+fn thinking_effort_high_clamps_budget_to_8192_16000() {
+    // Small ceiling: clamp pushes the budget up to 8192.
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(8_192)
+        .thinking_effort(Some(ThinkingEffort::High))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("High emits a config");
+    assert_eq!(thinking.thinking_type, "adaptive");
+    assert_eq!(thinking.budget_tokens, Some(8_192));
+
+    // Large ceiling: clamp pulls the budget down to 16000.
+    let request_big = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(64_000)
+        .thinking_effort(Some(ThinkingEffort::High))
+        .try_build()
+        .unwrap();
+    let thinking_big =
+        resolve_thinking(&request_big, TEST_DEFAULT_MODEL).expect("High emits a config");
+    assert_eq!(thinking_big.budget_tokens, Some(16_000));
+
+    // High retains the existing forced effort=high override for adaptive.
+    let out = resolve_output_config(&request, TEST_DEFAULT_MODEL).expect("High keeps effort=high");
+    assert_eq!(out.effort, "high");
+}
+
+#[test]
+fn thinking_effort_none_preserves_legacy_max_tokens_gate() {
+    // No effort set + max_tokens above the legacy 2048 threshold:
+    // legacy auto-enable fires unchanged.
+    let auto = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(8_192)
+        .try_build()
+        .unwrap();
+    let thinking_auto = resolve_thinking(&auto, TEST_DEFAULT_MODEL).expect("legacy auto-enable");
+    assert_eq!(thinking_auto.thinking_type, "adaptive");
+    assert_eq!(thinking_auto.budget_tokens, None);
+    let out_auto = resolve_output_config(&auto, TEST_DEFAULT_MODEL).expect("legacy effort=high");
+    assert_eq!(out_auto.effort, "high");
+
+    // No effort set + max_tokens at/below 2048: legacy gate keeps it off.
+    let off = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(2_048)
+        .try_build()
+        .unwrap();
+    assert!(resolve_thinking(&off, TEST_DEFAULT_MODEL).is_none());
+}
+
+#[test]
+fn thinking_effort_returns_none_for_models_without_thinking_support() {
+    // Models that don't support thinking (e.g. Haiku) must stay off
+    // regardless of the effort knob — capability detection wins.
+    let request = ModelRequest::builder("aura-claude-haiku-4-5", "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::High))
+        .try_build()
+        .unwrap();
+    assert!(resolve_thinking(&request, "aura-claude-haiku-4-5").is_none());
+}
+
+#[test]
+fn thinking_effort_low_on_older_model_emits_enabled_type() {
+    // Sanity: Claude 3.7 sonnet still maps to the "enabled" thinking
+    // type, but with the Low budget instead of the auto-derived one.
+    let request = ModelRequest::builder("claude-3-7-sonnet", "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Low))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, "claude-3-7-sonnet").expect("Low emits a config");
+    assert_eq!(thinking.thinking_type, "enabled");
+    assert_eq!(thinking.budget_tokens, Some(1024));
 }
 
 #[test]
