@@ -93,7 +93,41 @@ impl SubagentDispatchHook for RuntimeSubagentDispatch {
             .enqueue_tx(&tx)
             .map_err(|e| format!("enqueue child prompt: {e}"))?;
 
-        let loop_config = loop_config_for(&kind);
+        // Resolve the child's model in priority order: per-request
+        // override, kind default, then the env-fallback identifier.
+        // Once Step 2's [`AgentIdentityRegistry`] lands, the child's
+        // identity is registered before
+        // `schedule_agent_with_overrides` runs and the scheduler
+        // applies it directly; the override path here remains the
+        // explicit caller-driven shape (the parent passes a
+        // `model_override` from a `task` tool call).
+        let child_model = request
+            .model_override
+            .as_deref()
+            .or(kind.default_model.as_deref())
+            .unwrap_or(aura_reasoner::ENV_FALLBACK_MODEL)
+            .to_string();
+        // Register the child agent's identity in the
+        // [`crate::scheduler::AgentIdentityRegistry`]. The dispatch
+        // itself supplies an explicit `agent_loop_config` override
+        // and bypasses the registry lookup; the registration here
+        // covers the post-dispatch scenario where the child's
+        // pending transactions are drained by a worker fan-out
+        // (e.g. tool-permission update) that calls
+        // `Scheduler::schedule_agent` without an override.
+        if let Some(parent) = self
+            .scheduler
+            .identity_registry()
+            .get(request.parent_agent_id)
+        {
+            let mut child_identity = parent.clone();
+            child_identity.model = child_model.clone();
+            child_identity.system_prompt = system_prompt_for(&kind, &request);
+            self.scheduler
+                .identity_registry()
+                .register(child_agent_id, child_identity);
+        }
+        let loop_config = loop_config_for(&kind, &child_model);
         let policy = policy_for(child_permissions, child_tool_permissions, &request);
         if kind.budget.timeout_ms == 0 {
             return Ok(SubagentResult {
@@ -211,15 +245,12 @@ fn policy_for(
         .with_agent_override(Some(tool_permissions))
 }
 
-fn loop_config_for(kind: &SubagentKindSpec) -> AgentLoopConfig {
+fn loop_config_for(kind: &SubagentKindSpec, model: &str) -> AgentLoopConfig {
     let mut config = AgentLoopConfig {
         system_prompt: kind.system_prompt.clone(),
         max_iterations: kind.budget.max_iterations as usize,
-        ..AgentLoopConfig::default()
+        ..AgentLoopConfig::for_agent(model)
     };
-    if let Some(model) = kind.default_model.clone() {
-        config.model = model;
-    }
     if let Some(max_tokens) = kind.budget.max_tokens {
         config.max_tokens = max_tokens;
     }

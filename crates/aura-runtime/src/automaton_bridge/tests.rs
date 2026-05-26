@@ -248,6 +248,25 @@ async fn start_then_stop_records_two_automaton_lifecycle_entries() {
 
     let agent_id = AgentId::generate();
 
+    // The post-fix `Scheduler::schedule_agent` requires the agent's
+    // identity to be registered before it will dispatch a tick. The
+    // production dev-loop / task-run kickoff paths register identity
+    // in `register_automaton_identity` (called from
+    // `dispatch.rs::start_dev_loop_with_capabilities`); this test
+    // exercises `record_lifecycle_event` directly so we register
+    // here to mirror the production flow without spinning up a full
+    // dev loop.
+    bridge.register_automaton_identity(
+        agent_id,
+        "claude-test-model",
+        None,
+        None,
+        None,
+        None,
+        None,
+        aura_reasoner::ModelRequestKind::DevLoopBootstrap,
+    );
+
     bridge
         .record_lifecycle_event(agent_id, "aut-1", "start_dev_loop")
         .await;

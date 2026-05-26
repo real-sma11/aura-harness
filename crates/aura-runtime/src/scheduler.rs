@@ -35,11 +35,155 @@ use crate::worker::{process_agent_detailed, ProcessedAgent};
 use aura_agent::{AgentLoop, AgentLoopConfig};
 use aura_core::{AgentId, AgentStatus};
 use aura_kernel::{Executor, ExecutorRouter, Kernel, KernelConfig, PolicyConfig};
-use aura_reasoner::{ModelProvider, ToolDefinition};
+use aura_reasoner::{ModelProvider, ModelRequestKind, PromptCacheRetention, ToolDefinition};
 use aura_store::Store;
+use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use thiserror::Error;
 use tracing::{debug, error, info, instrument};
+
+/// Per-agent identity recorded by the chat WS / automaton bridge / `/tx`
+/// and consulted by [`Scheduler::schedule_agent_with_overrides`] when no
+/// explicit `agent_loop_config` override is supplied.
+///
+/// This is the seam that fixes the worker-path regression where `/v1/messages`
+/// went out with `claude-opus-4-6` (the pre-rename default) and a stripped
+/// `X-Aura-*` envelope, causing `aura-router` to bucket the request as anonymous
+/// public traffic and return `429 RATE_LIMITED`.
+#[derive(Debug, Clone)]
+pub struct AgentIdentity {
+    /// Caller-selected model (e.g. `claude-opus-4-7`). Required.
+    pub model: String,
+    /// Org UUID forwarded as `X-Aura-Org-Id` on outbound `/v1/messages` calls.
+    pub aura_org_id: Option<String>,
+    /// Storage session UUID forwarded as `X-Aura-Session-Id`.
+    pub aura_session_id: Option<String>,
+    /// Project-agent UUID forwarded as `X-Aura-Agent-Id`.
+    pub aura_agent_id: Option<String>,
+    /// Project UUID forwarded as `X-Aura-Project-Id`.
+    pub aura_project_id: Option<String>,
+    /// System prompt to feed into the agent loop.
+    pub system_prompt: String,
+    /// OpenAI-family stable cache key.
+    pub prompt_cache_key: Option<String>,
+    /// Retention hint paired with `prompt_cache_key`.
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    /// Request contract kind. Chat sessions ship `Chat`; dev-loop / task-run
+    /// land `DevLoopBootstrap` (and the loop self-promotes to
+    /// `DevLoopContinuation` after the first iteration).
+    pub request_kind: ModelRequestKind,
+    /// Max output tokens per response. Defaults to 16_384 when unset.
+    pub max_tokens: u32,
+    /// Maximum context window in tokens, used for compaction.
+    pub max_context_tokens: usize,
+    /// JWT auth token forwarded onto outbound model requests.
+    pub auth_token: Option<String>,
+}
+
+impl AgentIdentity {
+    /// Build the per-agent [`AgentLoopConfig`] consumed by the worker
+    /// path. Mirrors the chat-WS path's `Session::agent_loop_config`
+    /// shape: every router/billing identifier round-trips, the
+    /// caller-selected model is honored, and `request_kind` matches
+    /// what the call site declared.
+    #[must_use]
+    pub fn into_loop_config(self) -> AgentLoopConfig {
+        AgentLoopConfig {
+            system_prompt: self.system_prompt,
+            max_tokens: self.max_tokens,
+            max_context_tokens: Some(self.max_context_tokens as u64),
+            auth_token: self.auth_token,
+            aura_project_id: self.aura_project_id,
+            aura_agent_id: self.aura_agent_id,
+            aura_session_id: self.aura_session_id,
+            aura_org_id: self.aura_org_id,
+            prompt_cache_key: self.prompt_cache_key,
+            prompt_cache_retention: self.prompt_cache_retention.map(|r| match r {
+                PromptCacheRetention::Hours24 => "24h".to_string(),
+                PromptCacheRetention::InMemory => "in_memory".to_string(),
+            }),
+            request_kind: self.request_kind,
+            ..AgentLoopConfig::for_agent(self.model)
+        }
+    }
+}
+
+/// In-memory registry of [`AgentIdentity`] entries.
+///
+/// Populated in three places:
+/// - `Session::apply_init` (chat WS) — registers the session model + IDs the
+///   moment they land in `SessionState`, before the first turn dispatches.
+/// - `automaton_bridge::start_dev_loop_with_capabilities` /
+///   `run_task_with_capabilities` — registers the dev-loop / task-run identity
+///   alongside the existing `AgentRunnerConfig` plumbing (commit `d12fe29`).
+/// - `RuntimeSubagentDispatch::dispatch` — registers a child agent's identity
+///   after `spawn_child` allocates the child id, so foreground subagent
+///   dispatch goes out with the resolved model + parent IDs.
+///
+/// The HTTP `/tx` and `/agents/:id/tool_permissions` paths do **not** carry
+/// per-call identity. They rely on the entry registered by the upstream
+/// session / automaton bootstrap; if no entry exists,
+/// [`Scheduler::schedule_agent_with_overrides`] returns
+/// [`SchedulerError::AgentNotRegistered`] (and emits a structured
+/// `error!` line) instead of falling back silently. The failing tx
+/// stays in the inbox / `failed_txs` so the operator sees the
+/// regression rather than a 429.
+#[derive(Default)]
+pub struct AgentIdentityRegistry {
+    inner: DashMap<AgentId, AgentIdentity>,
+}
+
+impl AgentIdentityRegistry {
+    /// Construct an empty registry.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Register or replace the identity for `agent_id`. Replacing on
+    /// `apply_init` re-keys is intentional — a repeat session_init for
+    /// the same agent_id (legitimate WS reconnect) must be allowed to
+    /// rotate the model + IDs without leaking the previous bundle.
+    pub fn register(&self, agent_id: AgentId, identity: AgentIdentity) {
+        self.inner.insert(agent_id, identity);
+    }
+
+    /// Look up the registered identity. Returns a clone so the caller
+    /// can build the per-turn `AgentLoopConfig` without holding a
+    /// `DashMap` ref across the scheduling await point.
+    #[must_use]
+    pub fn get(&self, agent_id: AgentId) -> Option<AgentIdentity> {
+        self.inner.get(&agent_id).map(|entry| entry.value().clone())
+    }
+
+    /// Clear the entry — primarily used by tests asserting the
+    /// hard-fail path. Production code holds entries for the lifetime
+    /// of the parent session / automaton.
+    pub fn unregister(&self, agent_id: AgentId) {
+        self.inner.remove(&agent_id);
+    }
+}
+
+/// Errors surfaced by [`Scheduler::schedule_agent_with_overrides`]
+/// after Step 2 of the worker-routing-identity fix. Existing callers
+/// receive these wrapped in `anyhow::Error`; tests can downcast to
+/// match on the typed variant.
+#[derive(Debug, Error)]
+pub enum SchedulerError {
+    /// No [`AgentIdentity`] is registered for an agent that has pending
+    /// transactions and no per-call `agent_loop_config` override. The
+    /// failing tx stays in the queue / moves to `failed_txs` so the
+    /// operator sees the regression instead of receiving a `429
+    /// RATE_LIMITED` from `aura-router`.
+    #[error(
+        "scheduler: no AgentIdentity registered for agent {agent_id} — \
+         the WS session, automaton bridge, or `/tx` caller must register \
+         model + X-Aura-* identity before scheduling. Refusing to fall \
+         back silently."
+    )]
+    AgentNotRegistered { agent_id: AgentId },
+}
 
 /// Local guard that makes store-backed processing claims release on every
 /// normal scheduler exit path, with `Drop` as a panic safety net.
@@ -89,7 +233,11 @@ pub struct Scheduler {
     // store handle when constructing per-agent kernels.
     store: Arc<dyn Store>,
     provider: Arc<dyn ModelProvider + Send + Sync>,
-    agent_loop_config: AgentLoopConfig,
+    /// Per-agent identity registry. Populated by the chat WS path,
+    /// the automaton bridge, and foreground subagent dispatch. The
+    /// scheduler consults it to build the `AgentLoopConfig` for
+    /// each turn — there is no longer a process-wide default.
+    identity_registry: Arc<AgentIdentityRegistry>,
     executors: Vec<Arc<dyn Executor>>,
     tools: Vec<ToolDefinition>,
     kernel_config: KernelConfig,
@@ -97,7 +245,9 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// Create a new scheduler.
+    /// Create a new scheduler with a freshly-allocated identity
+    /// registry. Most production wiring pairs the scheduler with the
+    /// runtime's shared registry via [`Self::with_identity_registry`].
     #[must_use]
     pub fn new(
         store: Arc<dyn Store>,
@@ -107,6 +257,31 @@ impl Scheduler {
         workspace_base: PathBuf,
         memory_manager: Option<Arc<aura_memory::MemoryManager>>,
     ) -> Self {
+        Self::with_identity_registry(
+            store,
+            provider,
+            executors,
+            tools,
+            workspace_base,
+            memory_manager,
+            AgentIdentityRegistry::new(),
+        )
+    }
+
+    /// Create a new scheduler that shares an existing
+    /// [`AgentIdentityRegistry`]. Production wiring uses this so the
+    /// chat-WS, automaton bridge, and worker paths all observe the
+    /// same per-agent identity bundle.
+    #[must_use]
+    pub fn with_identity_registry(
+        store: Arc<dyn Store>,
+        provider: Arc<dyn ModelProvider + Send + Sync>,
+        executors: Vec<Arc<dyn Executor>>,
+        tools: Vec<ToolDefinition>,
+        workspace_base: PathBuf,
+        memory_manager: Option<Arc<aura_memory::MemoryManager>>,
+        identity_registry: Arc<AgentIdentityRegistry>,
+    ) -> Self {
         let kernel_config = KernelConfig {
             workspace_base,
             ..KernelConfig::default()
@@ -114,12 +289,20 @@ impl Scheduler {
         Self {
             store,
             provider,
-            agent_loop_config: AgentLoopConfig::default(),
+            identity_registry,
             executors,
             tools,
             kernel_config,
             memory_manager,
         }
+    }
+
+    /// Borrow the shared identity registry — used by callers that own
+    /// the scheduler `Arc` and need to register/look up identities
+    /// (chat WS, automaton bridge, subagent dispatch, tests).
+    #[must_use]
+    pub fn identity_registry(&self) -> &Arc<AgentIdentityRegistry> {
+        &self.identity_registry
     }
 
     /// Attempt to claim exclusive processing for a non-scheduler direct append.
@@ -193,6 +376,28 @@ impl Scheduler {
             return Ok(ProcessedAgent::default());
         }
 
+        // Resolve the per-agent loop config BEFORE acquiring the
+        // processing claim so a missing registration trips
+        // `SchedulerError::AgentNotRegistered` immediately — the
+        // failing tx stays in the inbox / `failed_txs` and the
+        // operator sees the regression instead of routing
+        // anonymous-public traffic.
+        let config = match agent_loop_config {
+            Some(cfg) => cfg,
+            None => match self.identity_registry.get(agent_id) {
+                Some(identity) => identity.into_loop_config(),
+                None => {
+                    error!(
+                        agent_id = %agent_id,
+                        "AgentIdentity not registered: refusing to dispatch without explicit model + X-Aura-* identity"
+                    );
+                    return Err(anyhow::Error::new(SchedulerError::AgentNotRegistered {
+                        agent_id,
+                    }));
+                }
+            },
+        };
+
         let Some(mut claim) = self.try_processing_claim(agent_id)? else {
             debug!("Agent already processing, skipping");
             return Ok(ProcessedAgent::default());
@@ -221,7 +426,7 @@ impl Scheduler {
             .map_err(|e| anyhow::anyhow!("kernel construction failed: {e}"))?,
         );
 
-        let mut config = agent_loop_config.unwrap_or_else(|| self.agent_loop_config.clone());
+        let mut config = config;
         if let Some(ref mm) = self.memory_manager {
             config.observers.push(mm.turn_observer(agent_id, None));
         }
@@ -273,6 +478,28 @@ mod tests {
     use aura_store::RocksStore;
     use bytes::Bytes;
     use std::time::Duration;
+
+    /// Build a [`AgentIdentity`] suitable for unit tests.
+    ///
+    /// Pinned to `claude-opus-4-7` so any silent fallback to the
+    /// pre-fix `claude-opus-4-6` (or an empty model) shows up
+    /// immediately when callers wire the registry incorrectly.
+    pub(crate) fn test_identity(model: &str) -> AgentIdentity {
+        AgentIdentity {
+            model: model.to_string(),
+            aura_org_id: Some("org-test".to_string()),
+            aura_session_id: Some("session-test".to_string()),
+            aura_agent_id: Some("agent-test".to_string()),
+            aura_project_id: Some("project-test".to_string()),
+            system_prompt: String::new(),
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            request_kind: ModelRequestKind::Chat,
+            max_tokens: 1024,
+            max_context_tokens: 200_000,
+            auth_token: None,
+        }
+    }
 
     fn create_test_scheduler() -> (Scheduler, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -379,6 +606,9 @@ mod tests {
         let (scheduler, store, _dir) = create_test_scheduler_with_provider(provider);
         let scheduler = Arc::new(scheduler);
         let agent_id = AgentId::generate();
+        scheduler
+            .identity_registry()
+            .register(agent_id, test_identity("claude-opus-4-7"));
         enqueue_prompt(&store, agent_id, "hello");
 
         let first = {
@@ -412,6 +642,9 @@ mod tests {
         let (scheduler, store, _dir) = create_test_scheduler_with_provider(provider);
         let scheduler = Arc::new(scheduler);
         let agent_id = AgentId::generate();
+        scheduler
+            .identity_registry()
+            .register(agent_id, test_identity("claude-opus-4-7"));
         enqueue_prompt(&store, agent_id, "hello");
 
         let handle = {
@@ -449,6 +682,9 @@ mod tests {
         let provider = Arc::new(MockProvider::simple_response("unused"));
         let (scheduler, store, _dir) = create_test_scheduler_with_provider(provider);
         let agent_id = AgentId::generate();
+        scheduler
+            .identity_registry()
+            .register(agent_id, test_identity("claude-opus-4-7"));
         let tx = Transaction::new_chained(
             agent_id,
             TransactionType::UserPrompt,

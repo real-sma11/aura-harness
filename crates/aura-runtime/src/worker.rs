@@ -126,7 +126,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let agent_id = AgentId::generate();
         let kernel = create_test_kernel(dir.path(), agent_id);
-        let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::default());
+        let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::for_agent("claude-opus-4-7"));
 
         let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[])
             .await
@@ -162,7 +162,7 @@ mod tests {
         };
         let kernel =
             Arc::new(Kernel::new(store.clone(), provider, executor, config, agent_id).unwrap());
-        let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::default());
+        let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::for_agent("claude-opus-4-7"));
 
         let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[])
             .await

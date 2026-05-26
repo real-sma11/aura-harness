@@ -164,6 +164,52 @@ impl AutomatonBridge {
         }
     }
 
+    /// Publish the dev-loop / task-run agent's identity into the
+    /// shared [`crate::scheduler::AgentIdentityRegistry`] so the
+    /// post-`schedule_agent` worker path (the lifecycle-event nudge
+    /// below, plus any tool-permission update fan-out) builds the
+    /// per-turn `AgentLoopConfig` with the correct model and
+    /// `X-Aura-*` envelope. Without this registration the worker
+    /// path strips identity and `aura-router` returns
+    /// `429 RATE_LIMITED`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn register_automaton_identity(
+        &self,
+        agent_id: AgentId,
+        model: &str,
+        auth_token: Option<&str>,
+        aura_org_id: Option<&str>,
+        aura_session_id: Option<&str>,
+        aura_agent_id: Option<&str>,
+        aura_project_id: Option<&str>,
+        request_kind: aura_reasoner::ModelRequestKind,
+    ) {
+        let Some(scheduler) = self.scheduler.as_ref() else {
+            return;
+        };
+        let identity = crate::scheduler::AgentIdentity {
+            model: model.to_string(),
+            aura_org_id: aura_org_id.map(String::from),
+            aura_session_id: aura_session_id.map(String::from),
+            aura_agent_id: aura_agent_id.map(String::from),
+            aura_project_id: aura_project_id.map(String::from),
+            // Dev-loop / task-run paths run their automaton-driven
+            // prompt assembly inside `aura-automaton`. The
+            // post-completion fan-out scheduling that lands on the
+            // worker carries no follow-up user prompt, so an empty
+            // system prompt is the right default — the registry is
+            // there for envelope identity, not prompt content.
+            system_prompt: String::new(),
+            prompt_cache_key: aura_project_id.map(|pid| format!("devloop:{pid}")),
+            prompt_cache_retention: None,
+            request_kind,
+            max_tokens: 16384,
+            max_context_tokens: crate::session::context_window_for_model(model) as usize,
+            auth_token: auth_token.map(String::from),
+        };
+        scheduler.identity_registry().register(agent_id, identity);
+    }
+
     /// Record an automaton lifecycle event as a System transaction.
     ///
     /// Enqueues a `System::AutomatonLifecycle` transaction on the
@@ -211,19 +257,24 @@ impl AutomatonBridge {
 
     pub(super) fn build_runner_config(
         &self,
-        model: Option<&str>,
+        model: &str,
         auth_token: Option<&str>,
         aura_org_id: Option<&str>,
         aura_session_id: Option<&str>,
         aura_agent_id: Option<&str>,
         aura_project_id: Option<&str>,
     ) -> AgentRunnerConfig {
-        let mut config = AgentRunnerConfig::default();
-        if let Some(m) = model {
-            config.max_context_tokens =
-                crate::session::context_window_for_model(m);
-            config.default_model = m.to_string();
-        }
+        // Dev-loop / task-run paths must carry an explicit model end
+        // to end. The pre-fix code took `Option<&str>` and silently
+        // fell back to `aura_agent::DEFAULT_MODEL` (`claude-opus-4-6`)
+        // — the regression that shipped the wrong upstream model when
+        // the user had selected `claude-opus-4-7` from the chat
+        // surface. The caller is now responsible for plumbing the
+        // user-selected model through; `prepare_automaton_run`
+        // already returns an `InvalidConfig` error when it isn't
+        // present in the start request.
+        let mut config = AgentRunnerConfig::for_agent(model);
+        config.max_context_tokens = crate::session::context_window_for_model(model);
         config.auth_token = auth_token.map(String::from);
         // Forward all four router/billing identifiers from the
         // `POST /automaton/start` payload. These flow into

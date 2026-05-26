@@ -45,7 +45,7 @@ mod node;
 pub(crate) mod protocol;
 pub(crate) mod router;
 pub(crate) mod runtime_capabilities;
-pub(crate) mod scheduler;
+pub mod scheduler;
 pub(crate) mod session;
 pub mod subagent_dispatch;
 pub mod subagent_registry;

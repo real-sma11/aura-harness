@@ -86,7 +86,13 @@ impl AutomatonBridge {
         project_id: &str,
         workspace_root: Option<PathBuf>,
         auth_token: Option<&str>,
-        model: Option<&str>,
+        // No silent fallback — every dev-loop / task-run kickoff must
+        // pin the user-selected model. The two public entry points
+        // (`start_dev_loop_with_capabilities`,
+        // `run_task_with_capabilities`) reject the start request with
+        // `"missing model"` before reaching this helper when the
+        // operator forgot to set one.
+        model: &str,
         installed_tools: Option<Vec<aura_protocol::InstalledTool>>,
         installed_integrations: Option<Vec<aura_protocol::InstalledIntegration>>,
         agent_permissions: AgentPermissions,
@@ -194,6 +200,23 @@ impl AutomatonBridge {
         agent_skills: Vec<String>,
         agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
+        // Hard-fail when the operator did not pin a model. The
+        // pre-fix dev-loop path silently fell back to a build-time
+        // constant (`claude-opus-4-6`) here, which is exactly the
+        // regression the worker-identity work is closing. We surface
+        // the gap loudly so the caller (typically aura-os's
+        // `POST /automaton/start`) sees the configuration mismatch
+        // instead of routing eval traffic to an unintended model.
+        let model = model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "missing model — dev loop start request must include an explicit model identifier"
+                    .to_string()
+            })?
+            .to_string();
+
         if let Some(entry) = self.project_handles.get(project_id) {
             let tracked = entry.value();
             if !tracked.handle.is_finished() {
@@ -211,7 +234,7 @@ impl AutomatonBridge {
                 project_id,
                 workspace_root,
                 auth_token.as_deref(),
-                model.as_deref(),
+                &model,
                 installed_tools,
                 installed_integrations,
                 agent_permissions,
@@ -257,6 +280,25 @@ impl AutomatonBridge {
             .map_err(|e| format!("failed to install dev-loop automaton: {e}"))?;
 
         let automaton_id = handle.id().as_str().to_string();
+        // Register the dev-loop agent's identity BEFORE the
+        // lifecycle-event nudge so the scheduler tick that runs as
+        // part of `record_lifecycle_event` picks it up. The
+        // dev-loop's first model call advertises
+        // `DevLoopBootstrap`; the loop self-promotes to
+        // `DevLoopContinuation` on subsequent iterations via the
+        // automaton-side runner config, so the registry only needs
+        // to seed the bootstrap kind for any pre-loop scheduling
+        // wakeups.
+        self.register_automaton_identity(
+            ctx.kernel.agent_id,
+            &model,
+            auth_token.as_deref(),
+            aura_org_id.as_deref(),
+            aura_session_id.as_deref(),
+            aura_agent_id.as_deref(),
+            Some(project_id),
+            aura_reasoner::ModelRequestKind::DevLoopBootstrap,
+        );
         self.record_lifecycle_event(ctx.kernel.agent_id, &automaton_id, "start_dev_loop")
             .await;
         self.spawn_event_forwarder(automaton_id.clone(), event_rx);
@@ -295,12 +337,23 @@ impl AutomatonBridge {
         agent_skills: Vec<String>,
         agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
+        // Mirror the dev-loop entry-point: refuse to start without an
+        // explicit model. Same regression rationale.
+        let model = model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "missing model — task run request must include an explicit model identifier"
+                    .to_string()
+            })?
+            .to_string();
         let ctx = self
             .prepare_automaton_run(
                 project_id,
                 workspace_root,
                 auth_token.as_deref(),
-                model.as_deref(),
+                &model,
                 installed_tools,
                 installed_integrations,
                 agent_permissions,
@@ -346,6 +399,20 @@ impl AutomatonBridge {
             .map_err(|e| format!("failed to install task-run automaton: {e}"))?;
 
         let automaton_id = handle.id().as_str().to_string();
+        // Register the task-run agent's identity BEFORE the
+        // lifecycle-event nudge. Task runs use the chat
+        // request-kind on the worker fan-out path because they
+        // don't enter the dev-loop self-promotion cycle.
+        self.register_automaton_identity(
+            ctx.kernel.agent_id,
+            &model,
+            auth_token.as_deref(),
+            aura_org_id.as_deref(),
+            aura_session_id.as_deref(),
+            aura_agent_id.as_deref(),
+            Some(project_id),
+            aura_reasoner::ModelRequestKind::Chat,
+        );
         self.record_lifecycle_event(ctx.kernel.agent_id, &automaton_id, "start_task_run")
             .await;
         self.spawn_event_forwarder(automaton_id.clone(), event_rx);

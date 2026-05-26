@@ -185,6 +185,24 @@ pub(super) async fn handle_session_init(
 
     bootstrap_session(session, ctx).await;
 
+    // Publish the per-agent identity to the runtime-side scheduler
+    // registry. The chat WS path itself goes through
+    // `dispatch_turn_to_agent`, which already builds the right
+    // `AgentLoopConfig` from `Session`. The reason we still register
+    // here is the worker fan-out path: when a tool-permission update
+    // or post-automaton-completion fan-out triggers
+    // `Scheduler::schedule_agent`, the scheduler must be able to
+    // build the correct config out-of-band. Without this registration
+    // the worker path 429s with `aura_org_id="missing"
+    // aura_session_id="missing"`. See
+    // `crates/aura-runtime/src/scheduler.rs` for the registry
+    // contract and `crates/aura-runtime/src/router/tx.rs` /
+    // `crates/aura-runtime/src/router/tool_permissions.rs` for the
+    // worker fan-out callers.
+    ctx.scheduler
+        .identity_registry()
+        .register(session.agent_id, session.as_runtime_identity());
+
     let defaults = match session_user_defaults(session, ctx) {
         Ok(defaults) => defaults,
         Err(e) => {
