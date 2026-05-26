@@ -40,7 +40,7 @@ Paths workspace-relative, forward-slash, no `./` or `..`.
 
 Decision principle: once a target file is identified and read, edit it. Do not re-read a file you have already seen unless you need exact bytes for an edit_file match.
 
-Ambiguity rule: if two files disagree on a name, type size, or field, treat the task description as authoritative. Pick one, edit it, then run the build — the compiler is more informative than another read.
+Ambiguity rule: if the task description references symbols that do not appear in the codebase, treat the codebase as authoritative. Either emit your best-effort change against the existing types, or call `task_done` with `no_changes_needed: true` and `notes` describing the contradiction. Do not keep reading for symbols that the codebase does not define.
 
 Bias to act: prefer one best-effort edit and compiler feedback over more exploration. Operate with surgical precision on existing code, but a wrong edit is reversible; turn-budget exhaustion is not.
 
