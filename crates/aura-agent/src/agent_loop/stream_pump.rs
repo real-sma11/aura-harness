@@ -708,30 +708,14 @@ pub(super) async fn dispatch_streamed_response(
     event_tx: Option<&tokio::sync::mpsc::Sender<crate::events::AgentLoopEvent>>,
     state: &mut super::LoopState,
 ) -> bool {
-    // Production dev-loop path: `use_stream_pump` defaults to `true`,
-    // so this dispatcher (not `super::AgentLoop::dispatch_stop_reason`)
-    // is what fires on a real dev-loop turn. The buffered path stays
-    // in sync because both call the same predicate.
+    // Codex parity: `EndTurn` / `StopSequence` always terminate the
+    // loop. The model owns the exit signal; the harness no longer
+    // intercepts empty terminations.
+    let _ = agent;
     match response.stop_reason {
-        aura_reasoner::StopReason::EndTurn | aura_reasoner::StopReason::StopSequence => {
-            !agent.should_intercept_empty_termination(state)
-        }
+        aura_reasoner::StopReason::EndTurn | aura_reasoner::StopReason::StopSequence => true,
         aura_reasoner::StopReason::MaxTokens => {
-            if super::iteration::handle_max_tokens(&agent.config, response, state) {
-                // Pending tool_use blocks were synthesised; keep
-                // looping so the model retries the dropped calls.
-                false
-            } else if agent.should_intercept_empty_termination(state) {
-                // Extended thinking ate the budget without producing
-                // a tool call. Arm the latch so the next iteration
-                // opens with thinking disabled, and let
-                // `run_turn_stop_hooks` run the GoalRuntime nudge
-                // path.
-                state.thinking.pending_disable_thinking_next_iteration = true;
-                false
-            } else {
-                true
-            }
+            !super::iteration::handle_max_tokens(&agent.config, response, state)
         }
         aura_reasoner::StopReason::ToolUse => {
             handle_streamed_tool_use(&agent.config, executor, tool_results, event_tx, state).await

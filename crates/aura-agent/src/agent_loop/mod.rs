@@ -5,7 +5,6 @@
 //! compaction, sanitization, budget management, etc.
 
 mod context;
-mod continuation;
 mod iteration;
 mod sampling;
 mod search_cache;
@@ -17,12 +16,7 @@ mod tool_execution;
 mod tool_execution_tests;
 mod tool_pipeline;
 mod turn;
-// Priority A: surfaced as `pub(crate)` so the session-scoped
-// `goal_runtime` module can reach `FailedWriteAttempt` via the
-// canonical `crate::agent_loop::turn_diff` path. Other items remain
-// `pub(crate)` and continue to be touched only from within the
-// `agent_loop` subtree.
-pub(crate) mod turn_diff;
+mod turn_diff;
 
 pub use task::TaskId;
 
@@ -206,23 +200,6 @@ pub struct AgentLoopConfig {
     /// `read_file`. Default `false` for chat / generic callers
     /// where deliberation on the first turn is desirable.
     pub disable_thinking_iteration_0: bool,
-    /// Marker for the dev-loop task profile.
-    ///
-    /// Historically gated the `EndTurn` intercept escalation and
-    /// force-tool-choice path; the cook-loop-fix strip (2026-05)
-    /// removed both. The flag is retained as a profile marker so
-    /// downstream consumers (system-prompt builder, telemetry,
-    /// log tagging) can still distinguish dev-loop runs from chat /
-    /// generic runs, but it no longer influences the agent loop's
-    /// termination behavior — `EndTurn` always terminates the loop.
-    pub dev_loop_completion_required: bool,
-    /// Phase 1.B: hard cap on the number of consecutive-no-write
-    /// continuation prompts the loop will inject before failing the
-    /// task with `task_blocked`. Default `6` (matches codex's
-    /// `continuation.md` ergonomics: 2 soft nudges + up to 4 blocked
-    /// audits before giving up). Only consulted when
-    /// [`Self::dev_loop_completion_required`] is true.
-    pub max_continuation_turns: u32,
     /// Layer E.1: hard cap on the number of *turns* one task may run.
     /// A turn is the unit of work between "model starts talking" and
     /// "model goes quiet without follow-up signal"; codex's
@@ -355,8 +332,6 @@ impl AgentLoopConfig {
             subagents_chars: 0,
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
-            dev_loop_completion_required: false,
-            max_continuation_turns: 6,
             max_turns_per_task: aura_core::MAX_TURNS,
             max_iterations_per_task: aura_core::MAX_TURNS,
             stream_event_timeout: Duration::from_secs(90),
@@ -502,15 +477,10 @@ impl AgentLoop {
         // through a session internally.
         let cancellation = cancellation_token.clone().unwrap_or_default();
         let session = match handle {
-            Some(h) => crate::session::Session::from_handle(
-                h,
-                cancellation.clone(),
-                self.config.max_continuation_turns,
-            ),
+            Some(h) => crate::session::Session::from_handle(h, cancellation.clone()),
             None => crate::session::Session::new(
                 crate::session::SessionId::new_v4(),
                 cancellation.clone(),
-                self.config.max_continuation_turns,
             ),
         };
         let session = Arc::new(session);
@@ -684,34 +654,13 @@ impl AgentLoop {
         .map_err(crate::AgentError::from)
     }
 
-    /// Predicate: when true, the dispatcher must route an empty
-    /// terminal stop reason (`EndTurn` / `StopSequence`, or
-    /// `MaxTokens` with no pending tool calls) through
-    /// `run_turn_stop_hooks` so `GoalRuntime` sees the no-write turn
-    /// and gets a chance to nudge / escalate.
-    ///
-    /// Predicate is `dev_loop_completion_required && no successful
-    /// task_done && (no writes yet || post-write no-write streak active)`.
-    /// After a write lands, a clean `task_done` is still the preferred
-    /// completion path; otherwise the goal runtime gets a chance to detect
-    /// partial-progress stalls instead of trusting the first `EndTurn`.
-    pub(crate) fn should_intercept_empty_termination(&self, state: &LoopState) -> bool {
-        self.config.dev_loop_completion_required
-            && !state.task_done_completed
-            && (!state.had_any_file_write || state.no_write_after_successful_write > 0)
-    }
-
     /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
     ///
-    /// In dev-loop mode with no writes yet and no successful
-    /// `task_done`, an empty terminal stop reason (`EndTurn` /
-    /// `StopSequence`, or `MaxTokens` with no pending tool calls) is
-    /// routed back into the sampling driver as
-    /// `needs_follow_up = true` so `turn::run_turn_stop_hooks` can
-    /// hand the no-write event to `GoalRuntime` for nudging /
-    /// escalation. Outside that window (chat mode, or once any write
-    /// or successful `task_done` has happened) the dispatcher trusts
-    /// the first `EndTurn` it sees.
+    /// Codex parity (`codex-rs/core/src/tasks/regular.rs:73-88`):
+    /// the model owns the exit signal. `EndTurn` / `StopSequence`
+    /// always terminate the loop; `MaxTokens` terminates unless
+    /// `handle_max_tokens` synthesised pending tool_use blocks that
+    /// the model needs to retry.
     async fn dispatch_stop_reason(
         &self,
         response: &aura_reasoner::ModelResponse,
@@ -720,27 +669,8 @@ impl AgentLoop {
         state: &mut LoopState,
     ) -> bool {
         match response.stop_reason {
-            StopReason::EndTurn | StopReason::StopSequence => {
-                !self.should_intercept_empty_termination(state)
-            }
-            StopReason::MaxTokens => {
-                if iteration::handle_max_tokens(&self.config, response, state) {
-                    // Pending tool_use blocks were synthesised; keep
-                    // looping so the model retries the dropped calls.
-                    false
-                } else if self.should_intercept_empty_termination(state) {
-                    // Extended thinking ate the budget without
-                    // producing a tool call. Arm the latch so the
-                    // recovery turn opens with thinking disabled
-                    // (tool call first, deliberation later) and let
-                    // the stop-hook pipeline run the GoalRuntime
-                    // nudge path.
-                    state.thinking.pending_disable_thinking_next_iteration = true;
-                    false
-                } else {
-                    true
-                }
-            }
+            StopReason::EndTurn | StopReason::StopSequence => true,
+            StopReason::MaxTokens => !iteration::handle_max_tokens(&self.config, response, state),
             StopReason::ToolUse => {
                 tool_execution::handle_tool_use(self, response, executor, event_tx, state).await
             }
@@ -933,24 +863,17 @@ pub struct LoopState {
     pub(crate) had_any_write: bool,
     /// Set true the first iteration whose tool results contain any
     /// `FileOp` (any successful `write_file` / `edit_file` /
-    /// `delete_file`). Cumulative across the run — never reset. Gates the
-    /// [`AgentLoopConfig::dev_loop_completion_required`] `EndTurn`
-    /// intercept: once a write has happened, `EndTurn` is allowed to
-    /// terminate the loop cleanly.
+    /// `delete_file`). Cumulative across the run — never reset.
+    /// Consumed by the reasoning-effort policy to drop to `Low`
+    /// effort once forward motion has happened.
     pub(crate) had_any_file_write: bool,
     /// Set true when `handle_task_done` successfully returns
     /// `stop_loop = true` (i.e. all DoD gates passed). Cumulative
-    /// across the run — never reset. Like `had_any_file_write`, this
-    /// short-circuits the dev-loop EndTurn intercept so a clean
-    /// `task_done` completion is never re-nudged.
+    /// across the run — never reset.
     ///
     /// Wired in `tool_execution::check_termination_conditions` by
     /// observing a non-error tool result whose source tool is
-    /// `task_done` and whose `stop_loop` flag is set. We deliberately
-    /// avoid plumbing `LoopState` into `handle_task_done` itself — the
-    /// stop-loop flag is a one-bit handshake that already crosses the
-    /// task-executor boundary, so reading it on the loop side keeps
-    /// the handler signature small.
+    /// `task_done` and whose `stop_loop` flag is set.
     pub(crate) task_done_completed: bool,
     /// Phase 2: set to `true` the iteration after a successful
     /// `submit_plan` accept has been observed via
@@ -973,32 +896,19 @@ pub struct LoopState {
     pub(crate) last_context_tokens_estimate: Option<u64>,
     pub(crate) messages: Vec<Message>,
     pub(crate) build_baseline: Option<BuildBaseline>,
-    /// Per-iteration net file-op accumulator (Phase 1.A). Reset at the
-    /// top of every iteration; consulted by Phase 1.B's continuation
-    /// runtime to detect "no forward motion this turn".
+    /// Per-iteration net file-op accumulator. Reset at the top of
+    /// every iteration. Tracks writes so the
+    /// `had_any_file_write` latch lights up via
+    /// `tool_pipeline::track_tool_effects` and tool-result caching
+    /// invariants stay path-aware.
     pub(crate) turn_diff: turn_diff::TurnDiff,
-    /// Phase 1.B: streak tracker for consecutive no-write iterations.
-    /// Persists across the loop's iteration boundary so the
-    /// continuation runtime can escalate Nudge → Blocked after three
-    /// consecutive no-write turns.
-    pub(crate) continuation: continuation::ContinuationState,
-    /// Phase 1.B: cumulative count of continuation prompts injected
-    /// this run. The loop fails the task with `task_blocked` once
-    /// this hits [`AgentLoopConfig::max_continuation_turns`].
-    pub(crate) total_continuation_turns: u32,
-    /// Goal-runtime shadow counter for no-write turns after the first
-    /// successful write. Keeps the dev-loop intercept armed during
-    /// partial-progress stalls.
-    pub(crate) no_write_after_successful_write: u32,
     /// Per-turn tracker for identical-byte re-reads (Phase 3b).
     pub(crate) repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker,
-    /// Paths successfully read this session; used by the circling read gate.
+    /// Paths successfully read this session; used by the duplicate-read gate.
     pub(crate) session_read_paths: std::collections::HashSet<PathBuf>,
     /// Per-path read budget granted after a successful write to that path.
     /// Lets the agent inspect changed regions while repairing malformed edits.
     pub(crate) read_after_write_allowances: std::collections::HashMap<PathBuf, u8>,
-    /// Set after each turn-stop hook when the goal runtime detects circling.
-    pub(crate) circling_latched: bool,
 }
 
 impl LoopState {
@@ -1029,13 +939,9 @@ impl LoopState {
             messages,
             build_baseline: None,
             turn_diff: turn_diff::TurnDiff::default(),
-            continuation: continuation::ContinuationState::default(),
-            total_continuation_turns: 0,
-            no_write_after_successful_write: 0,
             repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker::new(),
             session_read_paths: std::collections::HashSet::new(),
             read_after_write_allowances: std::collections::HashMap::new(),
-            circling_latched: false,
         }
     }
 
@@ -1131,11 +1037,11 @@ impl LoopState {
         }
     }
 
-    /// Phase 2: dev-loop reasoning-effort policy applied per iteration.
+    /// Reasoning-effort policy applied per iteration.
     /// Codex sets `reasoning.effort` explicitly per Responses API call
     /// (codex-rs/core/src/client.rs:698-714); the rules below are the
-    /// dev-loop analog tailored to aura's `write_file`/`edit_file`/
-    /// `delete_file` surface plus the Phase 1.B continuation runtime.
+    /// aura analog tailored to aura's `write_file`/`edit_file`/
+    /// `delete_file` surface.
     ///
     /// Resolution order (first match wins):
     ///
@@ -1148,11 +1054,7 @@ impl LoopState {
     /// 4. `submit_plan_called` → `Low` (the plan exists; codex drops
     ///    to low effort once the agent is committed to an
     ///    implementation phase).
-    /// 5. A continuation steering message was just injected
-    ///    (`continuation.consecutive_no_write > 0`, Phase 1.B) → `Low`
-    ///    (the harness is already pushing forward — don't let the
-    ///    model burn 2m of thinking on a re-read).
-    /// 6. Otherwise → `Medium`.
+    /// 5. Otherwise → `Medium`.
     fn compute_thinking_effort(
         &self,
         config: &AgentLoopConfig,
@@ -1164,10 +1066,7 @@ impl LoopState {
             }
             return ThinkingEffort::Medium;
         }
-        if self.had_any_file_write
-            || self.submit_plan_called
-            || self.continuation.consecutive_no_write > 0
-        {
+        if self.had_any_file_write || self.submit_plan_called {
             return ThinkingEffort::Low;
         }
         ThinkingEffort::Medium
@@ -1297,17 +1196,11 @@ impl LoopState {
             self.thinking.budget
         };
 
-        // Phase 2: dev-loop callers opt into the explicit
-        // `reasoning.effort` policy. Non-dev-loop (chat / generic)
-        // callers stay on the legacy `max_tokens > 2048` auto-enable
-        // path by leaving `thinking_effort = None`, so this commit is
-        // backwards-compatible for everyone except the dev loop the
-        // codex-pattern adoption is targeting.
-        let thinking_effort = if config.dev_loop_completion_required {
-            Some(self.compute_thinking_effort(config, iteration))
-        } else {
-            None
-        };
+        // Codex parity: emit an explicit `reasoning.effort` on every
+        // request. The reasoner's `max_tokens > 2048` auto-enable
+        // path stays as a fallback for providers that ignore the
+        // explicit field.
+        let thinking_effort = Some(self.compute_thinking_effort(config, iteration));
 
         ModelRequest::builder(&config.model, &config.system_prompt)
             .messages(self.messages.clone())

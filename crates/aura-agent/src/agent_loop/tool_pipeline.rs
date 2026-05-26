@@ -26,11 +26,9 @@ use crate::build;
 use crate::constants::WRITE_FILE_CHUNK_BYTES;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
-use crate::session::goal_runtime::PARTIAL_PROGRESS_STEER;
 use crate::types::{
     AgentLoopResult, AgentToolExecutor, BuildBaseline, ToolCallInfo, ToolCallResult,
 };
-use aura_core::ToolResultKind;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -250,60 +248,15 @@ impl AgentLoop {
     }
 }
 
-/// Reject `read_file` calls that repeat a path already read this session
-/// when the goal runtime has latched circling.
+/// Codex parity: the harness no longer latches a "circling" state,
+/// so this gate is now a no-op. Kept as a function so the buffered
+/// and streamed dispatch paths share a single attachment point if a
+/// future iteration wants to re-introduce duplicate-read defences.
 pub(super) fn partition_circling_duplicate_reads(
     tool_calls: &[ToolCallInfo],
-    state: &super::LoopState,
+    _state: &super::LoopState,
 ) -> (Vec<ToolCallResult>, Vec<ToolCallInfo>) {
-    if !state.circling_latched {
-        return (Vec::new(), tool_calls.to_vec());
-    }
-
-    let mut blocked = Vec::new();
-    let mut remaining = Vec::new();
-
-    for tool in tool_calls {
-        if tool.name != "read_file" {
-            remaining.push(tool.clone());
-            continue;
-        }
-        let Some(path) = tool.input.get("path").and_then(|v| v.as_str()) else {
-            remaining.push(tool.clone());
-            continue;
-        };
-        let path_buf = PathBuf::from(path);
-        let has_post_write_allowance = state
-            .read_after_write_allowances
-            .get(&path_buf)
-            .copied()
-            .unwrap_or(0)
-            > 0;
-        if state.session_read_paths.contains(&path_buf) && !has_post_write_allowance {
-            let partial_progress_note = if state.had_any_file_write {
-                format!("\n{PARTIAL_PROGRESS_STEER}")
-            } else {
-                String::new()
-            };
-            blocked.push(ToolCallResult {
-                tool_use_id: tool.id.clone(),
-                content: format!(
-                    "You already read `{path}` this session. Circling detected.\n\
-                     Your next action must be write_file / edit_file / delete_file, \
-                     or task_done with no_changes_needed: true and notes explaining \
-                     why the task is already satisfied.{partial_progress_note}"
-                ),
-                is_error: true,
-                kind: ToolResultKind::AgentError,
-                stop_loop: false,
-                file_changes: Vec::new(),
-            });
-        } else {
-            remaining.push(tool.clone());
-        }
-    }
-
-    (blocked, remaining)
+    (Vec::new(), tool_calls.to_vec())
 }
 
 /// Pre-dispatch chunk guard for `write_file`.
@@ -415,7 +368,7 @@ fn track_tool_effects(
     mut session_read_paths: Option<&mut HashSet<PathBuf>>,
     mut read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
 ) -> bool {
-    use super::turn_diff::{FailedWriteAttempt, TurnDiff, FAILED_WRITE_SNIPPET_MAX_CHARS};
+    use super::turn_diff::TurnDiff;
     use crate::types::FileChangeKind;
 
     fn record_into_turn_diff(turn_diff: &mut TurnDiff, change: &crate::types::FileChange) {
@@ -431,37 +384,6 @@ fn track_tool_effects(
                 turn_diff.record_modify(path, bytes);
             }
             FileChangeKind::Delete => turn_diff.record_delete(path),
-        }
-    }
-
-    /// Build a `FailedWriteAttempt` defensively. Tool-argument JSON
-    /// can in principle carry a non-string `path` (the model rarely
-    /// emits this, but a fuzzed schema or a future tool surface
-    /// might) — Rule 4.1 forbids `unwrap()` here, so we fall back to
-    /// `None` / `<unparseable>` instead of dropping the record. The
-    /// resulting telemetry is still useful to the model (it sees the
-    /// tool name and the error body).
-    fn build_failed_attempt(
-        tool: &ToolCallInfo,
-        exec_result: &ToolCallResult,
-    ) -> FailedWriteAttempt {
-        let target_path = tool
-            .input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let raw = exec_result.content.trim();
-        let snippet = if raw.is_empty() {
-            "<unparseable>".to_string()
-        } else {
-            raw.chars()
-                .take(FAILED_WRITE_SNIPPET_MAX_CHARS)
-                .collect::<String>()
-        };
-        FailedWriteAttempt {
-            tool: tool.name.clone(),
-            target_path,
-            error_snippet: snippet,
         }
     }
 
@@ -504,18 +426,11 @@ fn track_tool_effects(
         }
 
         if helpers::is_write_tool(&tool.name) {
-            // Priority A: a rejected write must record into the
-            // turn-diff's failed-attempts channel so the goal-runtime
-            // turn-stop hook can echo it back to the model on the
-            // next continuation, regardless of whether the rejection
-            // came from the tool layer ("needle not found"), the
-            // pre-dispatch chunk guard (oversized `write_file`), or
-            // the compaction redaction guards. The record is taken
-            // before the success branches below so a tool that ran
-            // and failed never leaks into `any_write_success` /
-            // `had_any_write` regardless of the `path` shape.
+            // Skip failed write attempts entirely: the tool layer
+            // already returned an error to the model, and the
+            // codex-parity loop no longer harvests per-iteration
+            // failed-write telemetry for continuation injection.
             if exec_result.is_error {
-                turn_diff.record_failed_write(build_failed_attempt(tool, exec_result));
                 continue;
             }
 
@@ -742,17 +657,6 @@ mod track_tool_effects_tests {
         }
     }
 
-    fn mk_error_result(tool_use_id: &str, body: &str) -> ToolCallResult {
-        ToolCallResult {
-            tool_use_id: tool_use_id.to_string(),
-            content: body.to_string(),
-            is_error: true,
-            kind: aura_core::ToolResultKind::AgentError,
-            stop_loop: false,
-            file_changes: Vec::new(),
-        }
-    }
-
     fn mk_write_result(tool_use_id: &str, path: &str) -> ToolCallResult {
         ToolCallResult {
             tool_use_id: tool_use_id.to_string(),
@@ -767,108 +671,6 @@ mod track_tool_effects_tests {
                 lines_removed: 0,
             }],
         }
-    }
-
-    /// Priority A: an `edit_file` whose needle missed must surface
-    /// on `turn_diff.failed_write_attempts()` (in submission order)
-    /// so the next continuation's recovery body can echo the
-    /// rejection back to the model. Pre-A this rejection was
-    /// indistinguishable from a no-write turn — the doom-loop
-    /// root cause.
-    #[test]
-    fn track_tool_effects_records_failed_edit_file() {
-        let mut exploration_state = ExplorationState::default();
-        let mut result = AgentLoopResult::default();
-        let mut had_any_write = false;
-        let mut turn_diff = super::super::turn_diff::TurnDiff::default();
-
-        let body = "The specified text was not found in the file. None of the 4 needle line(s) match any line in the file.";
-        let to_execute = vec![mk_write_tool("toolu_edit_1", "edit_file", "src/foo.rs")];
-        let executed = vec![mk_error_result("toolu_edit_1", body)];
-
-        let any_success = track_tool_effects(
-            &to_execute,
-            &executed,
-            &mut result,
-            &mut exploration_state,
-            &mut had_any_write,
-            &mut turn_diff,
-            None,
-            None,
-            None,
-        );
-
-        assert!(
-            !any_success,
-            "an is_error=true write must NOT count as a success"
-        );
-        assert!(
-            !had_any_write,
-            "had_any_write latch must not flip for a rejected write attempt"
-        );
-        assert!(
-            turn_diff.is_empty(),
-            "is_empty() reflects only successful writes — failed attempts live on the separate channel"
-        );
-
-        let recorded = turn_diff.failed_write_attempts();
-        assert_eq!(recorded.len(), 1, "exactly one failed attempt expected");
-        assert_eq!(recorded[0].tool, "edit_file");
-        assert_eq!(recorded[0].target_path.as_deref(), Some("src/foo.rs"));
-        // The error_snippet must carry the first ~200 chars of the
-        // executor's error body verbatim (after the trim()) so the
-        // model sees the actionable phrase ("needle line(s) match").
-        assert!(
-            recorded[0].error_snippet.starts_with("The specified text"),
-            "snippet must preserve the leading executor message: {:?}",
-            recorded[0].error_snippet
-        );
-        assert!(
-            recorded[0].error_snippet.contains("needle line(s)"),
-            "snippet must preserve the actionable phrase: {:?}",
-            recorded[0].error_snippet
-        );
-        assert!(
-            recorded[0].error_snippet.len()
-                <= super::super::turn_diff::FAILED_WRITE_SNIPPET_MAX_CHARS,
-            "snippet must respect the {}-char cap",
-            super::super::turn_diff::FAILED_WRITE_SNIPPET_MAX_CHARS
-        );
-    }
-
-    /// Long executor errors must be truncated to the published cap
-    /// so a noisy stack-trace cannot itself blow the next sampling
-    /// request's input ceiling when 3 of them get echoed back via
-    /// the Recovery body.
-    #[test]
-    fn track_tool_effects_truncates_long_failed_write_snippet() {
-        let mut exploration_state = ExplorationState::default();
-        let mut result = AgentLoopResult::default();
-        let mut had_any_write = false;
-        let mut turn_diff = super::super::turn_diff::TurnDiff::default();
-
-        let long_body = "x".repeat(super::super::turn_diff::FAILED_WRITE_SNIPPET_MAX_CHARS + 200);
-        let to_execute = vec![mk_write_tool("toolu_w", "write_file", "src/big.rs")];
-        let executed = vec![mk_error_result("toolu_w", &long_body)];
-
-        track_tool_effects(
-            &to_execute,
-            &executed,
-            &mut result,
-            &mut exploration_state,
-            &mut had_any_write,
-            &mut turn_diff,
-            None,
-            None,
-            None,
-        );
-
-        let recorded = turn_diff.failed_write_attempts();
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(
-            recorded[0].error_snippet.len(),
-            super::super::turn_diff::FAILED_WRITE_SNIPPET_MAX_CHARS
-        );
     }
 
     /// Pin that `track_tool_effects` increments the exploration
@@ -947,65 +749,4 @@ mod track_tool_effects_tests {
         );
     }
 
-    #[test]
-    fn circling_gate_rejects_duplicate_read_file_paths() {
-        let config = super::super::AgentLoopConfig::for_agent("claude-test-model");
-        let mut state = super::super::LoopState::new(&config, Vec::new());
-        state.circling_latched = true;
-        state
-            .session_read_paths
-            .insert(PathBuf::from("src/inbox.rs"));
-
-        let duplicate = mk_read_tool("toolu_dup", "src/inbox.rs");
-        let fresh = mk_read_tool("toolu_fresh", "src/outbox.rs");
-        let (blocked, remaining) =
-            partition_circling_duplicate_reads(&[duplicate, fresh.clone()], &state);
-
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].tool_use_id, "toolu_dup");
-        assert!(blocked[0].is_error);
-        assert!(blocked[0].content.contains("Circling detected"));
-        assert!(blocked[0].content.contains("no_changes_needed: true"));
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, fresh.id);
-    }
-
-    #[test]
-    fn circling_gate_allows_duplicate_reads_with_post_write_allowance() {
-        let config = super::super::AgentLoopConfig::for_agent("claude-test-model");
-        let mut state = super::super::LoopState::new(&config, Vec::new());
-        state.circling_latched = true;
-        state
-            .session_read_paths
-            .insert(PathBuf::from("src/inbox.rs"));
-        state
-            .read_after_write_allowances
-            .insert(PathBuf::from("src/inbox.rs"), 1);
-
-        let duplicate = mk_read_tool("toolu_dup", "src/inbox.rs");
-        let (blocked, remaining) = partition_circling_duplicate_reads(&[duplicate.clone()], &state);
-
-        assert!(blocked.is_empty());
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, duplicate.id);
-    }
-
-    #[test]
-    fn circling_gate_mentions_partial_progress_after_a_write() {
-        let config = super::super::AgentLoopConfig::for_agent("claude-test-model");
-        let mut state = super::super::LoopState::new(&config, Vec::new());
-        state.circling_latched = true;
-        state.had_any_file_write = true;
-        state
-            .session_read_paths
-            .insert(PathBuf::from("src/inbox.rs"));
-
-        let duplicate = mk_read_tool("toolu_dup", "src/inbox.rs");
-        let (blocked, remaining) = partition_circling_duplicate_reads(&[duplicate], &state);
-
-        assert_eq!(blocked.len(), 1);
-        assert!(remaining.is_empty());
-        assert!(blocked[0].content.contains("already wrote"));
-        assert!(blocked[0].content.contains("additional methods or exports"));
-    }
 }

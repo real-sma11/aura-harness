@@ -113,17 +113,11 @@ pub(crate) struct Session {
 impl Session {
     /// Construct a fresh session.
     ///
-    /// `max_continuation_turns` is the hard ceiling on the number of
-    /// continuation prompts the [`GoalRuntime`] will inject before
-    /// escalating to `task_blocked`; forward
-    /// [`crate::AgentLoopConfig::max_continuation_turns`] verbatim.
-    pub(crate) fn new(
-        id: SessionId,
-        cancellation: CancellationToken,
-        max_continuation_turns: u32,
-    ) -> Self {
+    /// Codex parity: the loop no longer tracks continuation budgets,
+    /// so this no longer takes a `max_continuation_turns` parameter.
+    pub(crate) fn new(id: SessionId, cancellation: CancellationToken) -> Self {
         let input_queue = InputQueue::new(id, cancellation.clone());
-        let goal_runtime = Arc::new(GoalRuntime::new(id, max_continuation_turns));
+        let goal_runtime = Arc::new(GoalRuntime::new(id));
         Self {
             id,
             input_queue,
@@ -145,11 +139,10 @@ impl Session {
     pub(crate) fn from_handle(
         handle: &AgentRunnerHandle,
         cancellation: CancellationToken,
-        max_continuation_turns: u32,
     ) -> Self {
         let input_queue = handle.queue();
         let id = input_queue.session_id();
-        let goal_runtime = Arc::new(GoalRuntime::new(id, max_continuation_turns));
+        let goal_runtime = Arc::new(GoalRuntime::new(id));
         Self {
             id,
             input_queue,

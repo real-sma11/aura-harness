@@ -98,22 +98,3 @@ fn finalize_loop_result_default_notes_when_empty() {
     assert!(exec.notes.contains("agentic tool-use loop"));
 }
 
-#[test]
-fn configure_loop_config_forwards_max_continuation_turns_default() {
-    let config = AgentRunnerConfig::for_agent("claude-test-model");
-    let loop_cfg = configure_loop_config(TaskComplexity::Standard, &config, 3, "system".into());
-    assert_eq!(
-        loop_cfg.max_continuation_turns, 100,
-        "configure_loop_config must forward the runner-level cap so exploration-heavy \
-         tasks aren't killed at the agent-loop default of 6"
-    );
-    assert!(loop_cfg.dev_loop_completion_required);
-}
-
-#[test]
-fn configure_loop_config_forwards_max_continuation_turns_override() {
-    let mut config = AgentRunnerConfig::for_agent("claude-test-model");
-    config.max_continuation_turns = 7;
-    let loop_cfg = configure_loop_config(TaskComplexity::Standard, &config, 3, "system".into());
-    assert_eq!(loop_cfg.max_continuation_turns, 7);
-}

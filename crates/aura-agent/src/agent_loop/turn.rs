@@ -1,45 +1,29 @@
-//! Turn driver (Layer E.1 + E.2).
+//! Turn driver (codex-parity simplified).
 //!
 //! A *turn* is the unit of agent work between the model "starting to
 //! talk" and "going quiet without a follow-up signal". Codex's turn
-//! loop at [codex-rs/core/src/session/turn.rs:131-355](
-//! https://github.com/.../codex-rs/core/src/session/turn.rs) runs a
-//! sequence of sampling requests until
+//! loop runs a sequence of sampling requests until
 //!
 //! ```text
 //! needs_follow_up = model_says_continue
-//!     || has_pending_input        // E.2 hook
-//!     || stop_hook_injected_more  // Phase 1.B migration target
+//!     || has_pending_input
 //! ```
 //!
-//! evaluates to `false`. E.1 wired this predicate with the
-//! `has_pending_input` arm stubbed out to `false`; E.2 lifts the
-//! stub and wires the mid-task [`InputQueue`] drain at the top of
-//! every iteration plus the `has_pending()` arm at the bottom.
-//!
-//! Phase 1.B's continuation runtime was previously called as
-//! `post_iteration_checks` inside the linear `for iteration` body
-//! ([crates/aura-agent/src/agent_loop/mod.rs](
-//! crates/aura-agent/src/agent_loop/mod.rs)). E.1 lifted it into
-//! [`run_turn_stop_hooks`], invoked after every sampling request that
-//! did *not* terminate the loop for an unrelated reason (model fatal
-//! error, cancellation, task_done stop_loop). This preserves the
-//! pre-E.1 invariant that continuation only injects when the loop
-//! would otherwise continue — Phase 1.B's `dev_loop_endturn_*` tests
-//! still hold end-to-end after the restructure.
+//! evaluates to `false`. Once the model emits `EndTurn` (or a
+//! non-tool-use stop reason) and the input queue is drained, the
+//! turn unwinds and the task shell decides whether to spin a new
+//! turn.
 //!
 //! Invariants:
 //!
 //! - The turn loop terminates as soon as `needs_follow_up == false`.
-//! - `task_blocked` (max_continuation_turns exhausted) sets
-//!   `StopHookOutcome::should_break = true` and the turn loop unwinds.
 //! - Cancellation / fatal model errors short-circuit the loop without
 //!   running stop hooks (the result is already finalised).
-//! - E.2: the queue drain at the top of every iteration uses a
+//! - The queue drain at the top of every iteration uses a
 //!   `biased; select!` so cancellation observed during the drain wins
-//!   over any newly-queued user input (Rule 6.3). The message-append
-//!   step that follows the drain is atomic with respect to that
-//!   cancellation — there is no half-written message state.
+//!   over any newly-queued user input. The message-append step that
+//!   follows the drain is atomic with respect to that cancellation —
+//!   there is no half-written message state.
 
 use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
@@ -48,33 +32,29 @@ use tracing::instrument;
 
 use crate::console;
 use crate::events::AgentLoopEvent;
-use crate::session::goal_runtime::{BlockReason, GoalRuntimeEvent, TaskRestart};
 use crate::session::input_queue::InputQueue;
 use crate::session::{Session, UserInput};
 use crate::types::AgentToolExecutor;
 use crate::{helpers, AgentError};
 
 use super::sampling::{run_sampling_request, SamplingRequestResult};
-use super::{context, streaming, AgentLoop, LoopState, TaskId};
+use super::{context, AgentLoop, LoopState, TaskId};
 
 /// Result of a single turn.
 ///
 /// Fields capture just enough context to let the outer task shell
-/// (`task::run_task`) decide whether to keep running turns. E.2 reads
-/// `sampling_count` to accumulate the per-task `iteration_offset` so
-/// the `max_iterations_per_task` cap counts completed sampling
-/// requests across turn restarts.
+/// (`task::run_task`) decide whether to keep running turns.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutcome {
     /// `true` when the turn loop broke because the model signalled
-    /// stop *and* no stop-hook injection requested a follow-up. E.2's
-    /// task shell uses this together with the queue's `has_pending`
-    /// flag to decide whether to spin another turn.
+    /// stop *and* no pending input requested a follow-up. The task
+    /// shell uses this together with the queue's `has_pending` flag
+    /// to decide whether to spin another turn.
     pub(crate) terminated_cleanly: bool,
     /// `true` when the turn loop broke because a stop hook signalled
-    /// `should_break` (currently only the `task_blocked` path) or a
-    /// fatal model error / cancellation was observed. The task shell
-    /// reads this to skip any "restart on pending input" behavior.
+    /// `should_break` (budget exhaustion) or a fatal model error /
+    /// cancellation was observed. The task shell reads this to skip
+    /// any "restart on pending input" behavior.
     pub(crate) broke_for_error: bool,
     /// Number of sampling requests completed inside this turn. Used
     /// by the outer task shell to accumulate the
@@ -83,20 +63,11 @@ pub(crate) struct TurnOutcome {
 }
 
 /// Outcome of [`run_turn_stop_hooks`].
-///
-/// Encodes the three orthogonal post-sampling signals — checkpoint
-/// emission is a side-effect handled inside the function, so it does
-/// not need its own bit here.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct StopHookOutcome {
-    /// `true` when a continuation steering message was appended to
-    /// `state.messages` this iteration. The turn loop folds this into
-    /// `needs_follow_up` so the next sampling sees the steering
-    /// message.
-    pub(crate) injected_continuation: bool,
-    /// `true` when the loop must terminate (task_blocked path,
-    /// budget exhausted). The turn loop breaks and the task shell
-    /// observes `TurnOutcome::broke_for_error`.
+    /// `true` when the loop must terminate (budget exhausted). The
+    /// turn loop breaks and the task shell observes
+    /// `TurnOutcome::broke_for_error`.
     pub(crate) should_break: bool,
 }
 
@@ -105,15 +76,12 @@ pub(crate) struct StopHookOutcome {
 /// The loop body is the codex-shaped polarity flip: each iteration
 /// drains the optional [`InputQueue`] (with cancellation precedence),
 /// runs one sampling request, then asks `needs_follow_up?` (model
-/// signal OR pending user input OR stop-hook injection). When the
-/// answer is `false` the turn terminates; otherwise the loop
-/// continues.
+/// signal OR pending user input). When the answer is `false` the
+/// turn terminates; otherwise the loop continues.
 ///
 /// `iteration_offset` is the running sampling-request counter shared
 /// with the task shell so that `state.result.iterations` keeps a
-/// monotonically-increasing total across turns. E.2's task shell
-/// accumulates this counter by the per-turn
-/// [`TurnOutcome::sampling_count`] across input-queue-driven restarts.
+/// monotonically-increasing total across turns.
 ///
 /// `input_queue` is the optional mid-task user steering buffer. When
 /// `Some`, the queue is drained at the top of every sampling
@@ -121,8 +89,8 @@ pub(crate) struct StopHookOutcome {
 /// next model call) AND its `has_pending()` flag participates in
 /// the `needs_follow_up` predicate so the loop keeps looping while
 /// the user is still feeding it work. When `None`, behaviour
-/// collapses to E.1 (one drain-free sampling loop until the model
-/// signals stop).
+/// collapses to one drain-free sampling loop until the model
+/// signals stop.
 #[allow(clippy::too_many_arguments)]
 #[instrument(
     name = "turn",
@@ -151,11 +119,10 @@ pub(crate) async fn run_turn(
         let iteration =
             usize::try_from(iteration_offset.saturating_add(sampling_count)).unwrap_or(usize::MAX);
 
-        // E.2: drain pending user input BEFORE the budget check so
-        // the cancel branch of the biased select! unwinds without
+        // Drain pending user input BEFORE the budget check so the
+        // cancel branch of the biased select! unwinds without
         // counting against the per-task ceilings. Cancellation
-        // observed here is the in-band `UserInput::Cancel` path
-        // (Rule 6.3 cancellation-precedence semantics).
+        // observed here is the in-band `UserInput::Cancel` path.
         if let Some(queue) = input_queue {
             match drain_pending_input(queue, cancellation_token).await {
                 DrainOutcome::Drained(inputs) => {
@@ -170,9 +137,9 @@ pub(crate) async fn run_turn(
             }
         }
 
-        // Hard ceiling: max_iterations is the pre-E.1 global cap
-        // (default `usize::MAX`). Trip it BEFORE the next sampling so
-        // we never pay for one more model call past the budget.
+        // Hard ceiling: max_iterations is the global cap (default
+        // `usize::MAX`). Trip it BEFORE the next sampling so we never
+        // pay for one more model call past the budget.
         if agent.config.max_iterations != usize::MAX && iteration >= agent.config.max_iterations {
             return Err(AgentError::TurnBudgetExceeded {
                 task_id,
@@ -204,11 +171,10 @@ pub(crate) async fn run_turn(
             break;
         }
 
-        // Codex shape: `needs_follow_up` defaults to "continue".
-        // When the model signals follow-up (ToolUse / MaxTokens with
-        // pending), the post-sampling stop hooks run (preserving
-        // Phase 1.B's "checkpoint + continuation + budget warnings"
-        // semantics from pre-E1 `post_iteration_checks`).
+        // Codex shape: `needs_follow_up` defaults to "continue". When
+        // the model signals follow-up (ToolUse / MaxTokens with
+        // pending), the post-sampling stop hooks run for budget /
+        // checkpoint side-effects only.
         if sampling_result.needs_follow_up {
             let stop_outcome =
                 run_turn_stop_hooks(&agent.config, event_tx, state, iteration, task_id, session)
@@ -217,18 +183,13 @@ pub(crate) async fn run_turn(
                 broke_for_error = true;
                 break;
             }
-            // `injected_continuation` is informational here — the
-            // loop continues either way (a steering message has been
-            // appended, the next sampling will pick it up).
             continue;
         }
 
-        // E.2: the model signalled stop, but pending user input
-        // keeps the turn loop alive — the next iteration's drain
-        // will pull the queued context into `state.messages` and
-        // feed it to a fresh sampling request. This is codex's
-        // `needs_follow_up = model_says_continue || has_pending`
-        // disjunction (`turn.rs:255` analog).
+        // The model signalled stop, but pending user input keeps the
+        // turn loop alive — the next iteration's drain will pull the
+        // queued context into `state.messages` and feed it to a
+        // fresh sampling request.
         if input_queue.is_some_and(InputQueue::has_pending) {
             continue;
         }
@@ -297,7 +258,7 @@ async fn drain_pending_input(
 ///   the tracing paper trail and that paper trail has already been
 ///   served by the queue itself.
 ///
-/// Exposed as `pub(super)` so the E.3 stream pump
+/// Exposed as `pub(super)` so the stream pump
 /// ([`super::sampling`]) can call it after a per-`OutputItemDone`
 /// drain without duplicating the merge / envelope logic.
 pub(super) fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs: Vec<UserInput>) {
@@ -317,53 +278,23 @@ pub(super) fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs:
 
 /// Run the post-sampling stop hooks for a single turn iteration.
 ///
-/// E.4 rehomed the continuation decision into the session-scoped
-/// [`crate::session::goal_runtime::GoalRuntime`]; this function is
-/// the agent-loop seam that observes the turn boundary and delegates
-/// to the runtime. Responsibilities:
+/// Codex parity: this no longer delegates to a continuation runtime.
+/// Responsibilities reduced to:
 ///
 /// 1. Emit the first-write checkpoint warning at most once per run.
-/// 2. Hand the turn outcome (`had_write`, read paths) to
-///    [`crate::session::goal_runtime::GoalRuntime::handle_event`] and
-///    act on the returned [`TaskRestart`]:
-///    - [`TaskRestart::Continuation`] → route the carried
-///      [`UserInput::Steer`] through
-///      [`crate::session::InputQueue::push`] so the steering message
-///      flows through the same boundary as user-typed input (rather
-///      than the legacy `helpers::append_warning` direct mutation).
-///    - [`TaskRestart::Blocked`] → mark the task `stalled = true` +
-///      `llm_error = "task_blocked: …"` (Phase 1.B wire-up
-///      preserved) and ask the turn loop to break.
-/// 3. Emit budget warnings and trip the credit-budget stop.
-///
-/// The session is always present in E.4 because [`crate::AgentLoop::run_with_session`]
-/// constructs one even when the caller passes no [`crate::AgentRunnerHandle`].
+/// 2. Emit budget warnings.
+/// 3. Trip the credit-budget stop.
 pub(crate) async fn run_turn_stop_hooks(
     config: &super::AgentLoopConfig,
     event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
     iteration: usize,
-    task_id: TaskId,
-    session: &Session,
+    _task_id: TaskId,
+    _session: &Session,
 ) -> Result<StopHookOutcome, AgentError> {
     let mut outcome = StopHookOutcome::default();
 
     context::emit_checkpoint_if_needed(event_tx, state);
-
-    if delegate_continuation_to_goal_runtime(
-        config,
-        event_tx,
-        state,
-        iteration,
-        task_id,
-        session,
-        &mut outcome,
-    )
-    .await?
-    {
-        outcome.should_break = true;
-        return Ok(outcome);
-    }
 
     context::check_budget_warnings(config, event_tx, state, iteration);
     if context::should_stop_for_budget(config, state, iteration) {
@@ -372,171 +303,4 @@ pub(crate) async fn run_turn_stop_hooks(
     }
 
     Ok(outcome)
-}
-
-/// Route the post-sampling continuation decision through the
-/// session-scoped [`crate::session::goal_runtime::GoalRuntime`].
-///
-/// Returns `true` when the loop must terminate (the `task_blocked`
-/// escalation path). On a successful injection the function flips
-/// [`StopHookOutcome::injected_continuation`] and returns `false` so
-/// the turn loop continues for at least one more sampling request.
-///
-/// On every call the shadow [`crate::agent_loop::LoopState::continuation`]
-/// field is synchronised from
-/// [`crate::session::goal_runtime::GoalRuntime::snapshot`] so the
-/// dev-loop reasoning-effort policy
-/// ([`super::LoopState::compute_thinking_effort`]) keeps reading
-/// authoritative streak data without re-plumbing.
-#[allow(clippy::too_many_arguments)]
-async fn delegate_continuation_to_goal_runtime(
-    config: &super::AgentLoopConfig,
-    event_tx: Option<&Sender<AgentLoopEvent>>,
-    state: &mut LoopState,
-    iteration: usize,
-    task_id: TaskId,
-    session: &Session,
-    outcome: &mut StopHookOutcome,
-) -> Result<bool, AgentError> {
-    if !config.dev_loop_completion_required {
-        return Ok(false);
-    }
-    // A clean `task_done` already terminates the loop in the sampling
-    // request's `dispatch_stop_reason` path; the continuation runtime
-    // only fires on iterations that the loop intends to continue.
-    if state.task_done_completed {
-        return Ok(false);
-    }
-
-    let had_write = !state.turn_diff.is_empty();
-    let read_paths = state.turn_diff.read_paths().clone();
-    // Priority A: snapshot the per-iteration failed-write attempts
-    // BEFORE `begin_iteration` resets the turn diff at the top of
-    // the next loop iteration. The goal-runtime ring buffer takes
-    // ownership of the slice so the rendered Recovery body can echo
-    // the rejections back to the model on the next continuation.
-    let failed_write_attempts: Vec<crate::agent_loop::turn_diff::FailedWriteAttempt> =
-        state.turn_diff.failed_write_attempts().to_vec();
-
-    let restart = session
-        .goal_runtime
-        .handle_event(GoalRuntimeEvent::TurnCompleted {
-            task_id,
-            had_write,
-            read_paths,
-            failed_write_attempts,
-        })
-        .await?;
-
-    // Always sync the shadow streak after the decision so the
-    // reasoning-effort policy reads authoritative data on the next
-    // `build_request`.
-    let snapshot = session.goal_runtime.snapshot().await;
-    state.continuation.consecutive_no_write = snapshot.consecutive_no_write;
-    state.total_continuation_turns = snapshot.total_continuation_turns;
-    state.no_write_after_successful_write = snapshot.no_write_after_successful_write;
-    state.circling_latched = session.goal_runtime.is_circling().await;
-
-    let Some(restart) = restart else {
-        return Ok(false);
-    };
-
-    match restart {
-        TaskRestart::Continuation { input, streak, .. } => {
-            // Render the body for emission alongside the queue push
-            // so legacy operators that grep on the warning text
-            // continue to see the same envelope they did pre-E.4.
-            let body = match &input {
-                UserInput::Steer { instruction } => instruction.clone(),
-                UserInput::Message(text) => text.clone(),
-                UserInput::Cancel => String::new(),
-            };
-            // Push through the session-scoped input queue (codex
-            // parity: continuation prompts flow through the same
-            // boundary as user-typed input). The drain at the top
-            // of the next turn iteration will splice the queued
-            // input into `state.messages` via the existing
-            // `apply_user_inputs_to_messages` adapter so the
-            // `<harness_steer>` envelope wraps the rendered body.
-            //
-            // E.4 also keeps the agent-loop `event_tx` warning so
-            // downstream consumers that grep on the rendered body
-            // (dashboards, eval scrapers) keep seeing the same
-            // signal they did pre-E.4.
-            session.input_queue.push(input).await?;
-            if !body.is_empty() {
-                streaming::emit(event_tx, AgentLoopEvent::Warning(body));
-            }
-            tracing::debug!(
-                session_id = %session.id,
-                task_id = %task_id,
-                iteration,
-                streak,
-                "goal_runtime injected continuation via input_queue"
-            );
-            outcome.injected_continuation = true;
-            Ok(false)
-        }
-        TaskRestart::Blocked {
-            task_id: blocked_task,
-            session_id: blocked_session,
-            streak,
-            configured_max,
-            effective_max,
-            circling,
-            reason: block_reason,
-        } => {
-            let reason = match block_reason {
-                BlockReason::PartialProgressStalled => format!(
-                    "task_blocked: partial_progress_stalled after {effective_max} no-write turns following a successful write at iteration {iteration}"
-                ),
-                BlockReason::ContinuationBudget if configured_max == effective_max => {
-                    format!(
-                        "task_blocked: max_continuation_turns ({effective_max}) exceeded without a write at iteration {iteration}"
-                    )
-                }
-                BlockReason::ContinuationBudget if circling => {
-                    format!(
-                        "task_blocked: max_continuation_turns (effective {effective_max} due to circling, configured {configured_max}) exceeded without a write at iteration {iteration}"
-                    )
-                }
-                BlockReason::ContinuationBudget => {
-                    format!(
-                        "task_blocked: max_continuation_turns (effective {effective_max}, configured {configured_max}) exceeded without a write at iteration {iteration}"
-                    )
-                }
-            };
-            tracing::warn!(
-                session_id = %blocked_session,
-                task_id = %blocked_task,
-                iteration,
-                consecutive_no_write = streak,
-                total_continuation_turns = state.total_continuation_turns,
-                configured_max_continuation_turns = configured_max,
-                effective_max_continuation_turns = effective_max,
-                circling,
-                "{reason}"
-            );
-            state.result.stalled = true;
-            if state.result.llm_error.is_none() {
-                state.result.llm_error = Some(reason.clone());
-            }
-            streaming::emit(event_tx, AgentLoopEvent::Warning(reason));
-            // Best-effort informational re-emission so consumers
-            // listening on the goal-runtime event stream see the
-            // escalation in the same order as the warning.
-            if let Err(err) = session
-                .goal_runtime
-                .handle_event(GoalRuntimeEvent::TaskBlocked {
-                    task_id: blocked_task,
-                    session_id: blocked_session,
-                    streak,
-                })
-                .await
-            {
-                tracing::warn!(error = %err, "goal_runtime::TaskBlocked replay failed; ignoring");
-            }
-            Ok(true)
-        }
-    }
 }
