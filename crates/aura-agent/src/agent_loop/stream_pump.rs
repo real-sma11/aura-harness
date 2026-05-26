@@ -781,6 +781,7 @@ async fn handle_streamed_tool_use(
         &mut state.turn_diff,
         Some(&mut state.repeated_read_tracker),
         Some(&mut state.session_read_paths),
+        Some(&mut state.read_after_write_allowances),
     );
     if state.had_any_write {
         state.had_any_file_write = true;

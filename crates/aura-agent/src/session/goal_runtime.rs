@@ -129,12 +129,14 @@ pub(crate) const SUCCESSFUL_WRITE_CONTINUATION_REPAYMENT: u32 = 2;
 
 /// No-write turns allowed after at least one successful write before treating
 /// the task as partial-progress stalled.
-pub(crate) const POST_WRITE_NO_WRITE_STALL_TURNS: u32 = 4;
+pub(crate) const POST_WRITE_NO_WRITE_STALL_TURNS: u32 = 8;
 
 pub(crate) const PARTIAL_PROGRESS_STEER: &str =
     "If you already wrote to files this task and the spec calls for additional \
      methods or exports, your next call must append the missing surface with \
-     write_file / edit_file / delete_file. Only call task_done with \
+     write_file / edit_file / delete_file. If the latest build or file read \
+     shows malformed code from your own edit, repair that exact file before \
+     exploring more. Only call task_done with \
      no_changes_needed: true if the codebase already satisfies the task.";
 
 /// True when the last two no-write turns read largely the same paths.

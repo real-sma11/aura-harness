@@ -994,6 +994,9 @@ pub struct LoopState {
     pub(crate) repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker,
     /// Paths successfully read this session; used by the circling read gate.
     pub(crate) session_read_paths: std::collections::HashSet<PathBuf>,
+    /// Per-path read budget granted after a successful write to that path.
+    /// Lets the agent inspect changed regions while repairing malformed edits.
+    pub(crate) read_after_write_allowances: std::collections::HashMap<PathBuf, u8>,
     /// Set after each turn-stop hook when the goal runtime detects circling.
     pub(crate) circling_latched: bool,
 }
@@ -1031,6 +1034,7 @@ impl LoopState {
             no_write_after_successful_write: 0,
             repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker::new(),
             session_read_paths: std::collections::HashSet::new(),
+            read_after_write_allowances: std::collections::HashMap::new(),
             circling_latched: false,
         }
     }

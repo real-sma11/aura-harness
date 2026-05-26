@@ -100,6 +100,7 @@ async fn execute_and_cache_tools(
             &mut state.turn_diff,
             Some(&mut state.repeated_read_tracker),
             Some(&mut state.session_read_paths),
+            Some(&mut state.read_after_write_allowances),
         );
     }
     debug!(

@@ -16,7 +16,7 @@
 //! inside that one. "Pipeline" makes the multi-stage flow explicit and
 //! preserves the outer/inner split between the two files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -59,6 +59,7 @@ const MIN_TOOL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
 /// purpose. Clamping protects against typos that would silently
 /// disable forward-progress signalling.
 const MAX_TOOL_HEARTBEAT_INTERVAL_SECS: u64 = 600;
+const READS_AFTER_WRITE_ALLOWANCE: u8 = 3;
 
 pub(super) fn read_tool_heartbeat_interval_from_env() -> Duration {
     let secs = match std::env::var(TOOL_HEARTBEAT_INTERVAL_ENV) {
@@ -226,6 +227,7 @@ impl AgentLoop {
             &mut state.turn_diff,
             Some(&mut state.repeated_read_tracker),
             Some(&mut state.session_read_paths),
+            Some(&mut state.read_after_write_allowances),
         );
 
         if any_write_success && state.build_cooldown == 0 {
@@ -271,7 +273,13 @@ pub(super) fn partition_circling_duplicate_reads(
             continue;
         };
         let path_buf = PathBuf::from(path);
-        if state.session_read_paths.contains(&path_buf) {
+        let has_post_write_allowance = state
+            .read_after_write_allowances
+            .get(&path_buf)
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        if state.session_read_paths.contains(&path_buf) && !has_post_write_allowance {
             let partial_progress_note = if state.had_any_file_write {
                 format!("\n{PARTIAL_PROGRESS_STEER}")
             } else {
@@ -381,6 +389,7 @@ pub(super) fn track_tool_effects_public(
     turn_diff: &mut super::turn_diff::TurnDiff,
     repeated_read_tracker: Option<&mut crate::prompts::steering::RepeatedReadTracker>,
     session_read_paths: Option<&mut HashSet<PathBuf>>,
+    read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
 ) -> bool {
     track_tool_effects(
         to_execute,
@@ -391,6 +400,7 @@ pub(super) fn track_tool_effects_public(
         turn_diff,
         repeated_read_tracker,
         session_read_paths,
+        read_after_write_allowances,
     )
 }
 
@@ -403,6 +413,7 @@ fn track_tool_effects(
     turn_diff: &mut super::turn_diff::TurnDiff,
     mut repeated_read_tracker: Option<&mut crate::prompts::steering::RepeatedReadTracker>,
     mut session_read_paths: Option<&mut HashSet<PathBuf>>,
+    mut read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
 ) -> bool {
     use super::turn_diff::{FailedWriteAttempt, TurnDiff, FAILED_WRITE_SNIPPET_MAX_CHARS};
     use crate::types::FileChangeKind;
@@ -470,6 +481,17 @@ fn track_tool_effects(
                     if let Some(cache) = session_read_paths.as_deref_mut() {
                         cache.insert(path_buf);
                     }
+                    if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
+                        let key = PathBuf::from(path);
+                        let mut exhausted = false;
+                        if let Some(remaining) = allowances.get_mut(&key) {
+                            *remaining = remaining.saturating_sub(1);
+                            exhausted = *remaining == 0;
+                        }
+                        if exhausted {
+                            allowances.remove(&key);
+                        }
+                    }
                 }
                 if tool.name == "read_file" {
                     if let Some(tracker) = repeated_read_tracker.as_deref_mut() {
@@ -499,8 +521,12 @@ fn track_tool_effects(
 
             let path_arg = tool.input.get("path").and_then(|v| v.as_str());
             if let Some(path) = path_arg {
+                let path_buf = PathBuf::from(path);
                 if let Some(cache) = session_read_paths.as_deref_mut() {
-                    cache.remove(&PathBuf::from(path));
+                    cache.remove(&path_buf);
+                }
+                if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
+                    allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
                 }
                 any_write_success = true;
                 *had_any_write = true;
@@ -517,8 +543,12 @@ fn track_tool_effects(
                 // light up the same way they do for the granular
                 // write tools.
                 for change in &exec_result.file_changes {
+                    let path_buf = PathBuf::from(&change.path);
                     if let Some(cache) = session_read_paths.as_deref_mut() {
-                        cache.remove(&PathBuf::from(&change.path));
+                        cache.remove(&path_buf);
+                    }
+                    if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
+                        allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
                     }
                     result.record_file_change(change.clone());
                     record_into_turn_diff(turn_diff, change);
@@ -765,6 +795,7 @@ mod track_tool_effects_tests {
             &mut turn_diff,
             None,
             None,
+            None,
         );
 
         assert!(
@@ -829,6 +860,7 @@ mod track_tool_effects_tests {
             &mut turn_diff,
             None,
             None,
+            None,
         );
 
         let recorded = turn_diff.failed_write_attempts();
@@ -866,6 +898,7 @@ mod track_tool_effects_tests {
                 &mut turn_diff,
                 None,
                 None,
+                None,
             );
         }
 
@@ -885,6 +918,7 @@ mod track_tool_effects_tests {
         let mut had_any_write = false;
         let mut turn_diff = super::super::turn_diff::TurnDiff::default();
         let mut session_read_paths = HashSet::from([PathBuf::from("src/inbox.rs")]);
+        let mut read_after_write_allowances = HashMap::new();
 
         let to_execute = vec![mk_write_tool("toolu_write", "edit_file", "src/inbox.rs")];
         let executed = vec![mk_write_result("toolu_write", "src/inbox.rs")];
@@ -898,6 +932,7 @@ mod track_tool_effects_tests {
             &mut turn_diff,
             None,
             Some(&mut session_read_paths),
+            Some(&mut read_after_write_allowances),
         );
 
         assert!(any_success);
@@ -905,6 +940,10 @@ mod track_tool_effects_tests {
         assert!(
             !session_read_paths.contains(&PathBuf::from("src/inbox.rs")),
             "writing a file must allow one fresh re-read of that path"
+        );
+        assert_eq!(
+            read_after_write_allowances.get(&PathBuf::from("src/inbox.rs")),
+            Some(&READS_AFTER_WRITE_ALLOWANCE)
         );
     }
 
@@ -929,6 +968,26 @@ mod track_tool_effects_tests {
         assert!(blocked[0].content.contains("no_changes_needed: true"));
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, fresh.id);
+    }
+
+    #[test]
+    fn circling_gate_allows_duplicate_reads_with_post_write_allowance() {
+        let config = super::super::AgentLoopConfig::for_agent("claude-test-model");
+        let mut state = super::super::LoopState::new(&config, Vec::new());
+        state.circling_latched = true;
+        state
+            .session_read_paths
+            .insert(PathBuf::from("src/inbox.rs"));
+        state
+            .read_after_write_allowances
+            .insert(PathBuf::from("src/inbox.rs"), 1);
+
+        let duplicate = mk_read_tool("toolu_dup", "src/inbox.rs");
+        let (blocked, remaining) = partition_circling_duplicate_reads(&[duplicate.clone()], &state);
+
+        assert!(blocked.is_empty());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, duplicate.id);
     }
 
     #[test]
