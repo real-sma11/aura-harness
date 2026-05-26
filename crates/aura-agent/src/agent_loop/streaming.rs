@@ -301,6 +301,20 @@ impl AgentLoop {
                     model = %model_name,
                     "Stream transport error; falling back to non-streaming complete()"
                 );
+                let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let err_str = e.to_string();
+                aura_reasoner::console::anthropic_failure_block(
+                    aura_reasoner::console::AnthropicFailureView {
+                        status_code: Some(200),
+                        status_text: "OK",
+                        class: "sse_transport",
+                        elapsed_ms,
+                        request_id: None,
+                        retry_after_s: None,
+                        body_preview: Some(&err_str),
+                        destination: "aura-network",
+                    },
+                );
                 emit(
                     event_tx,
                     AgentLoopEvent::StreamReset {
@@ -645,6 +659,20 @@ impl super::AgentLoop {
             // loop will decide whether to try again based on
             // classification.
             DrainOutcome::Transport(e) => {
+                let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let err_str = e.to_string();
+                aura_reasoner::console::anthropic_failure_block(
+                    aura_reasoner::console::AnthropicFailureView {
+                        status_code: Some(200),
+                        status_text: "OK",
+                        class: "sse_transport",
+                        elapsed_ms,
+                        request_id: None,
+                        retry_after_s: None,
+                        body_preview: Some(&err_str),
+                        destination: "aura-network",
+                    },
+                );
                 return Err(DriveStreamingError::Other(
                     LlmCallError::from_reasoner_error(&e),
                 ));

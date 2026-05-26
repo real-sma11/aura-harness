@@ -37,6 +37,7 @@ pub mod auth;
 pub(crate) mod automaton_bridge;
 mod config;
 pub mod console_format;
+pub mod inbound_console;
 pub(crate) mod domain;
 pub(crate) mod executor_factory;
 pub mod files_api;

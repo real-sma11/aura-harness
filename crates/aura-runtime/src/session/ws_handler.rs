@@ -11,12 +11,12 @@ use aura_agent::{
 };
 use aura_reasoner::{ContentBlock, ImageSource, Message, Role};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use base64::Engine;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -78,6 +78,11 @@ fn classify_ws_frame(msg_result: Option<Result<WsMessage, axum::Error>>) -> WsAc
 /// loop is tearing down. `phase` is a short tag like "idle",
 /// "active_agent_turn", or "active_generation_turn" so the operator can
 /// see at a glance what the connection was doing when it died.
+///
+/// Transport errors also surface as a `ws.framing transport_error`
+/// rejection line under the `aura::console` target so the visual
+/// transcript shows the silent open-then-close paths the
+/// [`classify_ws_frame`] doc-comment flags.
 fn log_ws_close_reason(session_id: &str, reason: &CloseReason, phase: &str) {
     match reason {
         CloseReason::PeerClose => {
@@ -92,6 +97,11 @@ fn log_ws_close_reason(session_id: &str, reason: &CloseReason, phase: &str) {
                 phase,
                 error = %err,
                 "websocket transport error, tearing down connection"
+            );
+            crate::inbound_console::ws_rejection_line(
+                "framing",
+                "transport_error",
+                Some(&format!("phase={phase} session={session_id} {err}")),
             );
         }
     }
@@ -278,6 +288,11 @@ fn handle_msg_during_turn(
         Ok(InboundMessage::ToolApprovalResponse(resp)) => {
             if let Some(ref broker) = session.tool_approval_broker {
                 if let Err(e) = broker.respond(resp) {
+                    crate::inbound_console::ws_rejection_line(
+                        "framing",
+                        "approval_response_error",
+                        Some(&format!("session={} {e}", session.session_id)),
+                    );
                     let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                         code: "approval_response_error".into(),
                         message: e,
@@ -288,6 +303,11 @@ fn handle_msg_during_turn(
             }
         }
         Ok(_) => {
+            crate::inbound_console::ws_rejection_line(
+                "framing",
+                "turn_in_progress",
+                Some(&format!("session={}", session.session_id)),
+            );
             let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                 code: "turn_in_progress".into(),
                 message: "A turn is currently in progress; send cancel first".into(),
@@ -296,6 +316,11 @@ fn handle_msg_during_turn(
             }));
         }
         Err(e) => {
+            crate::inbound_console::ws_rejection_line(
+                "framing",
+                "parse_error",
+                Some(&format!("session={} {e}", session.session_id)),
+            );
             let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                 code: "parse_error".into(),
                 message: format!("Invalid message: {e}"),
@@ -372,6 +397,14 @@ async fn dispatch_idle_message(
                         mode = %req.mode,
                         "Generation request rejected because AURA_ROUTER_URL is not configured"
                     );
+                    crate::inbound_console::ws_rejection_line(
+                        "framing",
+                        "no_router_url",
+                        Some(&format!(
+                            "session={} mode={}",
+                            session.session_id, req.mode
+                        )),
+                    );
                     let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                         code: "no_router_url".into(),
                         message: "AURA_ROUTER_URL not configured; generation unavailable".into(),
@@ -398,6 +431,11 @@ async fn dispatch_idle_message(
         Ok(InboundMessage::ToolApprovalResponse(resp)) => {
             if let Some(ref broker) = session.tool_approval_broker {
                 if let Err(e) = broker.respond(resp) {
+                    crate::inbound_console::ws_rejection_line(
+                        "framing",
+                        "approval_response_error",
+                        Some(&format!("session={} {e}", session.session_id)),
+                    );
                     let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                         code: "approval_response_error".into(),
                         message: e,
@@ -409,6 +447,11 @@ async fn dispatch_idle_message(
             IdleAction::Continue
         }
         Err(e) => {
+            crate::inbound_console::ws_rejection_line(
+                "framing",
+                "parse_error",
+                Some(&format!("session={} {e}", session.session_id)),
+            );
             let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                 code: "parse_error".into(),
                 message: format!("Invalid message: {e}"),
@@ -461,6 +504,11 @@ async fn start_turn(
     ctx: &WsContext,
 ) -> Option<AgentTurn> {
     if !session.initialized {
+        crate::inbound_console::ws_rejection_line(
+            "framing",
+            "not_initialized",
+            Some(&format!("session={}", session.session_id)),
+        );
         let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
             code: "not_initialized".into(),
             message: "Send session_init before user_message".into(),
@@ -480,6 +528,11 @@ async fn start_turn(
     let prepared = match prepare_turn_context(session, msg, ctx).await {
         Ok(p) => p,
         Err(err) => {
+            crate::inbound_console::ws_rejection_line(
+                "framing",
+                &err.code,
+                Some(&format!("session={} {}", session.session_id, err.message)),
+            );
             let _ = outbound_tx.try_send(OutboundMessage::Error(err));
             return None;
         }
@@ -560,20 +613,21 @@ async fn prepare_turn_context(
                         },
                     });
                 } else {
-                    let decoded =
-                        match base64::engine::general_purpose::STANDARD.decode(&payload_b64) {
-                            Ok(bytes) => match String::from_utf8(bytes) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    warn!(name = ?att.name, error = %e, "Skipping non-UTF-8 text attachment");
-                                    continue;
-                                }
-                            },
+                    let decoded = match base64::engine::general_purpose::STANDARD
+                        .decode(&payload_b64)
+                    {
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Ok(s) => s,
                             Err(e) => {
-                                warn!(name = ?att.name, error = %e, "Skipping text attachment with invalid base64");
+                                warn!(name = ?att.name, error = %e, "Skipping non-UTF-8 text attachment");
                                 continue;
                             }
-                        };
+                        },
+                        Err(e) => {
+                            warn!(name = ?att.name, error = %e, "Skipping text attachment with invalid base64");
+                            continue;
+                        }
+                    };
                     let header = att.name.as_deref().unwrap_or("document");
                     blocks.push(ContentBlock::text(&format!(
                         "[File: {header}]\n\n{decoded}"
@@ -670,8 +724,9 @@ async fn prepare_turn_context(
     // entry on every turn, so the per-turn breakdown attributes those
     // chars to the "Subagents" bucket. Custom registries (e.g. tests)
     // would override this once they're plumbed through `WsContext`.
-    config.subagents_chars =
-        crate::subagent_registry::registry_chars(&crate::subagent_registry::SubagentRegistry::bundled());
+    config.subagents_chars = crate::subagent_registry::registry_chars(
+        &crate::subagent_registry::SubagentRegistry::bundled(),
+    );
 
     // Resolve active skill names before creating the memory observer so we can
     // forward them for procedure extraction.

@@ -174,6 +174,135 @@ pub fn anthropic_response_block(resp: AnthropicResponseView<'_>) {
     info!(target: CONSOLE_TARGET, "{out}");
 }
 
+/// View into a blocked / failed `/v1/messages` round-trip. `status_code`
+/// is `None` for failures that never produced an HTTP response (transport
+/// timeout, DNS failure, body-serialize bug); for those the renderer
+/// substitutes a `← transport failed` header.
+///
+/// Distinct from [`AnthropicResponseView`] so failure-only rows
+/// (`class`, `request_id`, `retry_after`, `body`) do not have to fight
+/// success-only rows (`tokens`) for column space.
+pub struct AnthropicFailureView<'a> {
+    pub status_code: Option<u16>,
+    pub status_text: &'a str,
+    /// Stable short class label: `cloudflare_block` / `rate_limited_429`
+    /// / `upstream_5xx` / `insufficient_credits` / `transport` / `parse`
+    /// / `sse_transport` / `other`. Mirrors the strings emitted by
+    /// `retry_reason_for` plus a few non-HTTP buckets so an operator
+    /// scanning the visual transcript can pivot to `retries.jsonl` by
+    /// the same key.
+    pub class: &'a str,
+    pub elapsed_ms: u64,
+    pub request_id: Option<&'a str>,
+    pub retry_after_s: Option<u64>,
+    /// Already-truncated body / error preview (≤140 chars recommended).
+    /// Renderer collapses control chars + interior whitespace.
+    pub body_preview: Option<&'a str>,
+    pub destination: &'a str,
+}
+
+/// Planned next action the retry classifier picked for a failed
+/// attempt. Rendered as a one-line `↻ retry …` / `→ fallback …` /
+/// `✗ propagate …` continuation under the failure block so the
+/// transcript shows what the harness will do about the block.
+pub enum RetryDecisionView<'a> {
+    Retry {
+        attempt_that_failed: u32,
+        max_retries: u32,
+        sleep_ms: u64,
+        body_cap_bytes: Option<usize>,
+    },
+    Fallback {
+        next_model: &'a str,
+    },
+    Propagate {
+        reason: &'a str,
+    },
+}
+
+/// Render the failure half of an Anthropic call as a multi-line block.
+/// Symmetric to [`anthropic_response_block`]: same destination tag,
+/// same row layout, same target — operators reading the transcript
+/// see one paired box per round-trip regardless of outcome.
+pub fn anthropic_failure_block(view: AnthropicFailureView<'_>) {
+    let mut out = String::new();
+    let header_text = match view.status_code {
+        Some(code) => format!("← {} {}", code, view.status_text),
+        None => format!("← {} ({})", view.status_text, view.class),
+    };
+    let header = header_text.red().bold();
+    let tag = destination_tag(view.destination, None);
+    out.push_str(&format!("{} {header}  {tag}\n", "┌─".dimmed()));
+    out.push_str(&wrap_row(
+        "class",
+        &format!(
+            "{:<14} elapsed {:>7}",
+            view.class,
+            human_duration_ms(view.elapsed_ms)
+        ),
+    ));
+    if let Some(req_id) = view.request_id {
+        out.push_str(&wrap_row("request_id", req_id));
+    }
+    if let Some(secs) = view.retry_after_s {
+        out.push_str(&wrap_row("retry_after", &format!("{secs}s")));
+    }
+    if let Some(body) = view.body_preview {
+        let collapsed = collapse_for_row(body, 140);
+        if !collapsed.is_empty() {
+            out.push_str(&wrap_row("body", &collapsed));
+        }
+    }
+    out.push_str(&format!("{}", "└─".dimmed()));
+    info!(target: CONSOLE_TARGET, "{out}");
+}
+
+/// Render the retry classifier's planned next action as a single
+/// continuation line — sits between the failure block and the next
+/// request block so the transcript shows what the harness will do
+/// about the block without hunting through `warn!` lines.
+pub fn anthropic_retry_decision_line(decision: RetryDecisionView<'_>) {
+    let body = match decision {
+        RetryDecisionView::Retry {
+            attempt_that_failed,
+            max_retries,
+            sleep_ms,
+            body_cap_bytes,
+        } => {
+            let cap = body_cap_bytes
+                .map(|c| format!(" · cap {}", human_bytes(c)))
+                .unwrap_or_default();
+            // Attempt counts are 1-based for human readability:
+            // `attempt_that_failed` is the 0-based index of the call
+            // that just failed, so the *next* attempt is +2 of N.
+            format!(
+                "{}   {} retry {}/{} in {}{}",
+                "│".dimmed(),
+                "↻".yellow().bold(),
+                attempt_that_failed.saturating_add(2),
+                max_retries.saturating_add(1),
+                human_duration_ms(sleep_ms),
+                cap,
+            )
+        }
+        RetryDecisionView::Fallback { next_model } => {
+            format!(
+                "{}   {} fallback to {next_model}",
+                "│".dimmed(),
+                "→".yellow().bold(),
+            )
+        }
+        RetryDecisionView::Propagate { reason } => {
+            format!(
+                "{}   {} propagate ({reason})",
+                "│".dimmed(),
+                "✗".red().bold(),
+            )
+        }
+    };
+    info!(target: CONSOLE_TARGET, "{body}");
+}
+
 /// Derive a short host label from a base URL (e.g.
 /// `"https://aura-router.onrender.com"` → `"aura-router.onrender.com"`).
 /// Returns the input unchanged when no scheme prefix is found.
@@ -289,6 +418,28 @@ fn human_bytes(n: usize) -> String {
     } else {
         let mb = n as f64 / (1024.0 * 1024.0);
         format!("{mb:.2} MB")
+    }
+}
+
+/// Collapse control chars + interior whitespace into a single inline
+/// preview. Used for failure-block `body` rows where the upstream
+/// response (e.g. a Cloudflare HTML page) would otherwise smash the
+/// box layout if rendered verbatim.
+fn collapse_for_row(content: &str, limit: usize) -> String {
+    let collapsed: String = content
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'");
+    if trimmed.chars().count() <= limit {
+        trimmed
+    } else {
+        let head: String = trimmed.chars().take(limit).collect();
+        format!("{head}…")
     }
 }
 
@@ -411,6 +562,104 @@ mod tests {
             request_id: Some("req_01abcd"),
             destination: "aura-network",
         });
+    }
+
+    #[test]
+    fn failure_block_renders_403_cloudflare() {
+        anthropic_failure_block(AnthropicFailureView {
+            status_code: Some(403),
+            status_text: "Forbidden",
+            class: "cloudflare_block",
+            elapsed_ms: 612,
+            request_id: Some("cf-ray-deadbeef"),
+            retry_after_s: None,
+            body_preview: Some(
+                "<!DOCTYPE html>\n<html><body>\nyour request was blocked\n</body></html>",
+            ),
+            destination: "aura-network",
+        });
+    }
+
+    #[test]
+    fn failure_block_renders_429_with_retry_after() {
+        anthropic_failure_block(AnthropicFailureView {
+            status_code: Some(429),
+            status_text: "Too Many Requests",
+            class: "rate_limited_429",
+            elapsed_ms: 84,
+            request_id: Some("req_xxx"),
+            retry_after_s: Some(7),
+            body_preview: Some("{\"error\":{\"code\":\"RATE_LIMITED\"}}"),
+            destination: "aura-network",
+        });
+    }
+
+    #[test]
+    fn failure_block_renders_transport() {
+        anthropic_failure_block(AnthropicFailureView {
+            status_code: None,
+            status_text: "transport failed",
+            class: "transport",
+            elapsed_ms: 30_000,
+            request_id: None,
+            retry_after_s: None,
+            body_preview: Some("connection reset by peer"),
+            destination: "aura-network",
+        });
+    }
+
+    #[test]
+    fn failure_block_renders_parse() {
+        anthropic_failure_block(AnthropicFailureView {
+            status_code: Some(200),
+            status_text: "OK",
+            class: "parse",
+            elapsed_ms: 1_840,
+            request_id: Some("req_parse"),
+            retry_after_s: None,
+            body_preview: Some("expected `,` or `}` at line 1 column 87"),
+            destination: "aura-network",
+        });
+    }
+
+    #[test]
+    fn retry_decision_line_renders_each_variant() {
+        anthropic_retry_decision_line(RetryDecisionView::Retry {
+            attempt_that_failed: 0,
+            max_retries: 2,
+            sleep_ms: 1500,
+            body_cap_bytes: Some(192 * 1024),
+        });
+        anthropic_retry_decision_line(RetryDecisionView::Retry {
+            attempt_that_failed: 1,
+            max_retries: 2,
+            sleep_ms: 3000,
+            body_cap_bytes: None,
+        });
+        anthropic_retry_decision_line(RetryDecisionView::Fallback {
+            next_model: "claude-haiku-4-6",
+        });
+        anthropic_retry_decision_line(RetryDecisionView::Propagate {
+            reason: "retries exhausted",
+        });
+    }
+
+    #[test]
+    fn collapse_for_row_strips_control_and_whitespace() {
+        let raw = "<!DOCTYPE html>\n  <html>\r\n  <body>  blocked  </body>\n</html>";
+        let collapsed = collapse_for_row(raw, 200);
+        assert!(!collapsed.contains('\n'));
+        assert!(!collapsed.contains('\r'));
+        assert!(!collapsed.contains("  "));
+        assert!(collapsed.contains("<html> <body> blocked </body> </html>"));
+    }
+
+    #[test]
+    fn collapse_for_row_truncates_with_ellipsis() {
+        let raw = "a".repeat(200);
+        let collapsed = collapse_for_row(&raw, 50);
+        assert!(collapsed.ends_with('…'));
+        assert_eq!(collapsed.chars().count(), 51);
     }
 }
 

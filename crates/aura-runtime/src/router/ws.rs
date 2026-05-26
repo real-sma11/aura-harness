@@ -41,6 +41,11 @@ pub(super) async fn ws_upgrade_handler(
             cap = MAX_WS_CONNS_PER_NODE,
             "Refusing /stream upgrade: WS connection cap reached"
         );
+        crate::inbound_console::ws_rejection_line(
+            "upgrade",
+            "slot_full",
+            Some(&format!("cap={MAX_WS_CONNS_PER_NODE}")),
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
@@ -67,12 +72,12 @@ pub(super) async fn ws_upgrade_handler(
         aura_os_server_url: state.config.aura_os_server_url.clone(),
     };
     ws.on_upgrade(move |socket| async move {
-            // Hold the permit for the lifetime of the socket task so
-            // the slot only frees up when the client actually leaves.
-            handle_ws_connection(socket, ctx).await;
-            drop(permit);
-        })
-        .into_response()
+        // Hold the permit for the lifetime of the socket task so
+        // the slot only frees up when the client actually leaves.
+        handle_ws_connection(socket, ctx).await;
+        drop(permit);
+    })
+    .into_response()
 }
 
 /// WebSocket endpoint for streaming automaton events.
@@ -101,6 +106,11 @@ pub(super) async fn automaton_ws_handler(
     // automaton stream (matching the relaxed HTTP routes).
     if state.config.require_auth {
         if let Err(status) = crate::auth::check_bearer(&headers, &state.config.auth_token) {
+            crate::inbound_console::ws_rejection_line(
+                "upgrade.automaton",
+                "unauthorized",
+                Some(&format!("automaton_id={automaton_id}")),
+            );
             return status.into_response();
         }
     }
@@ -111,14 +121,21 @@ pub(super) async fn automaton_ws_handler(
             automaton_id = %automaton_id,
             "Refusing /stream/automaton/:id upgrade: WS connection cap reached"
         );
+        crate::inbound_console::ws_rejection_line(
+            "upgrade.automaton",
+            "slot_full",
+            Some(&format!(
+                "cap={MAX_WS_CONNS_PER_NODE} automaton_id={automaton_id}"
+            )),
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
     ws.on_upgrade(move |socket| async move {
-            handle_automaton_ws(socket, automaton_id, state.automaton_bridge).await;
-            drop(permit);
-        })
-        .into_response()
+        handle_automaton_ws(socket, automaton_id, state.automaton_bridge).await;
+        drop(permit);
+    })
+    .into_response()
 }
 
 async fn handle_automaton_ws(

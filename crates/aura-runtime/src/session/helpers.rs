@@ -111,6 +111,11 @@ pub(super) async fn handle_session_init(
     let provider_overrides = init.provider_overrides.clone();
 
     if session.initialized {
+        crate::inbound_console::ws_rejection_line(
+            "framing",
+            "already_initialized",
+            Some(&format!("session={}", session.session_id)),
+        );
         let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
             code: "already_initialized".into(),
             message: "Session has already been initialized".into(),
@@ -131,6 +136,11 @@ pub(super) async fn handle_session_init(
         match aura_reasoner::with_session_overrides(reasoner_overrides) {
             Ok(selection) => Some(selection.provider),
             Err(e) => {
+                crate::inbound_console::ws_rejection_line(
+                    "framing",
+                    "invalid_provider_config",
+                    Some(&format!("session={} {e}", session.session_id)),
+                );
                 let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                     code: "invalid_provider_config".into(),
                     message: e.to_string(),
@@ -145,6 +155,11 @@ pub(super) async fn handle_session_init(
     };
 
     if let Err(e) = session.apply_init(init) {
+        crate::inbound_console::ws_rejection_line(
+            "framing",
+            "invalid_workspace",
+            Some(&format!("session={} {e}", session.session_id)),
+        );
         let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
             code: "invalid_workspace".into(),
             message: e,
@@ -160,6 +175,11 @@ pub(super) async fn handle_session_init(
                 session.tool_permissions = agent_ctx.tool_permissions;
             }
             Err(e) => {
+                crate::inbound_console::ws_rejection_line(
+                    "framing",
+                    "tool_permissions_load_failed",
+                    Some(&format!("session={} {e}", session.session_id)),
+                );
                 let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                     code: "tool_permissions_load_failed".into(),
                     message: e,

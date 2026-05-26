@@ -12,17 +12,23 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, State},
+    body::Body,
+    extract::{ws::WebSocketUpgrade, ConnectInfo, DefaultBodyLimit, State},
     http::{
         header::{self, HeaderName},
-        HeaderValue, Method, StatusCode,
+        HeaderValue, Method, Request, StatusCode,
     },
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
+};
+
+use crate::inbound_console::{
+    self, reason_for_status, InboundFailureView, InboundRequestView,
 };
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
@@ -279,6 +285,14 @@ pub fn create_router(state: RouterState) -> Router {
         .merge(public)
         .merge(protected)
         .with_state(state)
+        // Outermost observability layer: emit a paired `→ <method>
+        // <path>` / `← <status> <reason>` block under the `aura::console`
+        // target whenever an inbound request is rejected (non-2xx).
+        // Sits outside `TraceLayer` so it observes the final response
+        // status produced by every inner layer (auth, governor, body
+        // limit, timeout, handler validation). Health probes are
+        // suppressed inside the middleware to avoid kubelet-style noise.
+        .layer(axum::middleware::from_fn(inbound_failure_observer_mw))
         // Security + observability layers (Wave 5 / T1 + phase 9).
         //
         // Order matters: `.layer(X)` wraps the existing stack, so the
@@ -416,16 +430,21 @@ async fn terminal_ws_handler(
             cap = ws::MAX_WS_CONNS_PER_NODE,
             "Refusing /ws/terminal upgrade: WS connection cap reached"
         );
+        inbound_console::ws_rejection_line(
+            "upgrade.terminal",
+            "slot_full",
+            Some(&format!("cap={}", ws::MAX_WS_CONNS_PER_NODE)),
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
     ws.on_upgrade(move |socket| async move {
-            // `permit` is moved into the per-socket task so the slot
-            // is only released when the socket task actually exits.
-            terminal::handle_terminal_ws(socket).await;
-            drop(permit);
-        })
-        .into_response()
+        // `permit` is moved into the per-socket task so the slot
+        // is only released when the socket task actually exits.
+        terminal::handle_terminal_ws(socket).await;
+        drop(permit);
+    })
+    .into_response()
 }
 
 // === Health ===
@@ -530,10 +549,83 @@ async fn ensure_connect_info(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::extract::ConnectInfo;
     if req.extensions().get::<ConnectInfo<SocketAddr>>().is_none() {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
     }
     next.run(req).await
+}
+
+/// Path prefixes whose rejections are intentionally suppressed from the
+/// `aura::console` visual transcript. Today this is just `/health` —
+/// kubelet, load-balancer, and uptime probes hit it on a fixed cadence
+/// and a non-2xx there (e.g. brief startup window) would otherwise
+/// flood the log with paired blocks before the operator can see
+/// anything else.
+const INBOUND_OBSERVE_SKIP_PATHS: &[&str] = &["/health"];
+
+/// Outermost axum middleware that surfaces blocked / rejected inbound
+/// requests under the `aura::console` target.
+///
+/// Captures `method` / `path` / peer / `Content-Length` / start-instant
+/// before forwarding the request, awaits the response, and — when the
+/// final status is `>= 400` and the path is not in
+/// [`INBOUND_OBSERVE_SKIP_PATHS`] — emits a paired
+/// [`inbound_console::inbound_request_summary_block`] +
+/// [`inbound_console::inbound_failure_block`] so the visual transcript
+/// shows the rejection symmetric to the existing outbound `→ POST` /
+/// `← <status>` LLM-call blocks.
+///
+/// Successful (2xx/3xx) responses stay quiet to keep transcript noise
+/// low; the existing `TraceLayer` continues to record them through
+/// the default formatter for grep-friendly per-request audit.
+async fn inbound_failure_observer_mw(req: Request<Body>, next: Next) -> Response {
+    let started_at = Instant::now();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+    let body_bytes = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok());
+
+    let response = next.run(req).await;
+    let status = response.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return response;
+    }
+    if INBOUND_OBSERVE_SKIP_PATHS
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        return response;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    let status_code = status.as_u16();
+    let status_text = status
+        .canonical_reason()
+        .map_or_else(|| status.to_string(), str::to_string);
+    let reason = reason_for_status(status_code);
+
+    inbound_console::inbound_request_summary_block(InboundRequestView {
+        method: method.as_str(),
+        path: &path,
+        peer,
+        body_bytes,
+    });
+    inbound_console::inbound_failure_block(InboundFailureView {
+        status_code,
+        status_text: &status_text,
+        reason,
+        elapsed_ms,
+        peer,
+        body_preview: None,
+    });
+    response
 }

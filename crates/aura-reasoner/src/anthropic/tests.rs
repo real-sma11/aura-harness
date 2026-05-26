@@ -229,8 +229,7 @@ fn test_beta_header_present() {
 
 #[test]
 fn test_cache_control_omitted_when_prompt_caching_disabled() {
-    let system =
-        build_system_block("test", false).expect("non-empty prompt emits a system block");
+    let system = build_system_block("test", false).expect("non-empty prompt emits a system block");
     let json = serde_json::to_string(&system).unwrap();
     assert!(!json.contains("cache_control"));
 
@@ -390,6 +389,192 @@ fn test_cloudflare_detection() {
     assert!(!is_cloudflare_html(
         r#"{"error":{"type":"authentication_error","message":"invalid api key"}}"#
     ));
+}
+
+/// Process-wide buffer that the global `aura::console` subscriber
+/// writes into. Tests acquire [`CONSOLE_CAPTURE_LOCK`] to take
+/// exclusive ownership, clear, run their scenario, snapshot, then
+/// release. Writes from other parallel tests are filtered out via
+/// [`CAPTURE_THREAD_ID`] so they don't pollute the snapshot.
+static CONSOLE_CAPTURE_BUF: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// Process-wide lock for tests that capture the `aura::console`
+/// transcript. Serializes capture so concurrent `#[test]`s don't
+/// interleave their event traffic into the shared buffer.
+static CONSOLE_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+static CONSOLE_CAPTURE_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Thread ID of the test currently holding [`CONSOLE_CAPTURE_LOCK`].
+/// `0` means "no test is capturing" — the writer drops the event in
+/// that state, so we don't accumulate events from unrelated tests.
+static CAPTURE_THREAD_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn current_thread_id_u64() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
+
+struct CaptureWriter;
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let target = CAPTURE_THREAD_ID.load(std::sync::atomic::Ordering::Acquire);
+        if target != 0 && target == current_thread_id_u64() {
+            CONSOLE_CAPTURE_BUF.lock().unwrap().extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Lock-guarded handle on the shared capture buffer. Dropping it
+/// releases the lock and unforces ANSI colors. Constructed via
+/// [`install_console_capture`].
+struct ConsoleCapture {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl ConsoleCapture {
+    fn snapshot(&self) -> String {
+        String::from_utf8_lossy(&CONSOLE_CAPTURE_BUF.lock().unwrap()).to_string()
+    }
+}
+
+impl Drop for ConsoleCapture {
+    fn drop(&mut self) {
+        CAPTURE_THREAD_ID.store(0, std::sync::atomic::Ordering::Release);
+        colored::control::unset_override();
+    }
+}
+
+/// Install — exactly once per process — a global tracing subscriber
+/// that funnels every event into [`CONSOLE_CAPTURE_BUF`]. Acquire the
+/// process-wide capture lock, clear the buffer, force `colored` off,
+/// and return a guard. Subsequent capturing tests will block on the
+/// lock until this guard drops.
+///
+/// ## Why a single global subscriber
+///
+/// Per-test thread-local subscribers (`set_default` / `with_default`)
+/// don't survive `tokio` task hops or `tracing`'s callsite-interest
+/// cache when other tests run in parallel — events from
+/// `info!(target: "aura::console", …)` race against other subscribers
+/// installed on other threads, and the cached `Interest` decides
+/// whether the event reaches us or them. Owning the dispatcher
+/// process-wide and serializing capture sidesteps the race.
+fn install_console_capture() -> ConsoleCapture {
+    use tracing_subscriber::fmt::layer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    CONSOLE_CAPTURE_INIT.call_once(|| {
+        let subscriber = tracing_subscriber::registry().with(
+            layer()
+                .with_ansi(false)
+                .with_writer(|| CaptureWriter)
+                .with_target(true),
+        );
+        let _ = subscriber.try_init();
+    });
+
+    let lock = CONSOLE_CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    CONSOLE_CAPTURE_BUF.lock().unwrap().clear();
+    CAPTURE_THREAD_ID.store(
+        current_thread_id_u64(),
+        std::sync::atomic::Ordering::Release,
+    );
+    colored::control::set_override(false);
+    ConsoleCapture { _lock: lock }
+}
+
+/// Runs a synchronous `#[test]` rather than `#[tokio::test]` so the
+/// tracing subscriber stays installed for the entire round-trip and
+/// is not torn down or shadowed across `tokio`'s task hops. Capture
+/// is serialized via [`install_console_capture`].
+#[test]
+fn cloudflare_block_round_trip_emits_paired_request_and_failure_blocks() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let capture = install_console_capture();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let result = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"<!DOCTYPE html><html><body>
+                <p>Your request was blocked by this site's web application firewall (WAF).</p>
+                <p>Request ID: <code>cf-test-paired</code></p>
+            </body></html>"#;
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\ncf-ray: ray-test\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let config = AnthropicConfig {
+            default_model: "aura-claude-sonnet-4-6".to_string(),
+            timeout_ms: 5_000,
+            max_retries: 0,
+            backoff_initial_ms: 250,
+            backoff_cap_ms: 30_000,
+            min_request_interval_ms: 0,
+            base_url: format!("http://127.0.0.1:{}", addr.port()),
+            fallback_model: None,
+            prompt_caching_enabled: true,
+            emergency_body_cap_bytes: 0,
+            cloudflare_max_retries: 3,
+        };
+
+        let provider = AnthropicProvider::new(config).unwrap();
+        let request = ModelRequest::builder("aura-claude-sonnet-4-6", "system")
+            .message(Message::user("test"))
+            .request_kind(ModelRequestKind::Chat)
+            .auth_token(Some("test-jwt-token".to_string()))
+            .try_build()
+            .unwrap();
+
+        let result = provider.complete(request).await;
+        server.await.unwrap();
+        result
+    });
+
+    let captured = capture.snapshot();
+    assert!(result.is_err(), "Cloudflare block should surface as error");
+    assert!(
+        captured.contains("→ POST /v1/messages"),
+        "expected paired outbound request block, got transcript:\n{captured}"
+    );
+    assert!(
+        captured.contains("← 403 Forbidden"),
+        "expected paired failure block with 403 header, got transcript:\n{captured}"
+    );
+    assert!(
+        captured.contains("cloudflare_block"),
+        "expected class label in failure block, got transcript:\n{captured}"
+    );
+    assert!(
+        captured.contains("✗ propagate") || captured.contains("↻ retry"),
+        "expected retry-decision continuation line, got transcript:\n{captured}"
+    );
 }
 
 #[tokio::test]
@@ -635,8 +820,7 @@ fn thinking_effort_medium_enabled_sets_4096_budget() {
         .thinking_effort(Some(ThinkingEffort::Medium))
         .try_build()
         .unwrap();
-    let thinking =
-        resolve_thinking(&request, "claude-3-7-sonnet").expect("Medium emits a config");
+    let thinking = resolve_thinking(&request, "claude-3-7-sonnet").expect("Medium emits a config");
     assert_eq!(thinking.thinking_type, "enabled");
     assert_eq!(thinking.budget_tokens, Some(4096));
 }

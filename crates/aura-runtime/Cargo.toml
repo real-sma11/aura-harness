@@ -55,6 +55,7 @@ portable-pty = { workspace = true }
 which = { workspace = true }
 dirs = { workspace = true }
 colored = { workspace = true }
+terminal_size = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -457,29 +457,51 @@ impl AnthropicProvider {
         let send_started_at = std::time::Instant::now();
         // #endregion
 
-        let response = req_builder.send().await.map_err(|e| {
-            // #region agent log
-            debug_log_response_received(
-                request_ctx,
-                model,
-                &request_summary,
-                send_started_at.elapsed().as_millis() as u64,
-                None,
-                None,
-                None,
-                None,
-                Some(format!("send_error: {e}")),
-            );
-            // #endregion
-            error!(error = %e, "Anthropic API request failed");
-            if e.is_timeout() {
-                ApiError::Other(ReasonerError::Timeout)
-            } else {
-                ApiError::Other(ReasonerError::Request(format!(
-                    "Anthropic API request failed: {e}"
-                )))
+        let response = match req_builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let elapsed_ms = send_started_at.elapsed().as_millis() as u64;
+                // #region agent log
+                debug_log_response_received(
+                    request_ctx,
+                    model,
+                    &request_summary,
+                    elapsed_ms,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(format!("send_error: {e}")),
+                );
+                // #endregion
+                error!(error = %e, "Anthropic API request failed");
+                let is_timeout = e.is_timeout();
+                let err_str = e.to_string();
+                let class = if is_timeout { "timeout" } else { "transport" };
+                let status_text = if is_timeout {
+                    "request timed out"
+                } else {
+                    "transport failed"
+                };
+                crate::console::anthropic_failure_block(crate::console::AnthropicFailureView {
+                    status_code: None,
+                    status_text,
+                    class,
+                    elapsed_ms,
+                    request_id: None,
+                    retry_after_s: None,
+                    body_preview: Some(&err_str),
+                    destination: "aura-network",
+                });
+                return Err(if is_timeout {
+                    ApiError::Other(ReasonerError::Timeout)
+                } else {
+                    ApiError::Other(ReasonerError::Request(format!(
+                        "Anthropic API request failed: {e}"
+                    )))
+                });
             }
-        })?;
+        };
 
         // #region agent log
         // Capture the shape of every outbound `/v1/messages`
@@ -532,12 +554,23 @@ impl AnthropicProvider {
         // #endregion
 
         if !response.status().is_success() {
-            return Err(classify_api_error(
+            let (err, meta) = classify_api_error(
                 response,
                 RequestRoutingContext::from_request(request_ctx),
                 Some(&content_profile),
             )
-            .await);
+            .await;
+            crate::console::anthropic_failure_block(crate::console::AnthropicFailureView {
+                status_code: Some(meta.status_code),
+                status_text: &meta.status_text,
+                class: meta.class,
+                elapsed_ms,
+                request_id: meta.request_id.as_deref(),
+                retry_after_s: meta.retry_after_s,
+                body_preview: Some(&meta.body_preview),
+                destination: "aura-network",
+            });
+            return Err(err);
         }
 
         Ok(response)
@@ -1178,7 +1211,6 @@ fn strip_tool_choice_braces(raw: &str) -> String {
     raw.to_string()
 }
 
-
 async fn throttle_outbound_request(min_interval_ms: u64, model: &str) {
     if min_interval_ms == 0 {
         return;
@@ -1669,13 +1701,32 @@ fn build_truncated_text(original: &str, target_text_len: usize) -> String {
     )
 }
 
+/// Diagnostic metadata extracted alongside the [`ApiError`] return of
+/// [`classify_api_error`]. Carries the small string set the outbound
+/// failure block needs to render (status / class label / request_id /
+/// retry_after / body preview) so the call site can emit a paired
+/// `← <status>` block under `aura::console` without having to re-walk
+/// the response.
+#[derive(Debug, Clone)]
+pub(super) struct FailureMeta {
+    pub class: &'static str,
+    pub status_code: u16,
+    pub status_text: String,
+    pub request_id: Option<String>,
+    pub retry_after_s: Option<u64>,
+    pub body_preview: String,
+}
+
 async fn classify_api_error(
     response: reqwest::Response,
     routing: RequestRoutingContext,
     content_profile: Option<&ModelContentProfile>,
-) -> ApiError {
+) -> (ApiError, FailureMeta) {
     let status = response.status();
     let status_code = status.as_u16();
+    let status_text = status
+        .canonical_reason()
+        .map_or_else(|| status.to_string(), str::to_string);
     let header_retry_after = parse_retry_after_header(response.headers());
     // Pull any quota / request-id headers before consuming the response body so
     // 429/529 failures are easier to correlate with proxy-side logs.
@@ -1722,23 +1773,40 @@ async fn classify_api_error(
         let profile_label = content_profile
             .map(ModelContentProfile::summary)
             .unwrap_or_else(|| "profile=unavailable".to_string());
-        return ApiError::CloudflareBlock(format!(
+        let err = ApiError::CloudflareBlock(format!(
             "LLM proxy returned Cloudflare block ({status}; request_id={request_id_label}; \
              aura_org_id={}; aura_session_id={}; {profile_label})",
             routing.org_label(),
             routing.session_label()
         ));
+        return (
+            err,
+            FailureMeta {
+                class: "cloudflare_block",
+                status_code,
+                status_text,
+                request_id,
+                retry_after_s: header_retry_after.map(|d| d.as_secs()),
+                body_preview,
+            },
+        );
     }
 
-    match status_code {
-        402 => ApiError::InsufficientCredits(format!("Anthropic API error: {status} - {body}")),
+    let (err, class) = match status_code {
+        402 => (
+            ApiError::InsufficientCredits(format!("Anthropic API error: {status} - {body}")),
+            "insufficient_credits",
+        ),
         429 | 529 => {
             let body_retry_after = parse_retry_after_from_body(&body);
             let retry_after = header_retry_after.or(body_retry_after);
-            ApiError::Overloaded {
-                message: format!("Anthropic API error: {status} - {body}"),
-                retry_after,
-            }
+            (
+                ApiError::Overloaded {
+                    message: format!("Anthropic API error: {status} - {body}"),
+                    retry_after,
+                },
+                "rate_limited_429",
+            )
         }
         // Axis 2: generic 5xx from the upstream LLM / proxy. Routed
         // through the retry path with bounded exponential backoff so a
@@ -1748,21 +1816,38 @@ async fn classify_api_error(
         // a terminal failure to the dev loop. 501/505..=511 are left
         // as `Other` — those are configuration or protocol errors that
         // retrying will not fix.
-        500 | 502 | 504 => ApiError::TransientServer {
-            status: status_code,
-            message: format!("Anthropic API error: {status} - {body}"),
+        500 | 502 | 503 | 504 => (
+            ApiError::TransientServer {
+                status: status_code,
+                message: format!("Anthropic API error: {status} - {body}"),
+            },
+            "upstream_5xx",
+        ),
+        _ => (
+            ApiError::Other(ReasonerError::Api {
+                status: status_code,
+                message: format!("{status} - {body}"),
+            }),
+            "other",
+        ),
+    };
+
+    let retry_after_s = match &err {
+        ApiError::Overloaded { retry_after, .. } => retry_after.map(|d| d.as_secs()),
+        _ => header_retry_after.map(|d| d.as_secs()),
+    };
+
+    (
+        err,
+        FailureMeta {
+            class,
+            status_code,
+            status_text,
+            request_id,
+            retry_after_s,
+            body_preview,
         },
-        // 503 hits the Cloudflare short-circuit above when the body
-        // matches — anything else is a real upstream 503.
-        503 => ApiError::TransientServer {
-            status: status_code,
-            message: format!("Anthropic API error: {status} - {body}"),
-        },
-        _ => ApiError::Other(ReasonerError::Api {
-            status: status_code,
-            message: format!("{status} - {body}"),
-        }),
-    }
+    )
 }
 
 fn extract_waf_request_id_from_body(body: &str) -> Option<String> {
@@ -2221,6 +2306,22 @@ where
                             body_cap_override,
                         } => {
                             emit_retry_observation(&e, sleep, try_n, model);
+                            #[allow(clippy::cast_possible_truncation)]
+                            let sleep_ms = sleep.as_millis() as u64;
+                            crate::console::anthropic_retry_decision_line(
+                                crate::console::RetryDecisionView::Retry {
+                                    attempt_that_failed: try_n,
+                                    max_retries: config.max_retries,
+                                    sleep_ms,
+                                    body_cap_bytes: body_cap_override.or({
+                                        if pending_body_cap_override.is_some() {
+                                            pending_body_cap_override
+                                        } else {
+                                            None
+                                        }
+                                    }),
+                                },
+                            );
                             pending_sleep = Some(sleep);
                             // A `Some` override carries forward; a `None`
                             // leaves whatever we already had in place
@@ -2230,14 +2331,33 @@ where
                                 pending_body_cap_override = body_cap_override;
                             }
                         }
-                        RetryAction::FallbackModel => continue 'outer,
-                        RetryAction::Propagate => return Err(e.into()),
+                        RetryAction::FallbackModel => {
+                            let next_model = models
+                                .get(model_idx + 1)
+                                .map(String::as_str)
+                                .unwrap_or("(none)");
+                            crate::console::anthropic_retry_decision_line(
+                                crate::console::RetryDecisionView::Fallback { next_model },
+                            );
+                            continue 'outer;
+                        }
+                        RetryAction::Propagate => {
+                            crate::console::anthropic_retry_decision_line(
+                                crate::console::RetryDecisionView::Propagate {
+                                    reason: retry_reason_for(&e),
+                                },
+                            );
+                            return Err(e.into());
+                        }
                     }
                 }
             }
         }
     }
 
+    crate::console::anthropic_retry_decision_line(crate::console::RetryDecisionView::Propagate {
+        reason: "all models exhausted",
+    });
     Err(last_err.unwrap_or_else(|| {
         ReasonerError::Internal("All models in fallback chain exhausted".into())
     }))
@@ -2371,12 +2491,28 @@ impl ModelProvider for AnthropicProvider {
                     .or_else(|| response.headers().get("request-id"))
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string);
-                let api_response: ApiResponse = response.json().await.map_err(|e| {
-                    error!(error = %e, "Failed to parse Anthropic response");
-                    ApiError::Other(ReasonerError::Parse(format!(
-                        "Failed to parse Anthropic response: {e}"
-                    )))
-                })?;
+                let api_response: ApiResponse = match response.json().await {
+                    Ok(value) => value,
+                    Err(e) => {
+                        error!(error = %e, "Failed to parse Anthropic response");
+                        let err_str = e.to_string();
+                        crate::console::anthropic_failure_block(
+                            crate::console::AnthropicFailureView {
+                                status_code: Some(200),
+                                status_text: "OK",
+                                class: "parse",
+                                elapsed_ms: latency_ms,
+                                request_id: provider_request_id.as_deref(),
+                                retry_after_s: None,
+                                body_preview: Some(&err_str),
+                                destination: "aura-network",
+                            },
+                        );
+                        return Err(ApiError::Other(ReasonerError::Parse(format!(
+                            "Failed to parse Anthropic response: {e}"
+                        ))));
+                    }
+                };
                 let parsed = parse_complete_response(
                     api_response,
                     ctx.model_idx,

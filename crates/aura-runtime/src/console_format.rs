@@ -30,8 +30,9 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFi
 use tracing_subscriber::registry::LookupSpan;
 
 /// Targets the formatter recognises as "structured console" events.
-/// Must stay in sync with [`aura_agent::console::CONSOLE_TARGET`] and
-/// [`aura_reasoner::console::CONSOLE_TARGET`].
+/// Must stay in sync with [`aura_agent::console::CONSOLE_TARGET`],
+/// [`aura_reasoner::console::CONSOLE_TARGET`], and
+/// [`crate::inbound_console::CONSOLE_TARGET`].
 const CONSOLE_TARGETS: &[&str] = &["aura::console"];
 
 /// Tracing event formatter that renders the structured-console blocks
