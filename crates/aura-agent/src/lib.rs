@@ -47,6 +47,7 @@ mod budget;
 pub(crate) mod build;
 pub mod console;
 pub mod constants;
+pub(crate) mod dup_audit;
 pub(crate) mod events;
 pub(crate) mod file_ops;
 pub mod git;

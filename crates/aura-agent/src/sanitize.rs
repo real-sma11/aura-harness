@@ -8,16 +8,21 @@
 //! 5. Ensure conversation starts with a user message
 //! 6. Assert positional `tool_use/tool_result` constraint (debug guard)
 
+use crate::dup_audit;
 use aura_reasoner::{ContentBlock, Message, Role, ToolResultContent};
 use std::collections::HashSet;
 use tracing::warn;
 
 /// Run all sanitization passes on the message history.
 pub fn validate_and_repair(messages: &mut Vec<Message>) {
+    dup_audit::audit_tool_result_duplicates(messages, "sanitize.entry");
     remove_empty_messages(messages);
     merge_consecutive_same_role(messages);
+    dup_audit::audit_tool_result_duplicates(messages, "sanitize.after_merge");
     fix_orphan_tool_results(messages);
+    dup_audit::audit_tool_result_duplicates(messages, "sanitize.after_orphan");
     fix_unpaired_tool_uses(messages);
+    dup_audit::audit_tool_result_duplicates(messages, "sanitize.after_unpaired");
     ensure_starts_with_user(messages);
     debug_assert_tool_pairing(messages);
 }

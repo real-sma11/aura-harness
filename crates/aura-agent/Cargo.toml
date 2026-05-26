@@ -39,6 +39,10 @@ which = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `dup_audit` tests capture `tracing` events with an in-memory
+# `MakeWriter` to assert on the exact event payload without a global
+# subscriber.
+tracing-subscriber = { workspace = true }
 # Layer E.3: stream pump tests use `tokio::test(start_paused = true)`
 # + `tokio::time::advance` to deterministically drive timeouts and
 # overlap windows without real wall-clock sleep (Rule 7.3). Both

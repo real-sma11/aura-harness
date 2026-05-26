@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::constants::CHARS_PER_TOKEN;
+use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::sanitize;
 use crate::types::AgentLoopResult;
@@ -297,7 +298,9 @@ pub(super) fn handle_max_tokens(
         })
         .collect();
 
+    dup_audit::audit_tool_result_duplicates(&state.messages, "handle_max_tokens.pre");
     state.messages.push(Message::tool_results(results));
+    dup_audit::audit_tool_result_duplicates(&state.messages, "handle_max_tokens.post");
 
     if config.max_context_tokens.is_some() {
         let tier = compaction::CompactionConfig::aggressive();

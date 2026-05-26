@@ -8,6 +8,7 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, warn};
 
 use crate::console;
+use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
@@ -425,6 +426,8 @@ pub(super) fn push_tool_result_message_with_context(
     }
 
     if !blocks.is_empty() {
+        dup_audit::audit_tool_result_duplicates(messages, "push_tool_result.pre");
         messages.push(Message::new(aura_reasoner::Role::User, blocks));
+        dup_audit::audit_tool_result_duplicates(messages, "push_tool_result.post");
     }
 }

@@ -9,6 +9,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::budget;
 use crate::constants::CHARS_PER_TOKEN;
+use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::sanitize;
@@ -139,6 +140,10 @@ pub(super) fn compact_if_needed(
     };
 
     if !matches!(outcome, CompactionOutcome::None) {
+        dup_audit::audit_tool_result_duplicates(
+            &state.messages,
+            "compact_if_needed.post_splice",
+        );
         sanitize::validate_and_repair(&mut state.messages);
         let compacted_tokens = heuristic_context_tokens(&state.messages);
         state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -161,6 +166,10 @@ pub(super) fn apply_summary_output(
         return false;
     }
 
+    dup_audit::audit_tool_result_duplicates(
+        &state.messages,
+        "apply_summary_output.post_splice",
+    );
     sanitize::validate_and_repair(&mut state.messages);
     let compacted_tokens = heuristic_context_tokens(&state.messages);
     state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -182,6 +191,10 @@ pub(super) fn compact_for_overflow(
     let before_tokens = current_context_tokens(state);
 
     let report = compaction::recover_overflow(&mut state.messages, tier);
+    dup_audit::audit_tool_result_duplicates(
+        &state.messages,
+        "compact_for_overflow.post_splice",
+    );
     sanitize::validate_and_repair(&mut state.messages);
 
     let after_chars = report.after_chars;
