@@ -1,4 +1,4 @@
-//! Turn driver (Layer E.1).
+//! Turn driver (Layer E.1 + E.2).
 //!
 //! A *turn* is the unit of agent work between the model "starting to
 //! talk" and "going quiet without a follow-up signal". Codex's turn
@@ -12,14 +12,15 @@
 //!     || stop_hook_injected_more  // Phase 1.B migration target
 //! ```
 //!
-//! evaluates to `false`. Aura's E.1 cut wires the same predicate but
-//! keeps the `has_pending_input` path as a const-`false` stub: E.2
-//! will land the `input_queue` and replace the stub.
+//! evaluates to `false`. E.1 wired this predicate with the
+//! `has_pending_input` arm stubbed out to `false`; E.2 lifts the
+//! stub and wires the mid-task [`InputQueue`] drain at the top of
+//! every iteration plus the `has_pending()` arm at the bottom.
 //!
 //! Phase 1.B's continuation runtime was previously called as
 //! `post_iteration_checks` inside the linear `for iteration` body
 //! ([crates/aura-agent/src/agent_loop/mod.rs](
-//! crates/aura-agent/src/agent_loop/mod.rs)). E.1 lifts it into
+//! crates/aura-agent/src/agent_loop/mod.rs)). E.1 lifted it into
 //! [`run_turn_stop_hooks`], invoked after every sampling request that
 //! did *not* terminate the loop for an unrelated reason (model fatal
 //! error, cancellation, task_done stop_loop). This preserves the
@@ -34,12 +35,19 @@
 //!   `StopHookOutcome::should_break = true` and the turn loop unwinds.
 //! - Cancellation / fatal model errors short-circuit the loop without
 //!   running stop hooks (the result is already finalised).
+//! - E.2: the queue drain at the top of every iteration uses a
+//!   `biased; select!` so cancellation observed during the drain wins
+//!   over any newly-queued user input (Rule 6.3). The message-append
+//!   step that follows the drain is atomic with respect to that
+//!   cancellation — there is no half-written message state.
 
-use aura_reasoner::{ModelProvider, ToolDefinition};
+use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::AgentLoopEvent;
+use crate::session::input_queue::InputQueue;
+use crate::session::UserInput;
 use crate::types::AgentToolExecutor;
 use crate::{helpers, AgentError};
 
@@ -49,25 +57,25 @@ use super::{context, continuation, streaming, AgentLoop, LoopState, TaskId};
 /// Result of a single turn.
 ///
 /// Fields capture just enough context to let the outer task shell
-/// (`task::run_task`) decide whether to keep running turns. E.2 will
-/// extend this with `last_message: Option<Message>` and similar
-/// values once `input_queue` lands.
+/// (`task::run_task`) decide whether to keep running turns. E.2 reads
+/// `sampling_count` to accumulate the per-task `iteration_offset` so
+/// the `max_iterations_per_task` cap counts completed sampling
+/// requests across turn restarts.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TurnOutcome {
     /// `true` when the turn loop broke because the model signalled
     /// stop *and* no stop-hook injection requested a follow-up. E.2's
-    /// `input_queue` drain will widen the "should we restart the
-    /// task?" decision; for E.1 the task shell exits as soon as a
-    /// turn completes cleanly.
+    /// task shell uses this together with the queue's `has_pending`
+    /// flag to decide whether to spin another turn.
     pub(crate) terminated_cleanly: bool,
     /// `true` when the turn loop broke because a stop hook signalled
     /// `should_break` (currently only the `task_blocked` path) or a
     /// fatal model error / cancellation was observed. The task shell
     /// reads this to skip any "restart on pending input" behavior.
     pub(crate) broke_for_error: bool,
-    /// Number of sampling requests completed inside this turn. Useful
-    /// for debug logging and for the outer task shell's
-    /// `max_iterations_per_task` accounting.
+    /// Number of sampling requests completed inside this turn. Used
+    /// by the outer task shell to accumulate the
+    /// `max_iterations_per_task` counter and for debug logging.
     pub(crate) sampling_count: u32,
 }
 
@@ -92,15 +100,26 @@ pub(crate) struct StopHookOutcome {
 /// Drive one turn to completion.
 ///
 /// The loop body is the codex-shaped polarity flip: each iteration
+/// drains the optional [`InputQueue`] (with cancellation precedence),
 /// runs one sampling request, then asks `needs_follow_up?` (model
-/// signal OR stop-hook injection). When the answer is `false` the
-/// turn terminates; otherwise the loop continues.
+/// signal OR pending user input OR stop-hook injection). When the
+/// answer is `false` the turn terminates; otherwise the loop
+/// continues.
 ///
 /// `iteration_offset` is the running sampling-request counter shared
 /// with the task shell so that `state.result.iterations` keeps a
-/// monotonically-increasing total across turns. E.1's task shell runs
-/// exactly one turn per task (no `input_queue` yet), but threading the
-/// offset here keeps the contract correct for E.2.
+/// monotonically-increasing total across turns. E.2's task shell
+/// accumulates this counter by the per-turn
+/// [`TurnOutcome::sampling_count`] across input-queue-driven restarts.
+///
+/// `input_queue` is the optional mid-task user steering buffer. When
+/// `Some`, the queue is drained at the top of every sampling
+/// iteration (the drained inputs become user-role context for the
+/// next model call) AND its `has_pending()` flag participates in
+/// the `needs_follow_up` predicate so the loop keeps looping while
+/// the user is still feeding it work. When `None`, behaviour
+/// collapses to E.1 (one drain-free sampling loop until the model
+/// signals stop).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_turn(
     agent: &AgentLoop,
@@ -113,6 +132,7 @@ pub(crate) async fn run_turn(
     task_id: TaskId,
     turn_index: u32,
     iteration_offset: u32,
+    input_queue: Option<&InputQueue>,
 ) -> Result<TurnOutcome, AgentError> {
     let mut sampling_count: u32 = 0;
     let mut terminated_cleanly = false;
@@ -121,6 +141,25 @@ pub(crate) async fn run_turn(
     loop {
         let iteration =
             usize::try_from(iteration_offset.saturating_add(sampling_count)).unwrap_or(usize::MAX);
+
+        // E.2: drain pending user input BEFORE the budget check so
+        // the cancel branch of the biased select! unwinds without
+        // counting against the per-task ceilings. Cancellation
+        // observed here is the in-band `UserInput::Cancel` path
+        // (Rule 6.3 cancellation-precedence semantics).
+        if let Some(queue) = input_queue {
+            match drain_pending_input(queue, cancellation_token).await {
+                DrainOutcome::Drained(inputs) => {
+                    if !inputs.is_empty() {
+                        apply_user_inputs_to_messages(&mut state.messages, inputs);
+                    }
+                }
+                DrainOutcome::Cancelled => {
+                    broke_for_error = true;
+                    break;
+                }
+            }
+        }
 
         // Hard ceiling: max_iterations is the pre-E.1 global cap
         // (default `usize::MAX`). Trip it BEFORE the next sampling so
@@ -155,11 +194,7 @@ pub(crate) async fn run_turn(
         // When the model signals follow-up (ToolUse / MaxTokens with
         // pending), the post-sampling stop hooks run (preserving
         // Phase 1.B's "checkpoint + continuation + budget warnings"
-        // semantics from pre-E1 `post_iteration_checks`). When the
-        // model signals stop, the turn ends — E.4 will hand the
-        // continuation decision off to `GoalRuntime` and re-enable
-        // injection on the "stop" path; for E.1 we keep the pre-E.1
-        // semantic that stop ends the turn.
+        // semantics from pre-E1 `post_iteration_checks`).
         if sampling_result.needs_follow_up {
             let stop_outcome =
                 run_turn_stop_hooks(&agent.config, event_tx, state, iteration).await?;
@@ -173,6 +208,16 @@ pub(crate) async fn run_turn(
             continue;
         }
 
+        // E.2: the model signalled stop, but pending user input
+        // keeps the turn loop alive — the next iteration's drain
+        // will pull the queued context into `state.messages` and
+        // feed it to a fresh sampling request. This is codex's
+        // `needs_follow_up = model_says_continue || has_pending`
+        // disjunction (`turn.rs:255` analog).
+        if input_queue.is_some_and(InputQueue::has_pending) {
+            continue;
+        }
+
         terminated_cleanly = true;
         break;
     }
@@ -182,6 +227,73 @@ pub(crate) async fn run_turn(
         broke_for_error,
         sampling_count,
     })
+}
+
+/// Outcome of a single biased-select drain at the top of the turn
+/// loop. Separates "queue had inputs to apply" from "external (or
+/// in-band) cancellation fired during the drain" so the caller can
+/// branch on each path without a flag-passing chain.
+enum DrainOutcome {
+    Drained(Vec<UserInput>),
+    Cancelled,
+}
+
+/// Atomically drain `queue` with cancellation precedence (Rule 6.3).
+///
+/// The `select!` is `biased;` so a cancellation that fired before
+/// (or alongside) the drain always wins; only a clean drain reaches
+/// the caller's message-append step. Atomicity of the message
+/// append is preserved because the drain consumes the buffer in one
+/// step before any `state.messages` mutation runs — there is no
+/// half-write window even if cancellation fires immediately after
+/// this returns. When no cancellation token is supplied, the drain
+/// runs unconditionally (no select! at all).
+async fn drain_pending_input(
+    queue: &InputQueue,
+    cancellation_token: Option<&CancellationToken>,
+) -> DrainOutcome {
+    match cancellation_token {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => DrainOutcome::Cancelled,
+                inputs = queue.drain() => DrainOutcome::Drained(inputs),
+            }
+        }
+        None => DrainOutcome::Drained(queue.drain().await),
+    }
+}
+
+/// Apply a FIFO-ordered batch of [`UserInput`] entries to the
+/// conversation message history.
+///
+/// - [`UserInput::Message`] entries are appended via
+///   [`helpers::append_warning`] so the trailing-user-message merge
+///   rule (required for Anthropic `tool_use`/`tool_result` adjacency)
+///   is preserved.
+/// - [`UserInput::Steer`] entries are wrapped in a
+///   `<harness_steer>` envelope so the model can distinguish a
+///   user-typed message from a harness-on-behalf directive (the
+///   wrapper is unindented free text — no XML escaping needed for
+///   the model surface).
+/// - [`UserInput::Cancel`] entries are dropped because the
+///   cancellation token was already fired by
+///   [`InputQueue::push`]; the in-band variant is only enqueued for
+///   the tracing paper trail and that paper trail has already been
+///   served by the queue itself.
+fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs: Vec<UserInput>) {
+    for input in inputs {
+        match input {
+            UserInput::Message(text) => {
+                helpers::append_warning(messages, &text);
+            }
+            UserInput::Steer { instruction } => {
+                let body = format!("<harness_steer>\n{instruction}\n</harness_steer>");
+                helpers::append_warning(messages, &body);
+            }
+            UserInput::Cancel => {}
+        }
+    }
 }
 
 /// Run the post-sampling stop hooks for a single turn iteration.

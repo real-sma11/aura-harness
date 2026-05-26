@@ -367,6 +367,57 @@ impl AgentLoop {
         event_tx: Option<Sender<AgentLoopEvent>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<AgentLoopResult, crate::AgentError> {
+        self.run_with_session(
+            provider,
+            executor,
+            messages,
+            tools,
+            event_tx,
+            cancellation_token,
+            None,
+        )
+        .await
+    }
+
+    /// Run the agent loop with an optional session-scoped
+    /// [`AgentRunnerHandle`](crate::AgentRunnerHandle) for mid-task
+    /// user steering (Layer E.2).
+    ///
+    /// When `handle` is `Some`, the task shell loops on the wrapped
+    /// queue's `has_pending()` flag after each turn so that user
+    /// inputs delivered via
+    /// [`AgentRunnerHandle::send_user_input`](crate::AgentRunnerHandle::send_user_input)
+    /// keep the agent responsive without aborting the conversation.
+    /// The handle is taken by reference because the caller typically
+    /// keeps a long-lived clone for the UI / RPC thread that issues
+    /// the steering inputs. When `None`, behaviour collapses to
+    /// [`Self::run_with_events`] (single-turn-per-task semantic from
+    /// E.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if a model call or tool execution fails
+    /// fatally, or if the per-task `max_turns_per_task` /
+    /// `max_iterations_per_task` ceilings trip.
+    // E.2: 8 parameters (one over the default 7 clippy ceiling). The
+    // new `handle` is the only addition vs `run_with_events`;
+    // bundling provider / executor / messages / tools / event_tx /
+    // cancellation into a `RunCtx` struct would force every call
+    // site (`agent_runner::execute_chat`, `execute_task_inner`, the
+    // mock-driven tests) to introduce a one-shot wrapper just to
+    // make space for the new optional arg. Documented per Rule 1.4.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_with_session(
+        &self,
+        provider: &dyn ModelProvider,
+        executor: &dyn AgentToolExecutor,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        event_tx: Option<Sender<AgentLoopEvent>>,
+        cancellation_token: Option<CancellationToken>,
+        handle: Option<&crate::AgentRunnerHandle>,
+    ) -> Result<AgentLoopResult, crate::AgentError> {
+        let input_queue = handle.map(crate::AgentRunnerHandle::queue);
         // Route provider-level `debug.retry` observations back into the
         // `event_tx` channel by installing a task-local observer for
         // the duration of this turn. The observer forwards through the
@@ -397,6 +448,7 @@ impl AgentLoop {
             tools,
             event_tx,
             cancellation_token,
+            input_queue,
         );
         match observer {
             Some(obs) => aura_reasoner::DEBUG_RETRY_OBSERVER.scope(obs, fut).await,
@@ -404,6 +456,12 @@ impl AgentLoop {
         }
     }
 
+    // E.2: mirrors `run_with_session`'s arg list (one over the
+    // clippy default ceiling). Same justification: the `input_queue`
+    // is the only new arg, and packing it into a struct would
+    // require every helper inside this module to learn a new wrapper
+    // type. Documented per Rule 1.4.
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         provider: &dyn ModelProvider,
@@ -412,16 +470,18 @@ impl AgentLoop {
         tools: Vec<ToolDefinition>,
         event_tx: Option<Sender<AgentLoopEvent>>,
         cancellation_token: Option<CancellationToken>,
+        input_queue: Option<Arc<crate::session::input_queue::InputQueue>>,
     ) -> Result<AgentLoopResult, crate::AgentError> {
-        // Layer E.1: delegate to the nested task → turn → sampling
+        // Layer E.1 + E.2: delegate to the nested task → turn → sampling
         // topology. The old per-iteration `for` loop body now lives
         // in [`sampling::run_sampling_request`]; the turn-level
         // `needs_follow_up` predicate and Phase 1.B stop hooks live
         // in [`turn::run_turn`] / [`turn::run_turn_stop_hooks`]; the
         // outer task shell with `max_turns_per_task` /
-        // `max_iterations_per_task` ceilings lives in
-        // [`task::run_task`]. See `agent_loop/turn.rs`'s module-level
-        // docs for the topology diagram.
+        // `max_iterations_per_task` ceilings and the optional
+        // `input_queue` restart lives in [`task::run_task`]. See
+        // `agent_loop/turn.rs`'s module-level docs for the topology
+        // diagram.
         task::run_task(
             self,
             provider,
@@ -430,6 +490,7 @@ impl AgentLoop {
             tools,
             event_tx,
             cancellation_token,
+            input_queue,
         )
         .await
     }

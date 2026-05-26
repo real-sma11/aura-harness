@@ -63,6 +63,7 @@ pub(crate) mod verify;
 
 pub mod agent_runner;
 pub mod runtime;
+pub mod session;
 pub mod session_bootstrap;
 pub(crate) mod task_context;
 pub(crate) mod task_executor;
@@ -75,6 +76,7 @@ pub use kernel_gateway::{KernelModelGateway, KernelToolGateway, RecordingModelPr
 pub use runtime::{
     ProcessManager, ProcessManagerConfig, ProcessOutput, RunningProcess, RuntimeError,
 };
+pub use session::{AgentRunnerHandle, SessionId, UserInput};
 pub use types::{
     AgentLoopResult, AgentToolExecutor, AutoBuildResult, BuildBaseline, FileChange, FileChangeKind,
     ToolCallInfo, ToolCallResult, TurnObserver, TurnObservers,
@@ -133,6 +135,18 @@ pub enum AgentError {
         task_id: TaskId,
         /// 0-based index of the turn that tripped the cap.
         turn_index: u32,
+    },
+    /// Layer E.2: pushed when a caller tries to enqueue a
+    /// [`UserInput`](crate::UserInput) onto an
+    /// [`AgentRunnerHandle`](crate::AgentRunnerHandle) whose backing
+    /// queue has already been closed (the wrapped session ended).
+    /// Carries the originating [`SessionId`](crate::SessionId) so
+    /// the surfacing surface (CLI, dashboards) can correlate the
+    /// failure with the session that produced it (Rule 4.3).
+    #[error("input queue closed for session {session_id}")]
+    InputQueueClosed {
+        /// Identifier of the session whose queue was already closed.
+        session_id: SessionId,
     },
     #[error("{0}")]
     Internal(String),

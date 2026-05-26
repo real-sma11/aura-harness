@@ -14,12 +14,14 @@
 //! }
 //! ```
 //!
-//! E.1 wires the nesting (`run_task` → [`super::turn::run_turn`] →
+//! E.1 wired the nesting (`run_task` → [`super::turn::run_turn`] →
 //! [`super::sampling::run_sampling_request`]) with the
-//! `input_queue.has_pending()` probe stubbed out to `false`. Until
-//! E.2 lands the queue, every task runs exactly one turn — preserving
-//! pre-E.1 behavior where one `AgentLoop::run_inner` call drove the
-//! whole conversation.
+//! `input_queue.has_pending()` probe stubbed out to `false`. E.2 lifts
+//! the stub: when an `input_queue` is supplied, the task shell loops
+//! until the queue is empty AND the active turn terminates cleanly.
+//! When no queue is supplied (`input_queue == None`), the task shell
+//! runs exactly one turn — preserving the pre-E.1 behaviour where
+//! one `AgentLoop::run_inner` call drove the whole conversation.
 //!
 //! The task shell owns two safety nets per Rule 4.3:
 //!
@@ -37,6 +39,8 @@
 //! UI / dashboards can correlate the failure with the task that
 //! produced it.
 
+use std::sync::Arc;
+
 use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -44,6 +48,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::events::AgentLoopEvent;
+use crate::session::input_queue::InputQueue;
 use crate::types::{AgentLoopResult, AgentToolExecutor};
 use crate::AgentError;
 
@@ -87,10 +92,22 @@ impl std::fmt::Display for TaskId {
 
 /// Drive one task to completion.
 ///
-/// E.1 wires the codex-shaped nesting: outer task shell calls
-/// [`run_turn`] in a loop that terminates when no input is pending
-/// (stubbed to `false` until E.2). Each turn drives sampling requests
-/// until `needs_follow_up` evaluates to `false`.
+/// E.1 wired the codex-shaped nesting (task → turn → sampling). E.2
+/// wires the optional [`InputQueue`] into the outer loop so that
+/// mid-task user inputs cause the task shell to spin another turn
+/// after the active turn drains the queue. When no queue is supplied
+/// (`input_queue == None`), the loop falls through to the
+/// `terminated_cleanly` short-circuit and the task runs at most one
+/// turn — preserving the E.1 single-turn-per-task semantic for
+/// callers that opt out of mid-task steering.
+///
+/// `iteration_offset` accumulates by the per-tool-batch count
+/// (`turn_outcome.sampling_count`) across turns, since input-queue
+/// restarts always happen at turn boundaries — never mid-sampling.
+/// This keeps `state.result.iterations` monotonically increasing and
+/// also makes the `max_iterations_per_task` cap count completed
+/// sampling requests, which is what the per-task budget semantics
+/// document.
 ///
 /// Returns the populated [`AgentLoopResult`] regardless of whether the
 /// task terminated cleanly or short-circuited on a fatal model error.
@@ -108,6 +125,7 @@ pub(crate) async fn run_task(
     tools: Vec<ToolDefinition>,
     event_tx: Option<Sender<AgentLoopEvent>>,
     cancellation_token: Option<CancellationToken>,
+    input_queue: Option<Arc<InputQueue>>,
 ) -> Result<AgentLoopResult, AgentError> {
     let task_id = TaskId::new_v4();
     let mut state = LoopState::new(&agent.config, messages);
@@ -117,29 +135,23 @@ pub(crate) async fn run_task(
         max_iterations = agent.config.max_iterations,
         max_turns_per_task = agent.config.max_turns_per_task,
         max_iterations_per_task = agent.config.max_iterations_per_task,
+        has_input_queue = input_queue.is_some(),
         "Starting agent task"
     );
 
     let event_tx_ref = event_tx.as_ref();
     let cancellation_ref = cancellation_token.as_ref();
-    // E.1 runs at most one turn per task (no `input_queue` yet). The
-    // counters start at zero and the post-turn increments are deferred
-    // to E.2, which will lift the unconditional `break` below into a
-    // queue-driven loop. Per-task budget ceilings stay enforced via
-    // the pre-turn checks; in E.1 they only meaningfully guard
-    // misconfigured callers that set `max_turns_per_task = 0`.
-    let turn_index: u32 = 0;
-    let iteration_offset: u32 = 0;
+    let input_queue_ref = input_queue.as_deref();
 
-    // E.1 deliberately runs at most one iteration of this outer `loop`
-    // — the body always falls through to the unconditional `break` at
-    // the bottom because there is no `input_queue` yet. Clippy's
-    // `never_loop` lint flags that, but the loop *form* is the
-    // structural shape E.2 expands into a real queue-driven loop;
-    // collapsing it to a single straight-line block now would force
-    // a re-introduction in E.2 and obscure the topology that the rest
-    // of the codex-shape plan is built on. Documented per Rule 1.4.
-    #[allow(clippy::never_loop)]
+    // E.2: turn_index / iteration_offset accumulate across turns so
+    // the `max_turns_per_task` / `max_iterations_per_task` caps trip
+    // on a genuine runaway. iteration_offset is bumped by the per-
+    // turn `sampling_count` (= per-tool-batch count) because every
+    // sampling request is one model round-trip and the input-queue
+    // restart only happens at turn boundaries — never mid-sampling.
+    let mut turn_index: u32 = 0;
+    let mut iteration_offset: u32 = 0;
+
     loop {
         // Hard ceiling: surface a typed error per Rule 4.3 instead of
         // silently terminating. Trip before the next `run_turn` call
@@ -168,8 +180,16 @@ pub(crate) async fn run_task(
             task_id,
             turn_index,
             iteration_offset,
+            input_queue_ref,
         )
         .await?;
+
+        // Accumulate per-turn sampling count into the per-task
+        // counters BEFORE any early-break paths so the post-turn
+        // `state.result.iterations` math stays consistent even on
+        // error exits.
+        iteration_offset = iteration_offset.saturating_add(turn_outcome.sampling_count);
+        turn_index = turn_index.saturating_add(1);
 
         if turn_outcome.broke_for_error {
             break;
@@ -178,15 +198,13 @@ pub(crate) async fn run_task(
             break;
         }
 
-        // E.1: queue is conceptually empty after every turn, so one
-        // turn per task is the steady-state behaviour. E.2 will
-        // replace this with
-        // `if !ctx.session.input_queue.has_pending() { break; }`,
-        // re-introducing the `turn_index` / `iteration_offset`
-        // accumulators that the per-task ceilings above are sized
-        // against.
-        let _ = turn_outcome.sampling_count;
-        break;
+        // E.2: only spin another turn when the input queue has
+        // pending entries. Without a queue (or with an empty one),
+        // the task is done as soon as the active turn breaks cleanly.
+        match input_queue_ref {
+            Some(queue) if queue.has_pending() => continue,
+            _ => break,
+        }
     }
 
     state.result.messages = state.messages;
