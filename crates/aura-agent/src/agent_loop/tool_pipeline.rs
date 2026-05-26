@@ -216,6 +216,7 @@ impl AgentLoop {
             &mut state.result,
             &mut state.exploration_state,
             &mut state.had_any_write,
+            &mut state.turn_diff,
         );
 
         if any_write_success && state.build_cooldown == 0 {
@@ -309,7 +310,27 @@ fn track_tool_effects(
     result: &mut AgentLoopResult,
     exploration_state: &mut ExplorationState,
     had_any_write: &mut bool,
+    turn_diff: &mut super::turn_diff::TurnDiff,
 ) -> bool {
+    use super::turn_diff::TurnDiff;
+    use crate::types::FileChangeKind;
+
+    fn record_into_turn_diff(turn_diff: &mut TurnDiff, change: &crate::types::FileChange) {
+        let path = std::path::PathBuf::from(&change.path);
+        match change.kind {
+            FileChangeKind::Create => turn_diff.record_create(path),
+            FileChangeKind::Modify => {
+                // No raw byte count is plumbed through `FileChange`
+                // today; the codex tracker uses an approximation too.
+                // Use `lines_added` as a cheap proxy so the count is
+                // monotonic and non-zero for typical edits.
+                let bytes = change.lines_added as usize;
+                turn_diff.record_modify(path, bytes);
+            }
+            FileChangeKind::Delete => turn_diff.record_delete(path),
+        }
+    }
+
     let mut any_write_success = false;
 
     for exec_result in executed {
@@ -329,6 +350,7 @@ fn track_tool_effects(
                     *had_any_write = true;
                     for change in &exec_result.file_changes {
                         result.record_file_change(change.clone());
+                        record_into_turn_diff(turn_diff, change);
                     }
                 }
             } else if !exec_result.file_changes.is_empty() && !exec_result.is_error {
@@ -341,6 +363,7 @@ fn track_tool_effects(
                 // write tools.
                 for change in &exec_result.file_changes {
                     result.record_file_change(change.clone());
+                    record_into_turn_diff(turn_diff, change);
                 }
                 any_write_success = true;
                 *had_any_write = true;
@@ -504,6 +527,7 @@ mod track_tool_effects_tests {
         let mut exploration_state = ExplorationState::default();
         let mut result = AgentLoopResult::default();
         let mut had_any_write = false;
+        let mut turn_diff = super::super::turn_diff::TurnDiff::default();
 
         for i in 0..CALLS {
             let tool_id = format!("toolu_explore_{i}");
@@ -516,10 +540,15 @@ mod track_tool_effects_tests {
                 &mut result,
                 &mut exploration_state,
                 &mut had_any_write,
+                &mut turn_diff,
             );
         }
 
         assert_eq!(exploration_state.count, CALLS);
         assert!(!had_any_write, "no writes were issued in this test");
+        assert!(
+            turn_diff.is_empty(),
+            "read_file calls must not record into the turn diff"
+        );
     }
 }

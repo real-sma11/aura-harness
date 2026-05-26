@@ -12,6 +12,7 @@ mod tool_execution;
 #[cfg(test)]
 mod tool_execution_tests;
 mod tool_pipeline;
+mod turn_diff;
 
 #[cfg(test)]
 mod contract_tests;
@@ -753,6 +754,10 @@ pub struct LoopState {
     pub(crate) last_context_tokens_estimate: Option<u64>,
     pub(crate) messages: Vec<Message>,
     pub(crate) build_baseline: Option<BuildBaseline>,
+    /// Per-iteration net file-op accumulator (Phase 1.A). Reset at the
+    /// top of every iteration; consulted by Phase 1.B's continuation
+    /// runtime to detect "no forward motion this turn".
+    pub(crate) turn_diff: turn_diff::TurnDiff,
 }
 
 impl LoopState {
@@ -780,6 +785,7 @@ impl LoopState {
             last_context_tokens_estimate: None,
             messages,
             build_baseline: None,
+            turn_diff: turn_diff::TurnDiff::default(),
         }
     }
 
@@ -790,6 +796,12 @@ impl LoopState {
     )]
     fn begin_iteration(&mut self, config: &AgentLoopConfig, iteration: usize) {
         self.build_cooldown = self.build_cooldown.saturating_sub(1);
+
+        // Phase 1.A: scope the turn-diff to the iteration we are about
+        // to execute. The previous iteration's net file ops are no
+        // longer relevant — `had_any_file_write` (cumulative latch)
+        // and the per-iteration `turn_diff` answer different questions.
+        self.turn_diff.reset();
 
         // One-shot extended-thinking disable flag is re-evaluated each
         // iteration: cleared first, then re-set below for the cases
