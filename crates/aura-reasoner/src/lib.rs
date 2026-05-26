@@ -27,6 +27,7 @@ mod error;
 mod kernel_propose;
 mod mock;
 pub mod provider_factory;
+pub mod response_stream;
 pub mod types;
 
 pub use provider_factory::{
@@ -48,6 +49,10 @@ pub(crate) fn truncate_body(body: &str, max_len: usize) -> String {
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub use error::ReasonerError;
+pub use response_stream::{
+    response_stream_from_event_stream, response_stream_from_response, OutputItem, ResponseEvent,
+    ResponseEventStream, StreamError,
+};
 
 // ============================================================================
 // Retry observability (debug.retry emission)
@@ -98,8 +103,8 @@ pub use types::{
     ModelContentProfile, ModelContractVerdict, ModelContractViolationReason, ModelName,
     ModelRequest, ModelRequestContractViolation, ModelRequestKind, ModelRequestMetadata,
     ModelResponse, PartialToolUse, PromptCacheRetention, ProviderTrace, Role, StopReason,
-    StreamAccumulator, StreamContentType, StreamEvent, Temperature, ThinkingConfig,
-    ThinkingEffort, ToolChoice, ToolDefinition, ToolResultContent, Usage,
+    StreamAccumulator, StreamContentType, StreamEvent, Temperature, ThinkingConfig, ThinkingEffort,
+    ToolChoice, ToolDefinition, ToolResultContent, Usage,
 };
 
 use futures_util::Stream;
@@ -355,6 +360,39 @@ pub trait ModelProvider: Send + Sync {
     ) -> Result<StreamEventStream, ReasonerError> {
         let response = self.complete(request).await?;
         Ok(stream_from_response(response))
+    }
+
+    /// Open a high-level [`ResponseEventStream`] for one sampling
+    /// request (Layer E.3 stream-tool overlap).
+    ///
+    /// The default implementation lifts [`Self::complete_streaming`]
+    /// through
+    /// [`response_stream::response_stream_from_event_stream`]: any
+    /// provider that supplies incremental [`StreamEvent`]s
+    /// automatically supplies aggregated [`ResponseEvent`]s. Providers
+    /// that buffer at the HTTP boundary (e.g. router fallbacks) keep
+    /// emitting events sequentially through the same lifted path,
+    /// preserving FIFO submission order for tool calls.
+    ///
+    /// Backward compatibility: existing callers of
+    /// [`Self::complete`] / [`Self::complete_streaming`] continue to
+    /// work unchanged. The new [`crate::ResponseEvent`] surface is
+    /// purely additive — agent crates that adopt the stream-pump
+    /// (`aura-agent::agent_loop::sampling`) read events through this
+    /// method; everyone else stays on the buffered shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReasonerError`] when the provider request fails
+    /// before the stream opens (auth, rate limit, etc.). Mid-stream
+    /// errors arrive as [`crate::StreamError`] inside the returned
+    /// stream.
+    async fn complete_response_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<ResponseEventStream, ReasonerError> {
+        let stream = self.complete_streaming(request).await?;
+        Ok(response_stream::response_stream_from_event_stream(stream))
     }
 
     /// Check if the provider is available.

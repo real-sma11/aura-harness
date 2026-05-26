@@ -149,6 +149,26 @@ pub enum AgentError {
         /// Identifier of the session whose queue was already closed.
         session_id: SessionId,
     },
+    /// Layer E.3: raised by the streaming sampling pump when
+    /// `tokio::time::timeout(config.stream_event_timeout, …)` elapses
+    /// waiting for the next [`aura_reasoner::ResponseEvent`]
+    /// (Rule 6.2 boundary timeout). `elapsed_ms` carries the
+    /// configured boundary value so the surfacing surface (CLI,
+    /// dashboards) can attribute the failure without a config
+    /// roundtrip.
+    #[error("stream event timeout after {elapsed_ms}ms waiting for next response event")]
+    StreamTimeout {
+        /// Configured `stream_event_timeout` in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// Layer E.3: in-band or transport-level streaming error
+    /// surfaced by the sampling pump. Wraps the typed
+    /// [`aura_reasoner::StreamError`] so the variant survives the
+    /// trip through the agent loop and matches downstream branches
+    /// (TransportClosed vs InvalidEvent vs Timeout) without parsing
+    /// the formatted message.
+    #[error(transparent)]
+    Stream(aura_reasoner::StreamError),
     #[error("{0}")]
     Internal(String),
 }

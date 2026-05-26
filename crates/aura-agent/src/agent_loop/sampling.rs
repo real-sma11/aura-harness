@@ -36,6 +36,7 @@ use tracing::{debug, instrument};
 use crate::events::AgentLoopEvent;
 use crate::types::AgentToolExecutor;
 
+use super::stream_pump::{run_stream_pump, StreamPumpOutcome};
 use super::{context, is_cancelled, iteration, streaming, AgentLoop, LoopState};
 
 /// Outcome of a single sampling request inside a turn.
@@ -143,6 +144,27 @@ pub(crate) async fn run_sampling_request(
         }
     };
 
+    // Layer E.3: the streaming pump path consumes
+    // `provider.complete_response_stream(…)` incrementally and overlaps
+    // tool execution at `OutputItemDone` boundaries. Gated behind
+    // `use_stream_pump` so chat callers that need per-delta event
+    // emission stay on the legacy `call_model` + `dispatch_stop_reason`
+    // path until E.4 wires per-delta emission into the pump.
+    if agent.config.use_stream_pump {
+        return run_sampling_request_streaming(
+            agent,
+            provider,
+            executor,
+            request,
+            event_tx,
+            cancellation_token,
+            state,
+            iteration,
+            iteration_started_at,
+        )
+        .await;
+    }
+
     let response = match agent
         .call_model(provider, request, event_tx, cancellation_token)
         .await
@@ -213,6 +235,115 @@ pub(crate) async fn run_sampling_request(
     let dispatch_says_break = agent
         .dispatch_stop_reason(&response, executor, event_tx, state)
         .await;
+
+    SamplingRequestResult {
+        needs_follow_up: !dispatch_says_break,
+        stop_reason: response.stop_reason,
+        broke_for_error: false,
+    }
+}
+
+/// Streaming pump entry point for [`run_sampling_request`] (Layer E.3).
+///
+/// Replaces the buffered `call_model` + `dispatch_stop_reason` block
+/// with the [`stream_pump`] pipeline: opens a
+/// [`aura_reasoner::ResponseEventStream`], spawns tool futures into a
+/// [`futures_util::stream::FuturesOrdered`] as `OutputItemDone(tool_use)`
+/// events arrive, and drains the FIFO after the model signals
+/// `Completed`. Tool results from the pump are then folded back into
+/// the existing per-sampling accumulation / iteration-complete /
+/// stop-reason dispatch helpers so the rest of the loop sees the same
+/// shape it does in the legacy path.
+///
+/// The split with [`run_sampling_request`] keeps the legacy buffered
+/// callers untouched while this commit lands; once E.4 wires per-delta
+/// event emission through the pump, the legacy branch can collapse.
+#[allow(clippy::too_many_arguments)] // Mirrors run_sampling_request shape.
+async fn run_sampling_request_streaming(
+    agent: &AgentLoop,
+    provider: &dyn ModelProvider,
+    executor: &dyn AgentToolExecutor,
+    request: aura_reasoner::ModelRequest,
+    event_tx: Option<&Sender<AgentLoopEvent>>,
+    cancellation_token: Option<&CancellationToken>,
+    state: &mut LoopState,
+    iteration: usize,
+    iteration_started_at: Instant,
+) -> SamplingRequestResult {
+    let outcome = run_stream_pump(
+        &agent.config,
+        provider,
+        executor,
+        request,
+        cancellation_token,
+        // The streaming pump opts to drain the input queue once per
+        // `OutputItemDone(tool_use)` so user steering inserted
+        // mid-batch becomes visible to the very next sampling
+        // request without losing the in-flight tool drain. The
+        // sampling driver itself does not own the input queue
+        // (that's the `task::run_task` scope), so we pass `None`
+        // here and let the task shell drive per-turn drains as
+        // before — the pump's per-event drain stays no-op for
+        // sampling callers that don't plumb a queue through.
+        None,
+        state,
+    )
+    .await;
+
+    let (response, tool_results) = match outcome {
+        StreamPumpOutcome::Completed {
+            response,
+            tool_results,
+        } => (response, tool_results),
+        StreamPumpOutcome::Cancelled => {
+            debug!("stream pump observed cancellation; bailing the sampling request");
+            return SamplingRequestResult {
+                needs_follow_up: false,
+                stop_reason: StopReason::EndTurn,
+                broke_for_error: true,
+            };
+        }
+        StreamPumpOutcome::Error(err) => {
+            let llm_err = match err {
+                crate::AgentError::Reason(inner) => {
+                    iteration::LlmCallError::from_reasoner_error(&inner)
+                }
+                other => iteration::LlmCallError::Fatal(other.to_string()),
+            };
+            llm_err.apply(&mut state.result, event_tx);
+            return SamplingRequestResult {
+                needs_follow_up: false,
+                stop_reason: StopReason::EndTurn,
+                broke_for_error: true,
+            };
+        }
+    };
+
+    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response) {
+        agent
+            .apply_summary_compaction(provider, &[], event_tx, cancellation_token, state, input)
+            .await;
+    }
+    state.result.iterations = iteration + 1;
+    streaming::emit_iteration_complete(event_tx, iteration, &response, iteration_started_at);
+
+    if is_cancelled(cancellation_token) {
+        debug!("Cancellation observed after stream pump; skipping tool dispatch");
+        return SamplingRequestResult {
+            needs_follow_up: false,
+            stop_reason: response.stop_reason,
+            broke_for_error: true,
+        };
+    }
+
+    let dispatch_says_break = super::stream_pump::dispatch_streamed_response(
+        agent,
+        &response,
+        tool_results,
+        event_tx,
+        state,
+    )
+    .await;
 
     SamplingRequestResult {
         needs_follow_up: !dispatch_says_break,

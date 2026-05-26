@@ -37,6 +37,12 @@ which = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Layer E.3: stream pump tests use `tokio::test(start_paused = true)`
+# + `tokio::time::advance` to deterministically drive timeouts and
+# overlap windows without real wall-clock sleep (Rule 7.3). Both
+# helpers live behind the `test-util` feature, which is NOT part of
+# `tokio`'s `full` set so we opt in explicitly here.
+tokio = { version = "1.35", features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -293,7 +293,11 @@ async fn drain_pending_input(
 ///   [`InputQueue::push`]; the in-band variant is only enqueued for
 ///   the tracing paper trail and that paper trail has already been
 ///   served by the queue itself.
-fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs: Vec<UserInput>) {
+///
+/// Exposed as `pub(super)` so the E.3 stream pump
+/// ([`super::sampling`]) can call it after a per-`OutputItemDone`
+/// drain without duplicating the merge / envelope logic.
+pub(super) fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs: Vec<UserInput>) {
     for input in inputs {
         match input {
             UserInput::Message(text) => {

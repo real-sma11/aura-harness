@@ -1,6 +1,8 @@
 //! Core types for the agent orchestration layer.
 
 use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// Normalized file mutation kind for turn-level reporting.
@@ -374,6 +376,46 @@ pub trait AgentToolExecutor: Send + Sync {
     /// - Track file operations for stub detection
     /// - Signal loop termination via `stop_loop`
     async fn execute(&self, tool_calls: &[ToolCallInfo]) -> Vec<ToolCallResult>;
+
+    /// Spawn a single tool call as a `Future<Output = ToolCallResult>`.
+    ///
+    /// Layer E.3: the streaming sampling pump in
+    /// [`crate::agent_loop::sampling`] calls this per
+    /// `ResponseEvent::OutputItemDone(tool_use)` so a tool can start
+    /// running while the model is still streaming subsequent items.
+    /// The returned futures are pushed into a `FuturesOrdered<…>`
+    /// and drained in submission order once the model signals
+    /// `Completed`, preserving codex's FIFO `drain_in_flight`
+    /// contract.
+    ///
+    /// The default implementation forwards to [`Self::execute`] with
+    /// a one-element batch, so existing executors (in particular
+    /// `TaskToolExecutor`) keep working without changes. Implementors
+    /// that want true per-call concurrency can override the method
+    /// to dispatch the call directly without the batching detour.
+    ///
+    /// The future borrows `&'a self`, so it shares the executor's
+    /// lifetime. The pump holds an `&'a dyn AgentToolExecutor` for
+    /// the duration of one sampling request and pushes the returned
+    /// boxed-pin futures into a `FuturesOrdered<'a>`, draining them
+    /// once the model signals `Completed`.
+    fn spawn_tool_call<'a>(
+        &'a self,
+        call: ToolCallInfo,
+    ) -> Pin<Box<dyn Future<Output = ToolCallResult> + Send + 'a>> {
+        Box::pin(async move {
+            let mut results = self.execute(std::slice::from_ref(&call)).await;
+            results.pop().unwrap_or_else(|| {
+                ToolCallResult::error(
+                    call.id.clone(),
+                    format!(
+                        "spawn_tool_call: executor returned no result for tool {}",
+                        call.name
+                    ),
+                )
+            })
+        })
+    }
 
     /// Run a lightweight build check (e.g., `cargo check --lib`).
     ///

@@ -9,6 +9,7 @@ mod continuation;
 mod iteration;
 mod sampling;
 mod search_cache;
+mod stream_pump;
 mod streaming;
 mod task;
 mod tool_execution;
@@ -238,6 +239,51 @@ pub struct AgentLoopConfig {
     /// runaway. Trips surface as
     /// [`AgentError::TurnBudgetExceeded`](crate::AgentError::TurnBudgetExceeded).
     pub max_iterations_per_task: u32,
+    /// Layer E.3: per-event boundary timeout for the streaming
+    /// sampling pump (Rule 6.2). Each `stream.try_next().await`
+    /// is wrapped with `tokio::time::timeout(stream_event_timeout, …)`
+    /// so a silent stream surfaces as an
+    /// [`AgentError::StreamTimeout`](crate::AgentError::StreamTimeout)
+    /// instead of hanging the turn forever. Default `90s` —
+    /// comfortably above the typical inter-event gap (Anthropic
+    /// ping cadence is 10–15s) but below the parent
+    /// `stream_timeout` (`300s`) so the per-event timeout fires
+    /// first and the operator sees the more specific error.
+    pub stream_event_timeout: Duration,
+    /// Layer E.3: per-tool execution timeout enforced inside the
+    /// streaming pump's `spawn_tool_call` wrapper (Rule 6.2).
+    /// Each in-flight tool future is wrapped with
+    /// `tokio::time::timeout(per_tool_timeout, …)`; a hung tool
+    /// resolves to a synthetic [`crate::ToolCallResult`] error
+    /// instead of poisoning the FIFO drain. Default `300s` matches
+    /// the existing reasoner-side `stream_timeout` so long shell /
+    /// build commands keep working while a runaway tool is bounded.
+    pub per_tool_timeout: Duration,
+    /// Layer E.3: opt-in switch for the streaming sampling pump
+    /// (`agent_loop::stream_pump`). When `true`, sampling drives
+    /// `provider.complete_response_stream(…)` and overlaps tool
+    /// execution at `OutputItemDone` boundaries via
+    /// [`futures_util::stream::FuturesOrdered`]. When `false`
+    /// (default), sampling uses the legacy buffered
+    /// `call_model` + `dispatch_stop_reason` path that
+    /// pre-E.3 callers exercise.
+    ///
+    /// # Why opt-in?
+    ///
+    /// The pump skips per-delta event emission (`TextDelta`,
+    /// `ThinkingDelta`, `ToolInputSnapshot`, …) that the legacy
+    /// streaming path forwards through `event_tx`. Chat-style
+    /// callers that need live UI deltas (e.g. `agent_runner::execute_chat`)
+    /// must keep the legacy path until E.4 wires per-delta
+    /// emission into the pump. Headless callers
+    /// (`agent_runner::execute_task_*`, integration tests, etc.)
+    /// can flip this flag today to gain stream-level tool overlap.
+    ///
+    /// Tool-result caching (`tool_execution::handle_tool_use` →
+    /// `split_cached`) is also bypassed by the pump path. Callers
+    /// that rely on read-only tool memoization should stay on the
+    /// legacy path until the pump grows a cache adapter.
+    pub use_stream_pump: bool,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -297,6 +343,12 @@ impl Default for AgentLoopConfig {
             max_continuation_turns: 6,
             max_turns_per_task: 50,
             max_iterations_per_task: 500,
+            stream_event_timeout: Duration::from_secs(90),
+            per_tool_timeout: Duration::from_secs(300),
+            // E.3 ships off-by-default. See the field's doc comment
+            // for the per-delta-event / cache rationale; E.4 will
+            // wire the deferred bits and flip the default.
+            use_stream_pump: false,
         }
     }
 }

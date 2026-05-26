@@ -304,6 +304,32 @@ fn partition_oversized_writes(
     (oversized, remaining)
 }
 
+/// Crate-internal wrapper around [`track_tool_effects`] used by the
+/// E.3 streaming pump (`stream_pump::handle_streamed_tool_use`). The
+/// pump's tool dispatch path lives outside this file so the
+/// detection logic for "successful write happened this batch" is
+/// exposed via `pub(super)` rather than inlined into both
+/// dispatchers. Same semantics as the private version — separated
+/// only to keep the visibility surface honest (Rule 3.1: nothing is
+/// `pub` that doesn't have to be).
+pub(super) fn track_tool_effects_public(
+    to_execute: &[ToolCallInfo],
+    executed: &[ToolCallResult],
+    result: &mut AgentLoopResult,
+    exploration_state: &mut ExplorationState,
+    had_any_write: &mut bool,
+    turn_diff: &mut super::turn_diff::TurnDiff,
+) -> bool {
+    track_tool_effects(
+        to_execute,
+        executed,
+        result,
+        exploration_state,
+        had_any_write,
+        turn_diff,
+    )
+}
+
 fn track_tool_effects(
     to_execute: &[ToolCallInfo],
     executed: &[ToolCallResult],
@@ -419,12 +445,27 @@ mod chunk_guard_tests {
             "write_file",
             json!({"path": "src/big.rs", "content": huge}),
         );
-        eprintln!("DEBUG: content_len={}, chunk_cap={}", huge.len(), WRITE_FILE_CHUNK_BYTES);
-        eprintln!("DEBUG: tool.name={}, input_content_len={:?}", call.name, call.input.get("content").and_then(|v| v.as_str()).map(|s| s.len()));
+        eprintln!(
+            "DEBUG: content_len={}, chunk_cap={}",
+            huge.len(),
+            WRITE_FILE_CHUNK_BYTES
+        );
+        eprintln!(
+            "DEBUG: tool.name={}, input_content_len={:?}",
+            call.name,
+            call.input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+        );
         let mut side_messages: Vec<String> = Vec::new();
         let (oversized, remaining) =
             partition_oversized_writes(std::slice::from_ref(&call), &mut side_messages, None);
-        eprintln!("DEBUG: oversized={}, remaining={}", oversized.len(), remaining.len());
+        eprintln!(
+            "DEBUG: oversized={}, remaining={}",
+            oversized.len(),
+            remaining.len()
+        );
 
         assert_eq!(
             oversized.len(),

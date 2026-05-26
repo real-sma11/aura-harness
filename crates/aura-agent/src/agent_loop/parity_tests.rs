@@ -250,6 +250,53 @@ async fn policy_deny_returns_error_result() {
     );
 }
 
+/// Layer E.3: drive a full `AgentLoop::run` through the streaming
+/// sampling pump (`use_stream_pump = true`) so we get end-to-end
+/// coverage of the pump → sampling-driver → turn loop → task shell
+/// stack. The fake provider scripts a `tool_use` response followed
+/// by a `text` finish; the kernel-backed executor returns
+/// `ok:read_file` for each call. We assert that the loop terminates,
+/// records the right number of iterations, and emits the synthetic
+/// final message — the same shape the legacy `call_model` path
+/// produces. This guards against pump-vs-buffered drift in the
+/// post-sampling accumulator / dispatch sequence.
+#[tokio::test]
+async fn stream_pump_path_completes_two_iteration_run() {
+    let harness = build_kernel(stub_router(), KernelConfig::default());
+    let executor = KernelToolGateway::new(harness.kernel);
+
+    let provider = MockProvider::new()
+        .with_response(two_tool_use_response())
+        .with_response(MockResponse::text("streamed-done"));
+
+    let config = AgentLoopConfig {
+        system_prompt: "test".to_string(),
+        use_stream_pump: true,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("go")];
+    let tools = vec![ToolDefinition::new(
+        "read_file",
+        "Read a file",
+        serde_json::json!({"type": "object"}),
+    )];
+
+    let result = agent
+        .run(&provider, &executor, messages, tools)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.iterations, 2,
+        "pump path should drive the same iteration count as the legacy path"
+    );
+    assert!(
+        result.total_text.contains("streamed-done"),
+        "pump path must accumulate the final assistant text"
+    );
+}
+
 #[tokio::test]
 async fn policy_deny_does_not_block_allowed_tools() {
     let policy_config = PolicyConfig::default().with_agent_override(Some(
