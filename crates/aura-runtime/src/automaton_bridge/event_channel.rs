@@ -100,6 +100,22 @@ impl AutomatonBridge {
     /// [`RETENTION_AFTER_DONE`] so late subscribers can still pull
     /// the replay history. The entry is removed from
     /// [`AutomatonBridge::event_channels`] at the end of that window.
+    ///
+    /// # Drain semantics
+    ///
+    /// The forwarder keeps polling `event_rx.recv()` until **all
+    /// senders are dropped** (i.e. `recv()` returns `None`), even
+    /// after observing `AutomatonEvent::Done`. The pre-fix loop
+    /// `break`-ed the moment `Done` arrived and then slept on the
+    /// retention timer with `event_rx` still in scope but no longer
+    /// polled; if anything emitted a late protocol event during the
+    /// 300s retention window the channel buffer would fill up and
+    /// then close, producing the `TickContext::emit ... receiver
+    /// closed` warnings observed in production for `TaskCompleted`
+    /// / `TokenUsage` / `TaskStarted` / `TaskFailed`. Draining
+    /// until exhaustion keeps the receiver alive for the full
+    /// senders-alive window and forwards every late event into both
+    /// the history buffer and the live broadcast.
     pub(super) fn spawn_event_forwarder(
         &self,
         automaton_id: String,
@@ -117,7 +133,31 @@ impl AutomatonBridge {
         let channel_for_task = channel.clone();
         let id_for_task = automaton_id.clone();
         tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
+            let mut done_observed_at: Option<tokio::time::Instant> = None;
+            loop {
+                // After `Done` is observed, keep draining for at
+                // most `RETENTION_AFTER_DONE` so late protocol events
+                // emitted in the same tick (or by clean-up tasks) are
+                // still forwarded. Once the retention window elapses
+                // we break and let `event_rx` drop, closing the
+                // channel for any further senders.
+                let recv = match done_observed_at {
+                    None => event_rx.recv().await,
+                    Some(started) => {
+                        let remaining = RETENTION_AFTER_DONE
+                            .checked_sub(started.elapsed())
+                            .unwrap_or(std::time::Duration::ZERO);
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        match tokio::time::timeout(remaining, event_rx.recv()).await {
+                            Ok(v) => v,
+                            Err(_) => break,
+                        }
+                    }
+                };
+                let Some(event) = recv else { break };
+
                 let is_done = matches!(event, AutomatonEvent::Done);
                 // Append to the replay history BEFORE broadcasting so
                 // a subscriber that manages to subscribe between the
@@ -133,19 +173,12 @@ impl AutomatonBridge {
                     history.push(event.clone());
                 }
                 let _ = channel_for_task.broadcast.send(event);
-                if is_done {
+                if is_done && done_observed_at.is_none() {
                     channel_for_task.done.store(true, Ordering::Release);
-                    break;
+                    done_observed_at = Some(tokio::time::Instant::now());
                 }
             }
 
-            // Grace window: keep the channel entry discoverable so
-            // late WebSocket subscribers can still read the replay
-            // history. Holding `channel_for_task` here also keeps the
-            // broadcast sender alive, so any subscriber that joined
-            // mid-retention gets RecvError::Closed only after the
-            // retention elapses (not immediately).
-            tokio::time::sleep(RETENTION_AFTER_DONE).await;
             channels.remove(&id_for_task);
         });
 

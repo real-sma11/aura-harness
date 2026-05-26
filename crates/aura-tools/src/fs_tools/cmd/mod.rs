@@ -874,7 +874,9 @@ impl Tool for CmdRunTool {
             name: "run_command".into(),
             description: "Run an external program. Default: pass 'program' + 'args' (no shell). \
                  Shell scripts require allow_shell=true; the optional allowed_shell_scripts list \
-                 pins a specific set when non-empty (empty = all scripts allowed)."
+                 pins a specific set when non-empty (empty = all scripts allowed). \
+                 For directory listings prefer the dedicated `list_files` tool over shelling out; \
+                 on Windows the binary allowlist intentionally omits `ls` (use `dir` or `list_files`)."
                 .into(),
             input_schema: serde_json::json!({
                 "type": "object",

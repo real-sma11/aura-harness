@@ -93,6 +93,17 @@ pub struct AgentRunnerConfig {
     pub max_task_credits: Option<u64>,
     pub default_model: String,
     pub simple_model: String,
+    /// Hard cap on consecutive-no-write continuation prompts the
+    /// agent loop will inject before failing the task with
+    /// `task_blocked`. Threaded into
+    /// [`AgentLoopConfig::max_continuation_turns`] for every
+    /// dev-loop / task-run invocation built via
+    /// [`configure_loop_config`]. Defaults to `100` on
+    /// [`Self::for_agent`]; deployments can lower it via
+    /// `AURA_MAX_CONTINUATION_TURNS` (see
+    /// [`Self::max_continuation_turns_from_env`]) to tighten the
+    /// stall-detection ceiling.
+    pub max_continuation_turns: u32,
     /// JWT auth token for proxy-mode LLM routing.
     pub auth_token: Option<String>,
     /// Org UUID forwarded as the `X-Aura-Org-Id` header on outbound
@@ -177,6 +188,13 @@ impl AgentRunnerConfig {
             max_task_credits: None,
             simple_model: model.clone(),
             default_model: model,
+            // 100 effectively disables the cap for normal exploration-
+            // heavy task runs while still catching pathological
+            // infinite no-write loops. Operators that want the
+            // historical tighter ceiling can override via
+            // `AURA_MAX_CONTINUATION_TURNS` — see
+            // [`Self::max_continuation_turns_from_env`].
+            max_continuation_turns: Self::max_continuation_turns_from_env().unwrap_or(100),
             auth_token: None,
             aura_org_id: None,
             aura_session_id: None,
@@ -194,6 +212,22 @@ impl AgentRunnerConfig {
     pub fn with_simple_model(mut self, simple: impl Into<String>) -> Self {
         self.simple_model = simple.into();
         self
+    }
+
+    /// Parse the `AURA_MAX_CONTINUATION_TURNS` environment variable.
+    ///
+    /// Returns `Some(n)` when the variable is set to a positive integer
+    /// (`> 0`); returns `None` otherwise so the caller can fall back
+    /// to the built-in default (100). Negative / zero / non-numeric
+    /// values are treated as unset rather than panicking, matching
+    /// the lenient behavior of other `AURA_*` env knobs in this crate
+    /// (see e.g. `crate::task_executor::read_disable_test_gate_env`).
+    #[must_use]
+    pub fn max_continuation_turns_from_env() -> Option<u32> {
+        std::env::var("AURA_MAX_CONTINUATION_TURNS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|n| *n > 0)
     }
 }
 
@@ -641,6 +675,13 @@ pub fn configure_loop_config(
         // prompt, telemetry) can still distinguish dev-loop runs
         // from chat / generic runs.
         dev_loop_completion_required: true,
+        // Forward the runner-level ceiling (env-overridable, default
+        // 100) onto the agent loop. The previous default of 6 from
+        // `AgentLoopConfig::for_agent` was killing exploration-heavy
+        // dev-loop tasks (e.g. "Workspace skeleton") that legitimately
+        // needed >6 read-only sampling iterations before their first
+        // write. See `AgentRunnerConfig::max_continuation_turns`.
+        max_continuation_turns: config.max_continuation_turns,
         ..AgentLoopConfig::for_agent(model)
     }
 }

@@ -61,8 +61,10 @@ pub(crate) const fn platform_info_string() -> &'static str {
     if cfg!(windows) {
         "Windows. Shell commands run via `cmd /C`. Use PowerShell or \
          Windows-compatible syntax. Avoid Unix-only tools (grep, sed, awk, head, \
-         tail, wc, cat). Prefer the built-in tools (search_code, read_file, \
-         find_files, list_files) over shell commands for file exploration."
+         tail, wc, cat, ls). Do NOT call `run_command` with `program: \"ls\"` — \
+         the binary allowlist excludes `ls` on Windows. Prefer the built-in tools \
+         (search_code, read_file, find_files, list_files) over shell commands for \
+         file exploration; if you must shell out, use `dir`."
     } else if cfg!(target_os = "macos") {
         "macOS. Shell commands run via `sh -c`."
     } else {
