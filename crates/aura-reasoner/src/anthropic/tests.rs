@@ -51,14 +51,97 @@ fn test_convert_tools() {
 #[test]
 fn test_convert_tool_choice() {
     assert!(matches!(
-        convert_tool_choice(&ToolChoice::Auto),
-        Some(ApiToolChoice::Auto)
+        convert_tool_choice(&ToolChoice::Auto, true),
+        Some(ApiToolChoice::Auto {
+            disable_parallel_tool_use: None
+        })
     ));
     assert!(matches!(
-        convert_tool_choice(&ToolChoice::Required),
-        Some(ApiToolChoice::Any)
+        convert_tool_choice(&ToolChoice::Required, true),
+        Some(ApiToolChoice::Any {
+            disable_parallel_tool_use: None
+        })
     ));
-    assert!(convert_tool_choice(&ToolChoice::None).is_none());
+    assert!(convert_tool_choice(&ToolChoice::None, true).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — parallel tool use wire shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parallel_tool_use_default_true_omits_disable_field() {
+    // Default `parallel_tool_use: true` must NOT emit
+    // `disable_parallel_tool_use`. Confirms the wire payload stays
+    // byte-identical to the pre-Phase-3 `{"type": "auto"}` shape, so
+    // the existing log-summary / golden-body tests keep passing and
+    // we don't accidentally regress on the wire when nothing
+    // changes.
+    let choice = convert_tool_choice(&ToolChoice::Auto, true).expect("Auto -> Some");
+    let json = serde_json::to_value(&choice).unwrap();
+    assert_eq!(json, serde_json::json!({ "type": "auto" }));
+}
+
+#[test]
+fn parallel_tool_use_false_emits_disable_parallel_tool_use_true() {
+    let choice = convert_tool_choice(&ToolChoice::Auto, false).expect("Auto -> Some");
+    let json = serde_json::to_value(&choice).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "auto", "disable_parallel_tool_use": true })
+    );
+}
+
+#[test]
+fn parallel_tool_use_false_propagates_to_required_and_tool_variants() {
+    let any_choice = convert_tool_choice(&ToolChoice::Required, false).expect("Required -> Some");
+    let any_json = serde_json::to_value(&any_choice).unwrap();
+    assert_eq!(
+        any_json,
+        serde_json::json!({ "type": "any", "disable_parallel_tool_use": true })
+    );
+
+    let tool_choice = convert_tool_choice(
+        &ToolChoice::Tool {
+            name: "read_file".to_string(),
+        },
+        false,
+    )
+    .expect("Tool -> Some");
+    let tool_json = serde_json::to_value(&tool_choice).unwrap();
+    assert_eq!(
+        tool_json,
+        serde_json::json!({
+            "type": "tool",
+            "name": "read_file",
+            "disable_parallel_tool_use": true,
+        })
+    );
+}
+
+#[test]
+fn model_request_default_parallel_tool_use_is_true() {
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(8_192)
+        .try_build()
+        .unwrap();
+    assert!(
+        request.parallel_tool_use,
+        "default must be true so codex-style batching is on by default"
+    );
+}
+
+#[test]
+fn model_request_parallel_tool_use_builder_override() {
+    let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+        .max_tokens(8_192)
+        .parallel_tool_use(false)
+        .try_build()
+        .unwrap();
+    assert!(
+        !request.parallel_tool_use,
+        "builder override must propagate to ModelRequest.parallel_tool_use"
+    );
 }
 
 #[test]

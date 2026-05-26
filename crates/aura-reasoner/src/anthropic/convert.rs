@@ -252,12 +252,31 @@ pub(super) fn convert_tools_to_api(
     api_tools
 }
 
-pub(super) fn convert_tool_choice(choice: &ToolChoice) -> Option<ApiToolChoice> {
+pub(super) fn convert_tool_choice(
+    choice: &ToolChoice,
+    parallel_tool_use: bool,
+) -> Option<ApiToolChoice> {
+    // Phase 3: codex enables `parallel_tool_calls: true` by default
+    // (codex-rs/core/src/client.rs:759); Anthropic's analog is the
+    // negative-sense `disable_parallel_tool_use: bool` field on
+    // `tool_choice`. We only set it when the caller opts out of
+    // parallel mode — `None` (skipped during serialization) is
+    // wire-equivalent to Anthropic's default-parallel behaviour and
+    // keeps the request body byte-identical to the pre-Phase-3
+    // shape for the default `parallel_tool_use: true` path.
+    let disable = if parallel_tool_use { None } else { Some(true) };
     match choice {
-        ToolChoice::Auto => Some(ApiToolChoice::Auto),
+        ToolChoice::Auto => Some(ApiToolChoice::Auto {
+            disable_parallel_tool_use: disable,
+        }),
         ToolChoice::None => None,
-        ToolChoice::Required => Some(ApiToolChoice::Any),
-        ToolChoice::Tool { name } => Some(ApiToolChoice::Tool { name: name.clone() }),
+        ToolChoice::Required => Some(ApiToolChoice::Any {
+            disable_parallel_tool_use: disable,
+        }),
+        ToolChoice::Tool { name } => Some(ApiToolChoice::Tool {
+            name: name.clone(),
+            disable_parallel_tool_use: disable,
+        }),
     }
 }
 

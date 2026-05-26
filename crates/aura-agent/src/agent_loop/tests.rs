@@ -664,6 +664,125 @@ fn begin_iteration_no_op_when_no_signal_configured() {
 }
 
 // ------------------------------------------------------------------
+// Phase 3 — parallel tool calls per assistant turn
+// ------------------------------------------------------------------
+
+/// Three `read_file` `tool_use` blocks in a single assistant turn
+/// must all execute in one loop iteration. Confirms aura's existing
+/// `extract_tool_calls` already iterates `Vec<ContentBlock::ToolUse>`
+/// — Phase 3 only had to enable the wire flag; the pipeline side
+/// was already correct. The `track_tool_effects` integration from
+/// Phase 1.A was wired into the same multi-tool pipeline, so this
+/// also pins that 3 tool_results land back in the message history
+/// without splitting across iterations.
+#[tokio::test]
+async fn three_read_file_calls_execute_in_one_iteration() {
+    use aura_reasoner::{ContentBlock, ToolResultContent};
+
+    let executor = MockExecutor {
+        results: vec![
+            ToolCallResult {
+                tool_use_id: "placeholder".to_string(),
+                content: "ok-1".to_string(),
+                is_error: false,
+                kind: aura_core::ToolResultKind::Ok,
+                stop_loop: false,
+                file_changes: Vec::new(),
+            },
+            ToolCallResult {
+                tool_use_id: "placeholder".to_string(),
+                content: "ok-2".to_string(),
+                is_error: false,
+                kind: aura_core::ToolResultKind::Ok,
+                stop_loop: false,
+                file_changes: Vec::new(),
+            },
+            ToolCallResult {
+                tool_use_id: "placeholder".to_string(),
+                content: "ok-3".to_string(),
+                is_error: false,
+                kind: aura_core::ToolResultKind::Ok,
+                stop_loop: false,
+                file_changes: Vec::new(),
+            },
+        ],
+    };
+
+    // Single assistant turn with three parallel tool_use blocks.
+    let parallel_response = MockResponse {
+        stop_reason: StopReason::ToolUse,
+        content: vec![
+            ContentBlock::tool_use("toolu_1", "read_file", serde_json::json!({"path": "a.rs"})),
+            ContentBlock::tool_use("toolu_2", "read_file", serde_json::json!({"path": "b.rs"})),
+            ContentBlock::tool_use("toolu_3", "read_file", serde_json::json!({"path": "c.rs"})),
+        ],
+        usage: Usage::new(100, 30),
+    };
+
+    let provider = MockProvider::new()
+        .with_response(parallel_response)
+        .with_response(MockResponse::text("Done after one parallel batch."));
+
+    let config = AgentLoopConfig {
+        system_prompt: "You are a test agent".to_string(),
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config);
+    let messages = vec![Message::user("Read three files.")];
+    let tools = vec![ToolDefinition::new(
+        "read_file",
+        "Read a file",
+        serde_json::json!({"type": "object"}),
+    )];
+
+    let result = agent
+        .run(&provider, &executor, messages, tools)
+        .await
+        .unwrap();
+
+    // Two iterations total: one tool-use turn (carrying all three
+    // calls) + one final EndTurn. NOT four — the regression the
+    // Phase 3 wire flag prevents is the agent emitting one tool per
+    // iteration and ballooning the iteration count.
+    assert_eq!(
+        result.iterations, 2,
+        "three parallel tool_use blocks must execute in a single iteration; got {} iterations",
+        result.iterations
+    );
+
+    // All three tool results must land in the message history.
+    let tool_result_count: usize = result
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        .count();
+    assert_eq!(
+        tool_result_count, 3,
+        "all three tool_use blocks must produce tool_result messages in the same iteration"
+    );
+
+    // And their contents must match the per-call executor outputs
+    // (no batching collisions / clobbered results).
+    let result_contents: std::collections::HashSet<String> = result
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| {
+            if let ContentBlock::ToolResult { content, .. } = b {
+                if let ToolResultContent::Text(s) = content {
+                    return Some(s.clone());
+                }
+            }
+            None
+        })
+        .collect();
+    assert!(result_contents.contains("ok-1"), "result ok-1 missing");
+    assert!(result_contents.contains("ok-2"), "result ok-2 missing");
+    assert!(result_contents.contains("ok-3"), "result ok-3 missing");
+}
+
+// ------------------------------------------------------------------
 // Phase 2 — `compute_thinking_effort` dev-loop policy
 // ------------------------------------------------------------------
 

@@ -87,12 +87,32 @@ pub(super) struct ApiTool {
     pub eager_input_streaming: Option<bool>,
 }
 
+/// Anthropic `tool_choice` wire shape.
+///
+/// Phase 3: each variant carries an optional
+/// `disable_parallel_tool_use: bool` so callers can opt out of
+/// Anthropic's default parallel tool-use behaviour. The field is the
+/// current documented shape for parallel-tool-use control on the
+/// `messages` API; when `None`, serde skips it and the wire payload
+/// matches the pre-Phase-3 `{"type": "auto"}` exactly (so existing
+/// log-summary tests and on-the-wire behaviour stay byte-identical
+/// for the default `parallel_tool_use: true` case).
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum ApiToolChoice {
-    Auto,
-    Any,
-    Tool { name: String },
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    Any {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
 }
 
 #[derive(Debug, Deserialize)]

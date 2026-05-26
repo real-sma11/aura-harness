@@ -1821,7 +1821,7 @@ fn build_api_request(
         } else {
             Some(convert_tools_to_api(&request.tools, prompt_caching_enabled))
         },
-        tool_choice: convert_tool_choice(&request.tool_choice),
+        tool_choice: convert_tool_choice(&request.tool_choice, request.parallel_tool_use),
         max_tokens: request.max_tokens.get(),
         temperature: if thinking.is_some() {
             Some(1.0)
@@ -2420,7 +2420,10 @@ impl ModelProvider for AnthropicProvider {
                             prompt_caching_enabled,
                         ))
                     },
-                    tool_choice: convert_tool_choice(&request_ref.tool_choice),
+                    tool_choice: convert_tool_choice(
+                        &request_ref.tool_choice,
+                        request_ref.parallel_tool_use,
+                    ),
                     max_tokens: request_ref.max_tokens.get(),
                     temperature: if thinking.is_some() {
                         Some(1.0)

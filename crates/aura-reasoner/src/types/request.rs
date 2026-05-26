@@ -260,6 +260,16 @@ pub struct ModelRequest {
     /// through to the legacy `max_tokens > 2048` auto-enable path so
     /// non-migrated callers keep their current behaviour.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Phase 3: allow the model to emit multiple `tool_use` blocks in
+    /// one assistant turn. Codex enables the equivalent
+    /// `parallel_tool_calls: true` flag by default
+    /// (codex-rs/core/src/client.rs:759); aura ships the same default
+    /// so a 5-file exploration can collapse into a single iteration
+    /// instead of feeding the doom loop with one read per turn.
+    ///
+    /// Set `false` to add `disable_parallel_tool_use: true` to the
+    /// Anthropic `tool_choice` payload, forcing serial tool execution.
+    pub parallel_tool_use: bool,
     /// Optional JWT auth token for proxy routing.
     pub auth_token: Option<String>,
     /// Optional upstream provider family hint for managed proxy routing.
@@ -307,6 +317,7 @@ pub struct ModelRequestBuilder {
     temperature: Option<f32>,
     thinking: Option<ThinkingConfig>,
     thinking_effort: Option<ThinkingEffort>,
+    parallel_tool_use: bool,
     auth_token: Option<String>,
     upstream_provider_family: Option<String>,
     aura_project_id: Option<String>,
@@ -332,6 +343,8 @@ impl ModelRequestBuilder {
             temperature: None,
             thinking: None,
             thinking_effort: None,
+            // Phase 3: codex default. See `ModelRequest::parallel_tool_use`.
+            parallel_tool_use: true,
             auth_token: None,
             upstream_provider_family: None,
             aura_project_id: None,
@@ -399,6 +412,15 @@ impl ModelRequestBuilder {
     #[must_use]
     pub const fn thinking_effort(mut self, effort: Option<ThinkingEffort>) -> Self {
         self.thinking_effort = effort;
+        self
+    }
+
+    /// Phase 3: enable or disable parallel tool-use for this request.
+    /// Defaults to `true` (codex's default); set to `false` to opt
+    /// individual call sites back into serial tool execution.
+    #[must_use]
+    pub const fn parallel_tool_use(mut self, allow: bool) -> Self {
+        self.parallel_tool_use = allow;
         self
     }
 
@@ -484,6 +506,7 @@ impl ModelRequestBuilder {
             temperature,
             thinking: self.thinking,
             thinking_effort: self.thinking_effort,
+            parallel_tool_use: self.parallel_tool_use,
             auth_token: self.auth_token,
             upstream_provider_family: self.upstream_provider_family,
             aura_project_id: self.aura_project_id,
