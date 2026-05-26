@@ -79,6 +79,7 @@ pub use runtime::{
     ProcessManager, ProcessManagerConfig, ProcessOutput, RunningProcess, RuntimeError,
 };
 pub use session::{AgentRunnerHandle, SessionId, UserInput};
+pub use task_executor::run_project_build_check;
 pub use types::{
     AgentLoopResult, AgentToolExecutor, AutoBuildResult, BuildBaseline, FileChange, FileChangeKind,
     ToolCallInfo, ToolCallResult, TurnObserver, TurnObservers,

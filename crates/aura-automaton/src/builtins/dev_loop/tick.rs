@@ -24,6 +24,7 @@ use tracing::{info, warn};
 
 use aura_agent::agent_runner::{AgenticTaskParams, TaskExecutionResult, TaskTrackingConfig};
 use aura_agent::prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
+use aura_agent::run_project_build_check;
 use aura_tools::catalog::ToolProfile;
 use aura_tools::domain_tools::TaskDescriptor;
 
@@ -146,6 +147,12 @@ impl DevLoopAutomaton {
         let task_id = queue.remove(0);
         ctx.state.set(STATE_TASK_QUEUE, &queue);
 
+        let project = self
+            .domain
+            .get_project(&cfg.project_id, None)
+            .await
+            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+
         let task = match self.domain.get_task(&task_id, None).await {
             Ok(t) => t,
             Err(e) => {
@@ -169,7 +176,9 @@ impl DevLoopAutomaton {
             task_title: task.title.clone(),
         })?;
 
-        let result = self.execute_task(ctx, cfg, &task).await;
+        let result = self
+            .execute_task(ctx, cfg, &task, &project.build_command)
+            .await;
 
         // User-initiated stop fires the shared cancellation token, which the
         // agent loop honours by returning an early `Ok(TaskExecutionResult)`
@@ -293,6 +302,7 @@ impl DevLoopAutomaton {
         ctx: &TickContext,
         cfg: &DevLoopConfig,
         task: &TaskDescriptor,
+        build_command: &Option<String>,
     ) -> Result<TaskExecutionResult, AutomatonError> {
         let project = self
             .domain
@@ -387,7 +397,8 @@ impl DevLoopAutomaton {
         };
 
         let cancel = ctx.cancellation_token().clone();
-        self.runner
+        let exec = self
+            .runner
             .execute_task_tracked(
                 self.provider.as_ref(),
                 tracking,
@@ -396,7 +407,12 @@ impl DevLoopAutomaton {
                 Some(cancel),
             )
             .await
-            .map_err(|e| AutomatonError::AgentExecution(e.to_string()))
+            .map_err(|e| AutomatonError::AgentExecution(e.to_string()))?;
+
+        if !ctx.is_cancelled() {
+            verify_build_after_agent(&effective_path, build_command.as_deref()).await?;
+        }
+        Ok(exec)
     }
 
     fn finish(&self, ctx: &mut TickContext) -> Result<TickOutcome, AutomatonError> {
@@ -452,6 +468,15 @@ impl LoopFinishOutcome {
 /// (the agent inspected the codebase and concluded that the task
 /// description was satisfied by existing code); that branch returns
 /// `None` so the task is recorded as success.
+async fn verify_build_after_agent(
+    project_folder: &str,
+    build_command: Option<&str>,
+) -> Result<(), AutomatonError> {
+    run_project_build_check(project_folder, build_command)
+        .await
+        .map_err(AutomatonError::AgentExecution)
+}
+
 fn classify_execution_result(exec: &TaskExecutionResult) -> Option<AutomatonError> {
     if exec.file_ops.is_empty() && !exec.no_changes_needed {
         Some(AutomatonError::AgentExecution(
