@@ -422,6 +422,21 @@ async fn run_auto_build(
     None
 }
 
+/// Crate-internal wrapper around [`run_auto_build`] used by the
+/// E.4 streaming pump (`stream_pump::handle_streamed_tool_use`) so
+/// the pump path participates in the same dev-loop build feedback
+/// as the buffered path. Same semantics — separated only to keep
+/// the visibility surface honest (Rule 3.1: `run_auto_build` itself
+/// stays private to this module).
+pub(super) async fn run_auto_build_public(
+    config: &AgentLoopConfig,
+    executor: &dyn AgentToolExecutor,
+    build_cooldown: &mut usize,
+    build_baseline: Option<&BuildBaseline>,
+) -> Option<String> {
+    run_auto_build(config, executor, build_cooldown, build_baseline).await
+}
+
 #[cfg(test)]
 mod chunk_guard_tests {
     use super::*;

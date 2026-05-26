@@ -363,6 +363,10 @@ async fn test_context_estimate_includes_cache_tokens() {
 async fn test_prompt_overflow_retries_after_compaction() {
     let config = AgentLoopConfig {
         max_context_tokens: Some(20_000),
+        // PromptTooLong retry + emergency compaction live on the
+        // legacy buffered sampling path. The pump path port is a
+        // follow-up; pin this test to the legacy path until then.
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);
@@ -396,6 +400,7 @@ async fn test_prompt_overflow_retries_after_compaction() {
 async fn test_prompt_overflow_fails_fast_when_compaction_cannot_help() {
     let config = AgentLoopConfig {
         max_context_tokens: Some(20_000),
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);
@@ -421,6 +426,7 @@ async fn test_prompt_overflow_fails_fast_when_compaction_cannot_help() {
 async fn test_prompt_overflow_uses_emergency_compaction_when_aggressive_cannot_help() {
     let config = AgentLoopConfig {
         max_context_tokens: Some(20_000),
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);
@@ -465,6 +471,7 @@ async fn test_prompt_overflow_retry_reduces_response_budget() {
     let config = AgentLoopConfig {
         max_context_tokens: Some(20_000),
         max_tokens: 16_384,
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);
@@ -726,6 +733,14 @@ async fn three_read_file_calls_execute_in_one_iteration() {
 
     let config = AgentLoopConfig {
         system_prompt: "You are a test agent".to_string(),
+        // The buffered path calls `execute()` once per batch of
+        // tool_use blocks, so the MockExecutor's positional zip
+        // returns [ok-1, ok-2, ok-3]. The pump path spawns each
+        // tool individually (matching codex's stream-level overlap)
+        // which would re-trigger the executor once per call and
+        // collapse the positional zip to [ok-1, ok-1, ok-1] —
+        // covered by the pump-side parity_tests instead.
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     };
     let agent = AgentLoop::new(config);

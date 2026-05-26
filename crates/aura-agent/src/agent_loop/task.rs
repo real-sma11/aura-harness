@@ -49,7 +49,9 @@ use uuid::Uuid;
 
 use crate::console;
 use crate::events::AgentLoopEvent;
+use crate::session::goal_runtime::GoalRuntimeEvent;
 use crate::session::input_queue::InputQueue;
+use crate::session::Session;
 use crate::types::{AgentLoopResult, AgentToolExecutor};
 use crate::AgentError;
 
@@ -139,7 +141,7 @@ pub(crate) async fn run_task(
     tools: Vec<ToolDefinition>,
     event_tx: Option<Sender<AgentLoopEvent>>,
     cancellation_token: Option<CancellationToken>,
-    input_queue: Option<Arc<InputQueue>>,
+    session: Arc<Session>,
 ) -> Result<AgentLoopResult, AgentError> {
     let task_id = TaskId::new_v4();
     let task_id_str = task_id.to_string();
@@ -155,16 +157,30 @@ pub(crate) async fn run_task(
     );
     tracing::debug!(
         task_id = %task_id,
+        session_id = %session.id,
         max_iterations = agent.config.max_iterations,
         max_turns_per_task = agent.config.max_turns_per_task,
         max_iterations_per_task = agent.config.max_iterations_per_task,
-        has_input_queue = input_queue.is_some(),
         "Starting agent task"
     );
 
+    // Layer E.4: notify the goal runtime that a new goal has started
+    // so subsequent `TurnCompleted` events can be attributed to this
+    // task. The streak is session-scoped, so this does NOT reset
+    // `ContinuationState::consecutive_no_write` (codex parity).
+    let objective = first_user_text(&state.messages).unwrap_or_default();
+    if let Err(err) = session
+        .goal_runtime
+        .handle_event(GoalRuntimeEvent::GoalStarted { task_id, objective })
+        .await
+    {
+        tracing::warn!(error = %err, "goal_runtime::GoalStarted failed; continuing");
+    }
+
     let event_tx_ref = event_tx.as_ref();
     let cancellation_ref = cancellation_token.as_ref();
-    let input_queue_ref = input_queue.as_deref();
+    let input_queue_arc: Arc<InputQueue> = Arc::clone(&session.input_queue);
+    let input_queue_ref: &InputQueue = input_queue_arc.as_ref();
 
     // E.2: turn_index / iteration_offset accumulate across turns so
     // the `max_turns_per_task` / `max_iterations_per_task` caps trip
@@ -203,7 +219,8 @@ pub(crate) async fn run_task(
             task_id,
             turn_index,
             iteration_offset,
-            input_queue_ref,
+            Some(input_queue_ref),
+            &session,
         )
         .await?;
 
@@ -222,12 +239,16 @@ pub(crate) async fn run_task(
         }
 
         // E.2: only spin another turn when the input queue has
-        // pending entries. Without a queue (or with an empty one),
-        // the task is done as soon as the active turn breaks cleanly.
-        match input_queue_ref {
-            Some(queue) if queue.has_pending() => continue,
-            _ => break,
+        // pending entries. With the session-scoped queue ALWAYS
+        // present in E.4, the gate collapses to a single
+        // `has_pending()` probe. The streak counter on
+        // [`GoalRuntime::continuation`] is session-scoped so the
+        // restart inherits the prior task's accumulator (codex
+        // parity).
+        if input_queue_ref.has_pending() {
+            continue;
         }
+        break;
     }
 
     state.result.messages = state.messages;
@@ -237,4 +258,20 @@ pub(crate) async fn run_task(
     }
 
     Ok(state.result)
+}
+
+/// Pull the first user-role text content from `messages` for the
+/// `GoalStarted` objective field. Returns the empty string when the
+/// first user message is missing or carries non-text blocks only.
+fn first_user_text(messages: &[Message]) -> Option<String> {
+    for msg in messages {
+        if matches!(msg.role, aura_reasoner::Role::User) {
+            for block in &msg.content {
+                if let aura_reasoner::ContentBlock::Text { text } = block {
+                    return Some(text.clone());
+                }
+            }
+        }
+    }
+    None
 }

@@ -259,30 +259,37 @@ pub struct AgentLoopConfig {
     /// the existing reasoner-side `stream_timeout` so long shell /
     /// build commands keep working while a runaway tool is bounded.
     pub per_tool_timeout: Duration,
-    /// Layer E.3: opt-in switch for the streaming sampling pump
-    /// (`agent_loop::stream_pump`). When `true`, sampling drives
-    /// `provider.complete_response_stream(…)` and overlaps tool
-    /// execution at `OutputItemDone` boundaries via
-    /// [`futures_util::stream::FuturesOrdered`]. When `false`
-    /// (default), sampling uses the legacy buffered
-    /// `call_model` + `dispatch_stop_reason` path that
-    /// pre-E.3 callers exercise.
+    /// Layer E.4: switch for the streaming sampling pump
+    /// (`agent_loop::stream_pump`). When `true` (default), sampling
+    /// drives `provider.complete_response_stream(…)` and overlaps
+    /// tool execution at `OutputItemDone` boundaries via
+    /// [`futures_util::stream::FuturesOrdered`]. When `false`,
+    /// sampling uses the legacy buffered `call_model` +
+    /// `dispatch_stop_reason` path.
     ///
-    /// # Why opt-in?
+    /// # Default flipped to `true` in E.4
     ///
-    /// The pump skips per-delta event emission (`TextDelta`,
-    /// `ThinkingDelta`, `ToolInputSnapshot`, …) that the legacy
-    /// streaming path forwards through `event_tx`. Chat-style
-    /// callers that need live UI deltas (e.g. `agent_runner::execute_chat`)
-    /// must keep the legacy path until E.4 wires per-delta
-    /// emission into the pump. Headless callers
-    /// (`agent_runner::execute_task_*`, integration tests, etc.)
-    /// can flip this flag today to gain stream-level tool overlap.
+    /// E.3 shipped the pump opt-in because three parity gaps
+    /// blocked promotion to the production path: per-delta event
+    /// emission (`TextDelta` / `ThinkingDelta` / `ToolInputSnapshot`),
+    /// tool-result caching (`split_cached` / `update_cache`), and
+    /// pump-triggered auto-build (`run_auto_build`). E.4 wired all
+    /// three through the pump (per-`OutputItemDone` block deltas via
+    /// the `event_tx` channel, cache consulted at submission time,
+    /// auto-build fired in `handle_streamed_tool_use`) so this
+    /// flag now defaults to `true`.
     ///
-    /// Tool-result caching (`tool_execution::handle_tool_use` →
-    /// `split_cached`) is also bypassed by the pump path. Callers
-    /// that rely on read-only tool memoization should stay on the
-    /// legacy path until the pump grows a cache adapter.
+    /// # Remaining caveats
+    ///
+    /// `retry_streaming_for_partial_tool_use` (per-tool-call
+    /// streaming retry on `StreamAbortedWithPartial`) is not yet
+    /// ported onto `ResponseEventStream`. Callers that depend on
+    /// that recovery path should set this flag to `false` and stay
+    /// on the buffered path until a follow-up commit lands the
+    /// port. Sub-block per-token deltas also remain on the
+    /// buffered path — the pump emits one delta per finished
+    /// block, which is sufficient for chat UX continuity but
+    /// coarser than the per-token feel of the buffered path.
     pub use_stream_pump: bool,
 }
 
@@ -345,10 +352,16 @@ impl Default for AgentLoopConfig {
             max_iterations_per_task: 500,
             stream_event_timeout: Duration::from_secs(90),
             per_tool_timeout: Duration::from_secs(300),
-            // E.3 ships off-by-default. See the field's doc comment
-            // for the per-delta-event / cache rationale; E.4 will
-            // wire the deferred bits and flip the default.
-            use_stream_pump: false,
+            // E.4 flipped this to `true`. The pump now emits per-
+            // `OutputItemDone` block deltas, consults the per-run
+            // tool cache, and fires auto-build on writes — closing
+            // the parity gaps that kept the pump opt-in in E.3.
+            // Operators that need to fall back to the legacy
+            // buffered path (e.g. for the pre-E.4
+            // `retry_streaming_for_partial_tool_use` semantics
+            // which has not yet been ported) can flip this back to
+            // `false` per call site.
+            use_stream_pump: true,
         }
     }
 }
@@ -469,7 +482,32 @@ impl AgentLoop {
         cancellation_token: Option<CancellationToken>,
         handle: Option<&crate::AgentRunnerHandle>,
     ) -> Result<AgentLoopResult, crate::AgentError> {
-        let input_queue = handle.map(crate::AgentRunnerHandle::queue);
+        // Layer E.4: ALWAYS instantiate an internal [`Session`] so the
+        // agent loop has a unified handle to the `InputQueue` +
+        // `GoalRuntime` regardless of whether the caller supplied an
+        // [`AgentRunnerHandle`]. When `handle` is `Some`, the new
+        // session shares the handle's backing queue (and session id);
+        // when `None`, we mint a fresh session id + queue paired with
+        // either the supplied `cancellation_token` or a freshly
+        // created one so in-band cancel + external cancel still share
+        // a signal. This is the resolution for E.2's open question:
+        // [`crate::agent_runner::AgentRunner::execute_task`] +
+        // friends remain the public entry points; everything goes
+        // through a session internally.
+        let cancellation = cancellation_token.clone().unwrap_or_default();
+        let session = match handle {
+            Some(h) => crate::session::Session::from_handle(
+                h,
+                cancellation.clone(),
+                self.config.max_continuation_turns,
+            ),
+            None => crate::session::Session::new(
+                crate::session::SessionId::new_v4(),
+                cancellation.clone(),
+                self.config.max_continuation_turns,
+            ),
+        };
+        let session = Arc::new(session);
         // Route provider-level `debug.retry` observations back into the
         // `event_tx` channel by installing a task-local observer for
         // the duration of this turn. The observer forwards through the
@@ -500,7 +538,7 @@ impl AgentLoop {
             tools,
             event_tx,
             cancellation_token,
-            input_queue,
+            session,
         );
         match observer {
             Some(obs) => aura_reasoner::DEBUG_RETRY_OBSERVER.scope(obs, fut).await,
@@ -508,11 +546,12 @@ impl AgentLoop {
         }
     }
 
-    // E.2: mirrors `run_with_session`'s arg list (one over the
-    // clippy default ceiling). Same justification: the `input_queue`
-    // is the only new arg, and packing it into a struct would
-    // require every helper inside this module to learn a new wrapper
-    // type. Documented per Rule 1.4.
+    // E.4: 8 parameters (one over the default 7 clippy ceiling). The
+    // new `session` parameter is the unified handle to the
+    // [`InputQueue`] + [`GoalRuntime`] for the in-flight session;
+    // packing the rest into a struct would force every helper inside
+    // this module to learn a new wrapper type. Documented per
+    // Rule 1.4.
     #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
@@ -522,18 +561,14 @@ impl AgentLoop {
         tools: Vec<ToolDefinition>,
         event_tx: Option<Sender<AgentLoopEvent>>,
         cancellation_token: Option<CancellationToken>,
-        input_queue: Option<Arc<crate::session::input_queue::InputQueue>>,
+        session: Arc<crate::session::Session>,
     ) -> Result<AgentLoopResult, crate::AgentError> {
-        // Layer E.1 + E.2: delegate to the nested task → turn → sampling
-        // topology. The old per-iteration `for` loop body now lives
-        // in [`sampling::run_sampling_request`]; the turn-level
-        // `needs_follow_up` predicate and Phase 1.B stop hooks live
-        // in [`turn::run_turn`] / [`turn::run_turn_stop_hooks`]; the
-        // outer task shell with `max_turns_per_task` /
-        // `max_iterations_per_task` ceilings and the optional
-        // `input_queue` restart lives in [`task::run_task`]. See
-        // `agent_loop/turn.rs`'s module-level docs for the topology
-        // diagram.
+        // Layer E.1 + E.2 + E.4: delegate to the nested task → turn →
+        // sampling topology. The session carries the input queue and
+        // the goal runtime; the latter is consulted by
+        // [`turn::run_turn_stop_hooks`] to drive the codex-parity
+        // continuation logic. See `agent_loop/turn.rs`'s module-level
+        // docs for the topology diagram.
         task::run_task(
             self,
             provider,
@@ -542,7 +577,7 @@ impl AgentLoop {
             tools,
             event_tx,
             cancellation_token,
-            input_queue,
+            session,
         )
         .await
     }

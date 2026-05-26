@@ -286,6 +286,13 @@ async fn run_sampling_request_streaming(
         // before — the pump's per-event drain stays no-op for
         // sampling callers that don't plumb a queue through.
         None,
+        // Layer E.4: forward the event channel through to the pump
+        // so per-`OutputItemDone` block emits the same
+        // `TextDelta` / `ThinkingDelta` / `ToolStart` /
+        // `ToolInputSnapshot` events the buffered streaming path
+        // already produced. This is the parity gap that kept the
+        // pump opt-in pre-E.4.
+        event_tx,
         state,
     )
     .await;
@@ -338,6 +345,7 @@ async fn run_sampling_request_streaming(
 
     let dispatch_says_break = super::stream_pump::dispatch_streamed_response(
         agent,
+        executor,
         &response,
         tool_results,
         event_tx,

@@ -51,9 +51,11 @@ use aura_reasoner::{
 };
 use futures_util::stream::FuturesOrdered;
 use futures_util::StreamExt;
+use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::events::AgentLoopEvent;
 use crate::session::input_queue::InputQueue;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
 use crate::AgentError;
@@ -104,6 +106,7 @@ pub(super) enum StreamPumpOutcome {
 /// per-event timeout, biased cancellation, and per-tool
 /// concurrency via [`FuturesOrdered`]. See the module-level docs
 /// for the full invariant list.
+#[allow(clippy::too_many_arguments)] // E.4 added event_tx + input_queue; documented per Rule 1.4.
 pub(super) async fn run_stream_pump(
     config: &AgentLoopConfig,
     provider: &dyn ModelProvider,
@@ -111,6 +114,7 @@ pub(super) async fn run_stream_pump(
     request: ModelRequest,
     cancellation_token: Option<&CancellationToken>,
     input_queue: Option<&InputQueue>,
+    event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut super::LoopState,
 ) -> StreamPumpOutcome {
     let model_name = request.model.as_ref().to_string();
@@ -127,6 +131,7 @@ pub(super) async fn run_stream_pump(
         stream,
         cancellation_token,
         input_queue,
+        event_tx,
         state,
         &model_name,
     )
@@ -135,12 +140,24 @@ pub(super) async fn run_stream_pump(
 
 /// Inner driver — separated so the unit tests can hand it a
 /// hand-rolled `ResponseEventStream` without a real `ModelProvider`.
+///
+/// Layer E.4: takes an optional `event_tx` and emits per-`OutputItemDone`
+/// equivalents of the legacy `streaming::emit_stream_event` deltas
+/// (`TextDelta` / `ThinkingDelta` / `ToolStart` / `ToolInputSnapshot`)
+/// so consumers of the streaming sampling pump observe the same
+/// event surface they see on the buffered path. Granularity is at
+/// the block boundary (codex-shape `OutputItemDone` arrives once per
+/// finished block) rather than per-wire-frame — chat UI continuity
+/// for the pump-default flip; sub-block per-token deltas remain on
+/// the legacy buffered path until a follow-up wires a tap stream.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn drive_stream(
     config: &AgentLoopConfig,
     executor: &dyn AgentToolExecutor,
     mut stream: ResponseEventStream,
     cancellation_token: Option<&CancellationToken>,
     input_queue: Option<&InputQueue>,
+    event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut super::LoopState,
     model_name: &str,
 ) -> StreamPumpOutcome {
@@ -148,6 +165,18 @@ pub(super) async fn drive_stream(
     let mut text_chunks: Vec<String> = Vec::new();
     let mut thinking_chunks: Vec<(String, Option<String>)> = Vec::new();
     let mut tool_calls_seen: Vec<ToolCallInfo> = Vec::new();
+    // E.4 tool-result cache: tracks tools that we DID NOT spawn
+    // because the per-run cache had a hit. The result is materialised
+    // synchronously here and merged into the final `tool_results` at
+    // drain time, preserving the FIFO submission order so the codex
+    // drain_in_flight contract still holds across the cache /
+    // spawn split.
+    let mut cached_pairs: Vec<(usize, (ToolCallInfo, ToolCallResult))> = Vec::new();
+    // Counter used to assign a stable submission index per tool —
+    // both spawned and cached arms append into the same logical
+    // FIFO. `tool_calls_seen.len()` after the push is the canonical
+    // index for each new call.
+    let mut spawned_indices: Vec<usize> = Vec::new();
     let mut end_turn: Option<bool> = None;
     let mut usage = Usage::default();
     let stream_event_timeout = config.stream_event_timeout;
@@ -173,8 +202,58 @@ pub(super) async fn drive_stream(
             StreamStep::Event(event) => match event {
                 ResponseEvent::OutputItemDone(OutputItem::ToolUse { id, name, input }) => {
                     let call = ToolCallInfo { id, name, input };
+                    let submission_index = tool_calls_seen.len();
                     tool_calls_seen.push(call.clone());
-                    in_flight.push_back(spawn_tool_with_timeout(executor, call, per_tool_timeout));
+
+                    // Layer E.4: emit per-block ToolStart +
+                    // ToolInputSnapshot so chat UX sees the same
+                    // event sequence as the buffered streaming path
+                    // (codex parity). The input snapshot carries the
+                    // FULL parsed JSON (not partial) because the
+                    // codex-shape stream surface only emits
+                    // `OutputItemDone(ToolUse)` once the block has
+                    // finished accumulating.
+                    emit_event(
+                        event_tx,
+                        AgentLoopEvent::ToolStart {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                        },
+                    );
+                    emit_event(
+                        event_tx,
+                        AgentLoopEvent::ToolInputSnapshot {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            input: call.input.to_string(),
+                        },
+                    );
+
+                    // Layer E.4 tool-result cache: consult the
+                    // per-run cache before spawning the future. On a
+                    // hit, materialise the synthetic
+                    // [`ToolCallResult`] inline so the FIFO drain
+                    // returns it in submission order; the executor is
+                    // NOT invoked (codex parity for read-only tools).
+                    let single = std::slice::from_ref(&call);
+                    let (cached_results, uncached_calls) = super::tool_execution::split_cached(
+                        single,
+                        &state.tool_cache.exact,
+                        &state.tool_cache.fuzzy,
+                    );
+                    if !cached_results.is_empty() {
+                        cached_pairs.push((
+                            submission_index,
+                            (call.clone(), cached_results.into_iter().next().unwrap()),
+                        ));
+                    } else if !uncached_calls.is_empty() {
+                        spawned_indices.push(submission_index);
+                        in_flight.push_back(spawn_tool_with_timeout(
+                            executor,
+                            uncached_calls.into_iter().next().unwrap(),
+                            per_tool_timeout,
+                        ));
+                    }
 
                     // E.3 input-drain granularity: once per
                     // `OutputItemDone(tool_use)`. See module docs.
@@ -191,12 +270,27 @@ pub(super) async fn drive_stream(
                     }
                 }
                 ResponseEvent::OutputItemDone(OutputItem::Message { text }) => {
+                    // Layer E.4: emit a coarse TextDelta carrying the
+                    // whole finished block. Sub-block per-wire-frame
+                    // deltas remain on the legacy buffered path; this
+                    // is the minimum needed for chat UX continuity
+                    // (the assistant text actually surfaces) when
+                    // the pump default flips to `true`.
+                    emit_event(event_tx, AgentLoopEvent::TextDelta(text.clone()));
                     text_chunks.push(text);
                 }
                 ResponseEvent::OutputItemDone(OutputItem::Thinking {
                     thinking,
                     signature,
                 }) => {
+                    // Layer E.4: same coarse-granularity rationale as
+                    // TextDelta above. Emit ThinkingDelta + the
+                    // ThinkingComplete marker so consumers that
+                    // pattern-match on the end-of-thinking event
+                    // (e.g. the chat client's "Thought for Xs" pill)
+                    // still see the close signal.
+                    emit_event(event_tx, AgentLoopEvent::ThinkingDelta(thinking.clone()));
+                    emit_event(event_tx, AgentLoopEvent::ThinkingComplete);
                     thinking_chunks.push((thinking, signature));
                 }
                 ResponseEvent::Completed {
@@ -217,16 +311,63 @@ pub(super) async fn drive_stream(
     // Drain the FIFO in submission order (codex `drain_in_flight`).
     // Honours cancellation: a token fired during drain still aborts
     // before we mutate `state.messages` in the caller.
-    let mut tool_results: Vec<(ToolCallInfo, ToolCallResult)> =
-        Vec::with_capacity(tool_calls_seen.len());
+    //
+    // Spawned tools resolve in submission order via `FuturesOrdered`;
+    // cached results are interleaved using the per-call submission
+    // index captured above so the final `tool_results` vec mirrors
+    // the order the model emitted the corresponding
+    // `OutputItemDone(tool_use)` events.
+    let mut spawned_pairs: Vec<(usize, (ToolCallInfo, ToolCallResult))> = Vec::new();
+    let mut spawn_cursor = 0usize;
     loop {
         let maybe_next = drain_next(&mut in_flight, cancellation_token).await;
         match maybe_next {
             DrainStep::Cancelled => return StreamPumpOutcome::Cancelled,
             DrainStep::Done => break,
-            DrainStep::Result(pair) => tool_results.push(pair),
+            DrainStep::Result(pair) => {
+                let submission_index = spawned_indices
+                    .get(spawn_cursor)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                spawn_cursor = spawn_cursor.saturating_add(1);
+                spawned_pairs.push((submission_index, pair));
+            }
         }
     }
+
+    let mut tool_results: Vec<(ToolCallInfo, ToolCallResult)> =
+        Vec::with_capacity(tool_calls_seen.len());
+    let mut merged: Vec<(usize, (ToolCallInfo, ToolCallResult))> =
+        Vec::with_capacity(cached_pairs.len() + spawned_pairs.len());
+    merged.append(&mut cached_pairs);
+    merged.append(&mut spawned_pairs);
+    merged.sort_by_key(|(idx, _)| *idx);
+    for (_, pair) in merged {
+        tool_results.push(pair);
+    }
+
+    // Layer E.4: refresh the per-run cache with any newly-executed
+    // results. Mirrors the buffered path's
+    // `tool_execution::handle_tool_use` → `update_cache` step so the
+    // pump path participates in the same memoization /
+    // invalidate-on-write contract. The "uncached" set is just the
+    // tools we spawned (cached hits were already accounted for at
+    // submission time).
+    let spawned_calls: Vec<ToolCallInfo> = spawned_indices
+        .iter()
+        .filter_map(|i| tool_calls_seen.get(*i).cloned())
+        .collect();
+    let spawned_results: Vec<ToolCallResult> = tool_results
+        .iter()
+        .filter(|(c, _)| spawned_calls.iter().any(|sc| sc.id == c.id))
+        .map(|(_, r)| r.clone())
+        .collect();
+    super::tool_execution::update_cache(
+        &mut state.tool_cache.exact,
+        &mut state.tool_cache.fuzzy,
+        &spawned_calls,
+        &spawned_results,
+    );
 
     let response = synthesize_response(
         &text_chunks,
@@ -394,6 +535,7 @@ fn synthesize_response(
 /// pump-vs-buffered split.
 pub(super) async fn dispatch_streamed_response(
     agent: &super::AgentLoop,
+    executor: &dyn AgentToolExecutor,
     response: &ModelResponse,
     tool_results: Vec<(ToolCallInfo, ToolCallResult)>,
     event_tx: Option<&tokio::sync::mpsc::Sender<crate::events::AgentLoopEvent>>,
@@ -405,32 +547,27 @@ pub(super) async fn dispatch_streamed_response(
             !super::iteration::handle_max_tokens(&agent.config, response, state)
         }
         aura_reasoner::StopReason::ToolUse => {
-            handle_streamed_tool_use(tool_results, event_tx, state)
+            handle_streamed_tool_use(&agent.config, executor, tool_results, event_tx, state).await
         }
     }
 }
 
 /// Streaming-pump analog of `tool_execution::handle_tool_use` that
 /// consumes pre-executed [`ToolCallResult`]s instead of re-invoking
-/// the executor. Emits per-result events, appends the
-/// `tool_result`-bearing user message, and computes whether any
-/// result requested loop termination.
+/// the executor. Emits per-result events, runs the auto-build
+/// post-write side-step, and appends the `tool_result`-bearing user
+/// message. Returns `true` when the sampling loop should break (the
+/// buffered path's contract).
 ///
-/// Returns `true` when the sampling loop should break (the buffered
-/// path's contract).
-///
-/// # Caveats vs the buffered path
-///
-/// - Tool-result caching (`tool_execution::handle_tool_use` →
-///   `split_cached` / `update_cache`) is currently NOT applied to
-///   pump-executed results. Repeating the same read-only call within
-///   a session will re-run the tool. Tracked for the E.3 follow-up
-///   that wires a cache adapter into the pump.
-/// - Auto-build (`tool_pipeline::run_auto_build`) is similarly
-///   skipped — the pump prefers to defer auto-build to the next
-///   sampling boundary so the streaming loop stays focused on
-///   stream-level overlap. Same E.3 follow-up.
-fn handle_streamed_tool_use(
+/// Layer E.4: tool-result caching now happens inside the pump's
+/// [`drive_stream`] (per-`OutputItemDone` lookup against
+/// `state.tool_cache`) and auto-build runs here on each successful
+/// write, mirroring the buffered path's
+/// `tool_pipeline::process_tool_results` behaviour. This closes the
+/// parity gap that kept the pump opt-in pre-E.4.
+async fn handle_streamed_tool_use(
+    config: &AgentLoopConfig,
+    executor: &dyn AgentToolExecutor,
     tool_results: Vec<(ToolCallInfo, ToolCallResult)>,
     event_tx: Option<&tokio::sync::mpsc::Sender<crate::events::AgentLoopEvent>>,
     state: &mut super::LoopState,
@@ -448,7 +585,7 @@ fn handle_streamed_tool_use(
     // Latch the `had_any_file_write` bit using the existing detection
     // logic, so the dev-loop continuation runtime keeps seeing
     // forward motion through the pump path.
-    super::tool_pipeline::track_tool_effects_public(
+    let any_write_success = super::tool_pipeline::track_tool_effects_public(
         &tool_calls,
         &results,
         &mut state.result,
@@ -458,6 +595,27 @@ fn handle_streamed_tool_use(
     );
     if state.had_any_write {
         state.had_any_file_write = true;
+    }
+
+    // Layer E.4: auto-build after a successful write through the
+    // pump. Mirrors the buffered path's
+    // `tool_pipeline::process_tool_results` step so the dev-loop's
+    // build feedback loop fires on the pump path too. The build
+    // output is appended to the trailing tool_result-bearing user
+    // message via `push_tool_result_message_with_context`, the same
+    // adapter the buffered path uses.
+    let mut side_messages: Vec<String> = Vec::new();
+    if any_write_success && state.build_cooldown == 0 {
+        if let Some(build_text) = super::tool_pipeline::run_auto_build_public(
+            config,
+            executor,
+            &mut state.build_cooldown,
+            state.build_baseline.as_ref(),
+        )
+        .await
+        {
+            side_messages.push(build_text);
+        }
     }
 
     for (call, result) in tool_calls.iter().zip(results.iter()) {
@@ -495,7 +653,7 @@ fn handle_streamed_tool_use(
     super::tool_execution::push_tool_result_message_with_context(
         &mut state.messages,
         results,
-        Vec::new(),
+        side_messages,
     );
     should_stop
 }
@@ -579,6 +737,7 @@ mod tests {
             stream,
             None,
             None,
+            None,
             &mut state,
             "test-model",
         )
@@ -609,6 +768,7 @@ mod tests {
             &executor,
             stream,
             Some(&cancel),
+            None,
             None,
             &mut state,
             "test-model",
@@ -651,6 +811,7 @@ mod tests {
             stream,
             None,
             Some(&queue),
+            None,
             &mut state,
             "test-model",
         )
@@ -684,6 +845,7 @@ mod tests {
             &config,
             &executor,
             stream,
+            None,
             None,
             None,
             &mut state,
@@ -738,6 +900,7 @@ mod tests {
                 &config,
                 &executor,
                 stream,
+                None,
                 None,
                 None,
                 &mut state,
@@ -829,6 +992,7 @@ mod tests {
                 stream,
                 None,
                 None,
+                None,
                 &mut state,
                 "test-model",
             )
@@ -859,6 +1023,277 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // E.4 mandatory pump tests
+    // -----------------------------------------------------------------
+
+    /// `pump_emits_per_delta_events` (E.4 mandatory): with an
+    /// `event_tx` plumbed in, the pump emits at minimum a `TextDelta`
+    /// for a finished `OutputItem::Message`, a `ThinkingDelta` +
+    /// `ThinkingComplete` for `OutputItem::Thinking`, and a
+    /// `ToolStart` + `ToolInputSnapshot` pair for an
+    /// `OutputItem::ToolUse`. This is the gate that lets the
+    /// `use_stream_pump` default flip without regressing the
+    /// chat-stream UX (see audit note).
+    #[tokio::test(start_paused = true)]
+    async fn pump_emits_per_delta_events() {
+        let executor = CountingExecutor::default();
+        let config = AgentLoopConfig::default();
+        let events = vec![
+            ResponseEvent::OutputItemDone(OutputItem::Thinking {
+                thinking: "thought".into(),
+                signature: None,
+            }),
+            ResponseEvent::OutputItemDone(OutputItem::Message {
+                text: "hello".into(),
+            }),
+            mk_call("toolu_a", "read_file"),
+            ResponseEvent::Completed {
+                end_turn: Some(true),
+                usage: Usage::new(1, 1),
+            },
+        ];
+        let stream = mk_stream(events);
+        let mut state = super::super::LoopState::new(&config, Vec::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        let outcome = drive_stream(
+            &config,
+            &executor,
+            stream,
+            None,
+            None,
+            Some(&tx),
+            &mut state,
+            "test-model",
+        )
+        .await;
+        assert!(matches!(outcome, StreamPumpOutcome::Completed { .. }));
+        drop(tx);
+
+        let mut events: Vec<AgentLoopEvent> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentLoopEvent::TextDelta(t) if t == "hello")),
+            "pump must emit TextDelta for Message blocks: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentLoopEvent::ThinkingDelta(t) if t == "thought")),
+            "pump must emit ThinkingDelta for Thinking blocks: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentLoopEvent::ThinkingComplete)),
+            "pump must emit ThinkingComplete after a Thinking block: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentLoopEvent::ToolStart { id, name } if id == "toolu_a" && name == "read_file"
+            )),
+            "pump must emit ToolStart for OutputItemDone(ToolUse): {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentLoopEvent::ToolInputSnapshot { id, name, .. }
+                    if id == "toolu_a" && name == "read_file"
+            )),
+            "pump must emit ToolInputSnapshot for OutputItemDone(ToolUse): {events:?}"
+        );
+    }
+
+    /// `pump_cache_hit_short_circuits_tool_spawn` (E.4 mandatory):
+    /// when `state.tool_cache.exact` already has a hit for a cacheable
+    /// tool's input, the pump must serve the cached result inline
+    /// *without* invoking the executor for that call. The other
+    /// (uncached) call in the same model response is still spawned.
+    #[tokio::test(start_paused = true)]
+    async fn pump_cache_hit_short_circuits_tool_spawn() {
+        let executor = CountingExecutor::default();
+        let config = AgentLoopConfig::default();
+        let cached_input = serde_json::json!({});
+        let cache_key = crate::constants::tool_result_cache_key("read_file", &cached_input);
+        let mut state = super::super::LoopState::new(&config, Vec::new());
+        state
+            .tool_cache
+            .exact
+            .insert(cache_key, "cached-payload".to_string());
+
+        let events = vec![
+            mk_call("toolu_cached", "read_file"),
+            mk_call("toolu_fresh", "run_command"),
+            ResponseEvent::Completed {
+                end_turn: Some(false),
+                usage: Usage::new(1, 1),
+            },
+        ];
+        let stream = mk_stream(events);
+
+        let outcome = drive_stream(
+            &config,
+            &executor,
+            stream,
+            None,
+            None,
+            None,
+            &mut state,
+            "test-model",
+        )
+        .await;
+        match outcome {
+            StreamPumpOutcome::Completed { tool_results, .. } => {
+                let ids: Vec<_> = tool_results.iter().map(|(c, _)| c.id.clone()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["toolu_cached", "toolu_fresh"],
+                    "cached + spawned results must preserve FIFO submission order"
+                );
+                let cached_result = &tool_results[0].1;
+                assert!(
+                    !cached_result.is_error,
+                    "cached hit must surface as a non-error"
+                );
+                assert_eq!(
+                    cached_result.content, "cached-payload",
+                    "cached hit must return the memoised payload verbatim"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        let invocations = executor.invocations.lock().await;
+        let invoked_ids: Vec<_> = invocations.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(
+            invoked_ids,
+            vec!["toolu_fresh".to_string()],
+            "executor must be invoked ONLY for the uncached tool; cache hits short-circuit spawn"
+        );
+    }
+
+    /// `pump_triggers_auto_build_on_write` (E.4 mandatory): a
+    /// successful `write_file` flowing through the pump fires
+    /// `tool_pipeline::run_auto_build_public`, mirroring the buffered
+    /// path's `process_tool_results` step. The failing-build text is
+    /// appended to the trailing tool_result-bearing user message via
+    /// `push_tool_result_message_with_context`, so the existence of
+    /// that side message in `state.messages` is the observable proof.
+    #[tokio::test(start_paused = true)]
+    async fn pump_triggers_auto_build_on_write() {
+        #[derive(Default)]
+        struct BuildSpyExecutor {
+            build_calls: tokio::sync::Mutex<u32>,
+        }
+        #[async_trait]
+        impl AgentToolExecutor for BuildSpyExecutor {
+            async fn execute(&self, tool_calls: &[ToolCallInfo]) -> Vec<ToolCallResult> {
+                tool_calls
+                    .iter()
+                    .map(|tc| ToolCallResult {
+                        tool_use_id: tc.id.clone(),
+                        content: "wrote".to_string(),
+                        is_error: false,
+                        kind: aura_core::ToolResultKind::Ok,
+                        stop_loop: false,
+                        file_changes: vec![crate::types::FileChange {
+                            path: "src/foo.rs".into(),
+                            kind: crate::types::FileChangeKind::Modify,
+                            lines_added: 3,
+                            lines_removed: 0,
+                        }],
+                    })
+                    .collect()
+            }
+            async fn auto_build_check(&self) -> Option<crate::types::AutoBuildResult> {
+                *self.build_calls.lock().await += 1;
+                Some(crate::types::AutoBuildResult {
+                    success: false,
+                    output: "compile error: missing semicolon".into(),
+                    error_count: 1,
+                })
+            }
+        }
+
+        let executor = BuildSpyExecutor::default();
+        let config = AgentLoopConfig {
+            auto_build_cooldown: 0,
+            ..AgentLoopConfig::default()
+        };
+        let response = ModelResponse::new(
+            StopReason::ToolUse,
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::tool_use(
+                    "toolu_w",
+                    "write_file",
+                    serde_json::json!({"path": "src/foo.rs", "content": "fn a(){}"}),
+                )],
+            ),
+            Usage::new(1, 1),
+            ProviderTrace::new("test", 0),
+        );
+        let tool_call = ToolCallInfo {
+            id: "toolu_w".to_string(),
+            name: "write_file".to_string(),
+            input: serde_json::json!({"path": "src/foo.rs", "content": "fn a(){}"}),
+        };
+        let tool_result = ToolCallResult {
+            tool_use_id: "toolu_w".to_string(),
+            content: "wrote".to_string(),
+            is_error: false,
+            kind: aura_core::ToolResultKind::Ok,
+            stop_loop: false,
+            file_changes: vec![crate::types::FileChange {
+                path: "src/foo.rs".into(),
+                kind: crate::types::FileChangeKind::Modify,
+                lines_added: 3,
+                lines_removed: 0,
+            }],
+        };
+        let mut state = super::super::LoopState::new(&config, Vec::new());
+        let agent = super::super::AgentLoop::new(config.clone());
+
+        // Drive only the post-stream dispatch path — the pre-stream
+        // pump already has its own coverage, and the auto-build
+        // wiring lives in `handle_streamed_tool_use`.
+        let _should_break = dispatch_streamed_response(
+            &agent,
+            &executor,
+            &response,
+            vec![(tool_call, tool_result)],
+            None,
+            &mut state,
+        )
+        .await;
+
+        let calls = *executor.build_calls.lock().await;
+        assert_eq!(
+            calls, 1,
+            "successful write must trigger auto_build_check exactly once on the pump path"
+        );
+        let saw_build_warning = state.messages.iter().any(|m| {
+            m.content.iter().any(|b| match b {
+                ContentBlock::Text { text } => text.contains("Build check failed"),
+                ContentBlock::ToolResult {
+                    content: aura_reasoner::ToolResultContent::Text(t),
+                    ..
+                } => t.contains("Build check failed"),
+                _ => false,
+            })
+        });
+        assert!(
+            saw_build_warning,
+            "failing auto-build output must surface in the tool_result-bearing message"
+        );
     }
 
     // `Debug` impls for the outcome enum so tests can format failures

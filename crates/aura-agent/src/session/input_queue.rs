@@ -198,6 +198,14 @@ impl InputQueue {
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
     }
+
+    /// The session this queue belongs to. Used by
+    /// [`crate::session::Session::from_handle`] (Layer E.4) so a
+    /// session built from an [`AgentRunnerHandle`] inherits the
+    /// handle's session id verbatim.
+    pub(crate) fn session_id(&self) -> SessionId {
+        self.session_id
+    }
 }
 
 /// Public handle for queueing mid-task user input from outside the
@@ -231,6 +239,17 @@ impl AgentRunnerHandle {
         Self {
             queue: InputQueue::new(session_id, cancellation),
         }
+    }
+
+    /// Construct a handle that shares an existing [`InputQueue`].
+    ///
+    /// Used by [`crate::session::Session::handle`] (Layer E.4) so a
+    /// single session can hand out an arbitrary number of handles
+    /// pointed at the same backing queue without re-creating the
+    /// [`InputQueue`] / cancellation token from scratch.
+    #[must_use]
+    pub(crate) fn from_queue(queue: Arc<InputQueue>) -> Self {
+        Self { queue }
     }
 
     /// Push a user input onto the running session's queue.

@@ -48,13 +48,14 @@ use tracing::instrument;
 
 use crate::console;
 use crate::events::AgentLoopEvent;
+use crate::session::goal_runtime::{GoalRuntimeEvent, TaskRestart};
 use crate::session::input_queue::InputQueue;
-use crate::session::UserInput;
+use crate::session::{Session, UserInput};
 use crate::types::AgentToolExecutor;
 use crate::{helpers, AgentError};
 
 use super::sampling::{run_sampling_request, SamplingRequestResult};
-use super::{context, continuation, streaming, AgentLoop, LoopState, TaskId};
+use super::{context, streaming, AgentLoop, LoopState, TaskId};
 
 /// Result of a single turn.
 ///
@@ -140,6 +141,7 @@ pub(crate) async fn run_turn(
     turn_index: u32,
     iteration_offset: u32,
     input_queue: Option<&InputQueue>,
+    session: &Session,
 ) -> Result<TurnOutcome, AgentError> {
     let mut sampling_count: u32 = 0;
     let mut terminated_cleanly = false;
@@ -209,7 +211,8 @@ pub(crate) async fn run_turn(
         // semantics from pre-E1 `post_iteration_checks`).
         if sampling_result.needs_follow_up {
             let stop_outcome =
-                run_turn_stop_hooks(&agent.config, event_tx, state, iteration).await?;
+                run_turn_stop_hooks(&agent.config, event_tx, state, iteration, task_id, session)
+                    .await?;
             if stop_outcome.should_break {
                 broke_for_error = true;
                 break;
@@ -314,31 +317,50 @@ pub(super) fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs:
 
 /// Run the post-sampling stop hooks for a single turn iteration.
 ///
-/// Successor to the pre-E.1 `post_iteration_checks` free function in
-/// [`super`]. Owns three responsibilities, preserved from Phase 1.B:
+/// E.4 rehomed the continuation decision into the session-scoped
+/// [`crate::session::goal_runtime::GoalRuntime`]; this function is
+/// the agent-loop seam that observes the turn boundary and delegates
+/// to the runtime. Responsibilities:
 ///
 /// 1. Emit the first-write checkpoint warning at most once per run.
-/// 2. Invoke the Phase 1.B continuation runtime
-///    ([`continuation::ContinuationState::on_iteration_end`]) and
-///    inject the rendered nudge / blocked envelope when the streak
-///    increments without a write. After `max_continuation_turns`
-///    injections without progress, fail the task with
-///    `task_blocked` (sets `should_break = true`).
+/// 2. Hand the turn outcome (`had_write`, read paths) to
+///    [`crate::session::goal_runtime::GoalRuntime::handle_event`] and
+///    act on the returned [`TaskRestart`]:
+///    - [`TaskRestart::Continuation`] → route the carried
+///      [`UserInput::Steer`] through
+///      [`crate::session::InputQueue::push`] so the steering message
+///      flows through the same boundary as user-typed input (rather
+///      than the legacy `helpers::append_warning` direct mutation).
+///    - [`TaskRestart::Blocked`] → mark the task `stalled = true` +
+///      `llm_error = "task_blocked: …"` (Phase 1.B wire-up
+///      preserved) and ask the turn loop to break.
 /// 3. Emit budget warnings and trip the credit-budget stop.
 ///
-/// E.4 will rehome the continuation decision into `GoalRuntime`; this
-/// function is the temporary host for the logic until then.
+/// The session is always present in E.4 because [`crate::AgentLoop::run_with_session`]
+/// constructs one even when the caller passes no [`crate::AgentRunnerHandle`].
 pub(crate) async fn run_turn_stop_hooks(
     config: &super::AgentLoopConfig,
     event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
     iteration: usize,
+    task_id: TaskId,
+    session: &Session,
 ) -> Result<StopHookOutcome, AgentError> {
     let mut outcome = StopHookOutcome::default();
 
     context::emit_checkpoint_if_needed(event_tx, state);
 
-    if maybe_inject_continuation(config, event_tx, state, iteration, &mut outcome) {
+    if delegate_continuation_to_goal_runtime(
+        config,
+        event_tx,
+        state,
+        iteration,
+        task_id,
+        session,
+        &mut outcome,
+    )
+    .await?
+    {
         outcome.should_break = true;
         return Ok(outcome);
     }
@@ -352,71 +374,141 @@ pub(crate) async fn run_turn_stop_hooks(
     Ok(outcome)
 }
 
-/// Phase 1.B continuation injection, lifted verbatim from the pre-E.1
-/// `agent_loop::maybe_inject_continuation` free function.
+/// Route the post-sampling continuation decision through the
+/// session-scoped [`crate::session::goal_runtime::GoalRuntime`].
 ///
-/// Returns `true` when the loop must terminate (task_blocked path).
-/// On a successful injection, sets
+/// Returns `true` when the loop must terminate (the `task_blocked`
+/// escalation path). On a successful injection the function flips
 /// [`StopHookOutcome::injected_continuation`] and returns `false` so
 /// the turn loop continues for at least one more sampling request.
-fn maybe_inject_continuation(
+///
+/// On every call the shadow [`crate::agent_loop::LoopState::continuation`]
+/// field is synchronised from
+/// [`crate::session::goal_runtime::GoalRuntime::snapshot`] so the
+/// dev-loop reasoning-effort policy
+/// ([`super::LoopState::compute_thinking_effort`]) keeps reading
+/// authoritative streak data without re-plumbing.
+#[allow(clippy::too_many_arguments)]
+async fn delegate_continuation_to_goal_runtime(
     config: &super::AgentLoopConfig,
     event_tx: Option<&Sender<AgentLoopEvent>>,
     state: &mut LoopState,
     iteration: usize,
+    task_id: TaskId,
+    session: &Session,
     outcome: &mut StopHookOutcome,
-) -> bool {
+) -> Result<bool, AgentError> {
     if !config.dev_loop_completion_required {
-        return false;
+        return Ok(false);
     }
     // A clean `task_done` already terminates the loop in the sampling
     // request's `dispatch_stop_reason` path; the continuation runtime
     // only fires on iterations that the loop intends to continue.
     if state.task_done_completed {
-        return false;
+        return Ok(false);
     }
-    // Placeholder until the iteration_read_paths plumbing lands;
-    // ContinuationState's nudge/blocked decision is on the diff alone,
-    // so the empty set keeps the streak counter correct. The
-    // blocker_signature follow-up will replace this with the real
-    // set of read paths from this iteration.
+
+    let had_write = !state.turn_diff.is_empty();
+    // Placeholder until the iteration_read_paths plumbing lands; the
+    // GoalRuntime's blocker_signature audit is the eventual consumer
+    // and accepts an empty set as a no-op for E.4. The
+    // continuation kind (Nudge / Blocked) is computed from the
+    // streak alone, so the empty set keeps the decision correct.
     let read_paths = std::collections::HashSet::new();
-    let Some(kind) = state
-        .continuation
-        .on_iteration_end(&state.turn_diff, read_paths)
-    else {
-        return false;
+
+    let restart = session
+        .goal_runtime
+        .handle_event(GoalRuntimeEvent::TurnCompleted {
+            task_id,
+            had_write,
+            read_paths,
+        })
+        .await?;
+
+    // Always sync the shadow streak after the decision so the
+    // reasoning-effort policy reads authoritative data on the next
+    // `build_request`.
+    let snapshot = session.goal_runtime.snapshot().await;
+    state.continuation.consecutive_no_write = snapshot.consecutive_no_write;
+    state.total_continuation_turns = snapshot.total_continuation_turns;
+
+    let Some(restart) = restart else {
+        return Ok(false);
     };
 
-    if state.total_continuation_turns >= config.max_continuation_turns {
-        // task_blocked: there is no dedicated `AgentLoopResult` variant
-        // for "blocked-after-N-continuations" today, so we co-opt the
-        // existing failure shape — `stalled = true` + an `llm_error`
-        // string with the canonical `task_blocked:` prefix so the
-        // harness / dashboards can grep for it. Follow-up should
-        // introduce a dedicated bool / enum variant.
-        let reason = format!(
-            "task_blocked: max_continuation_turns ({}) exceeded without a write at iteration {}",
-            config.max_continuation_turns, iteration
-        );
-        tracing::warn!(
-            iteration,
-            consecutive_no_write = state.continuation.consecutive_no_write,
-            total_continuation_turns = state.total_continuation_turns,
-            "{reason}"
-        );
-        state.result.stalled = true;
-        if state.result.llm_error.is_none() {
-            state.result.llm_error = Some(reason.clone());
+    match restart {
+        TaskRestart::Continuation { input, streak, .. } => {
+            // Render the body for emission alongside the queue push
+            // so legacy operators that grep on the warning text
+            // continue to see the same envelope they did pre-E.4.
+            let body = match &input {
+                UserInput::Steer { instruction } => instruction.clone(),
+                UserInput::Message(text) => text.clone(),
+                UserInput::Cancel => String::new(),
+            };
+            // Push through the session-scoped input queue (codex
+            // parity: continuation prompts flow through the same
+            // boundary as user-typed input). The drain at the top
+            // of the next turn iteration will splice the queued
+            // input into `state.messages` via the existing
+            // `apply_user_inputs_to_messages` adapter so the
+            // `<harness_steer>` envelope wraps the rendered body.
+            //
+            // E.4 also keeps the agent-loop `event_tx` warning so
+            // downstream consumers that grep on the rendered body
+            // (dashboards, eval scrapers) keep seeing the same
+            // signal they did pre-E.4.
+            session.input_queue.push(input).await?;
+            if !body.is_empty() {
+                streaming::emit(event_tx, AgentLoopEvent::Warning(body));
+            }
+            tracing::debug!(
+                session_id = %session.id,
+                task_id = %task_id,
+                iteration,
+                streak,
+                "goal_runtime injected continuation via input_queue"
+            );
+            outcome.injected_continuation = true;
+            Ok(false)
         }
-        streaming::emit(event_tx, AgentLoopEvent::Warning(reason));
-        return true;
+        TaskRestart::Blocked {
+            task_id: blocked_task,
+            session_id: blocked_session,
+            streak,
+        } => {
+            let reason = format!(
+                "task_blocked: max_continuation_turns ({}) exceeded without a write at iteration {}",
+                config.max_continuation_turns, iteration
+            );
+            tracing::warn!(
+                session_id = %blocked_session,
+                task_id = %blocked_task,
+                iteration,
+                consecutive_no_write = streak,
+                total_continuation_turns = state.total_continuation_turns,
+                "{reason}"
+            );
+            state.result.stalled = true;
+            if state.result.llm_error.is_none() {
+                state.result.llm_error = Some(reason.clone());
+            }
+            streaming::emit(event_tx, AgentLoopEvent::Warning(reason));
+            // Best-effort informational re-emission so consumers
+            // listening on the goal-runtime event stream see the
+            // escalation in the same order as the warning.
+            if let Err(err) = session
+                .goal_runtime
+                .handle_event(GoalRuntimeEvent::TaskBlocked {
+                    task_id: blocked_task,
+                    session_id: blocked_session,
+                    streak,
+                })
+                .await
+            {
+                tracing::warn!(error = %err, "goal_runtime::TaskBlocked replay failed; ignoring");
+            }
+            Ok(true)
+        }
     }
-
-    let body = continuation::render(kind, iteration, state.continuation.consecutive_no_write);
-    helpers::append_warning(&mut state.messages, &body);
-    streaming::emit(event_tx, AgentLoopEvent::Warning(body));
-    state.total_continuation_turns = state.total_continuation_turns.saturating_add(1);
-    outcome.injected_continuation = true;
-    false
 }

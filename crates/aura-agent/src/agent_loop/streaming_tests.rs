@@ -135,6 +135,12 @@ impl ModelProvider for SuccessStreamProvider {
 fn default_config() -> AgentLoopConfig {
     AgentLoopConfig {
         system_prompt: "streaming test agent".to_string(),
+        // These tests exercise the legacy buffered-streaming path's
+        // `retry_streaming_for_partial_tool_use` / `StreamReset` flow,
+        // which has not yet been ported onto the pump's
+        // `ResponseEventStream` (deferred per Phase E.4 plan note).
+        // Pin them to the legacy path until the pump-side port lands.
+        use_stream_pump: false,
         ..AgentLoopConfig::default()
     }
 }
