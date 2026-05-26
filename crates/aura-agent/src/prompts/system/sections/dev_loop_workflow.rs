@@ -24,9 +24,9 @@
 #[must_use]
 pub(crate) fn render(build_cmd: &str, test_cmd: &str) -> String {
     let body = format!(
-        r#"Task execution: you are a coding agent. Keep going until the task is completely resolved before ending your turn. Do not guess or fabricate. Do not yield mid-task — only stop once you have produced a passing change or called task_done with `no_changes_needed: true` and a `notes` explanation.
+        r#"Task execution: you are a coding agent. Keep going until the task is completely resolved before ending your turn. Do not guess or fabricate. Do not yield mid-task — end your turn once you have committed a passing change or confirmed the existing code already satisfies the task.
 
-Edit code with write_file / edit_file / delete_file. Finish with task_done.
+Edit code with write_file / edit_file / delete_file. Call task_done for structured notes, follow-ups, or test-suite verification; a clean EndTurn after completing work is also valid.
 
 - write_file: create or overwrite a file. Rejects content > 32000 bytes per call; for larger files seed with write_file and append with edit_file.
 - edit_file: replace an exact substring in an existing file. Read the file first to get the exact bytes.
@@ -42,7 +42,7 @@ Bias to act: prefer one best-effort edit and compiler feedback over more explora
 
 Invariants:
 - Read a file before editing it.
-- task_done only when `{build_cmd}` and `{test_cmd}` are both green; the harness re-runs `{test_cmd}` as a hard gate. If no changes are needed, call task_done with `no_changes_needed: true`."#,
+- When calling task_done: run `{build_cmd}` and `{test_cmd}` first; the harness re-runs `{test_cmd}` as a hard gate. If no changes are needed, call task_done with `no_changes_needed: true`."#,
     );
     format!("<dev_loop_workflow>\n{body}\n</dev_loop_workflow>")
 }

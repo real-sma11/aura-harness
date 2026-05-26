@@ -29,7 +29,7 @@ fn agentic_prompt_includes_definition_of_done_hard_gate() {
         "task_done hard-gate language missing: {prompt}"
     );
     assert!(
-        prompt.contains("task_done only when"),
+        prompt.contains("When calling task_done:"),
         "task_done deferral instruction missing: {prompt}"
     );
     assert!(
@@ -82,7 +82,7 @@ fn agentic_prompt_leads_with_action_oriented_move_set() {
 
     assert!(
         prompt.contains(
-            "Edit code with write_file / edit_file / delete_file. Finish with task_done."
+            "Edit code with write_file / edit_file / delete_file. Call task_done for structured notes"
         ),
         "action-oriented lead line missing: {prompt}"
     );
