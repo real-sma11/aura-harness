@@ -55,6 +55,10 @@ pub(super) fn render(kind: &SteeringKind) -> String {
             max_attempts,
         } => task_done_test_gate_io_failure(cmd, error, *attempt, *max_attempts),
         SteeringKind::StubDetected { reports } => stub_detected(reports),
+        SteeringKind::RepeatedRead { content_hash } => repeated_read(content_hash),
+        SteeringKind::TaskAlreadySatisfiedHint { test_command } => {
+            task_already_satisfied_hint(test_command)
+        }
     }
 }
 
@@ -123,4 +127,37 @@ fn task_done_test_gate_io_failure(
 
 fn stub_detected(reports: &[StubReport]) -> String {
     build_stub_fix_prompt(reports)
+}
+
+/// Number of leading hex chars from a `content_hash` we surface in the
+/// repeated-read nudge. Short enough to keep the message readable, long
+/// enough to be unique inside one turn (the read tool stamps a 16-hex
+/// `u64` digest).
+const REPEATED_READ_HASH_DISPLAY_CHARS: usize = 8;
+
+fn repeated_read(content_hash: &str) -> String {
+    let short: String = content_hash
+        .chars()
+        .take(REPEATED_READ_HASH_DISPLAY_CHARS)
+        .collect();
+    format!(
+        "You've already read these exact bytes (content_hash={short}) 3 times this turn. \
+         Use `start_line`/`end_line` to narrow the request, or move on — the file hasn't \
+         changed."
+    )
+}
+
+fn task_already_satisfied_hint(test_command: &str) -> String {
+    format!(
+        "task_already_satisfied {{\n  \
+         test_command: \"{test_command}\",\n  \
+         note: \"The harness has not run this command — it is hinting before any edits land. \
+         If you have not yet verified the declared test gate, run `{test_command}` (or let \
+         the `task_done` Definition-of-Done gate run it on completion) and inspect the \
+         result before editing implementation files.\",\n  \
+         hint: \"If the gate already passes, the task may already be satisfied. Consider \
+         whether you should switch to test-augmentation mode and add coverage before changing \
+         implementation.\"\n\
+         }}"
+    )
 }

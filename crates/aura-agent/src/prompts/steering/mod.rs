@@ -37,10 +37,14 @@
 //! data each kind needs. The wording is preserved verbatim from the
 //! pre-PR-D inline `format!` blocks; PR D only adds the envelope.
 
+mod early_oracle;
 mod injector;
 mod messages;
+mod repeated_read;
 
 #[cfg(test)]
 mod tests;
 
+pub use early_oracle::EarlyTestOracle;
 pub use injector::{SteeringInjector, SteeringKind};
+pub use repeated_read::{RepeatedReadTracker, REPEATED_READ_THRESHOLD};

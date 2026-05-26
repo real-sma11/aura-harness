@@ -72,6 +72,37 @@ pub enum SteeringKind {
     /// implementations and is asking the agent to fill them in
     /// before re-calling `task_done`.
     StubDetected { reports: Vec<StubReport> },
+    /// Phase 3b: a single read-only tool result `content_hash` has
+    /// been observed three or more times in one model turn. The
+    /// nudge fires on the *next* turn (so it lands in the prompt
+    /// prefix the model actually reads) and at most once per
+    /// `(turn, content_hash)` pair. Wording lives in
+    /// [`super::messages::repeated_read`].
+    RepeatedRead {
+        /// The `content_hash` value the read tool stamped on its
+        /// metadata (see `aura_tools::fs_tools::read::content_hash_hex`).
+        /// The renderer truncates this to a short prefix when
+        /// embedding it in the prose so the message stays readable.
+        content_hash: String,
+    },
+    /// Phase 3a (minimum-viable): the executor observed the first
+    /// read-only batch close on a task that declared a `test_command`,
+    /// and is steering the model to verify whether the gate already
+    /// passes before editing implementation files. Wording lives in
+    /// [`super::messages::task_already_satisfied_hint`].
+    ///
+    /// The full oracle (run the test command, surface the actual
+    /// `task_already_satisfied { summary }` message on a passing
+    /// exit code) is the documented follow-up; this variant is the
+    /// hint-only stand-in described in
+    /// [`super::early_oracle`].
+    TaskAlreadySatisfiedHint {
+        /// The project's declared test command, copied verbatim into
+        /// the rendered prose so the model sees the exact string it
+        /// should invoke (or let the existing `task_done` DoD gate
+        /// invoke).
+        test_command: String,
+    },
 }
 
 impl SteeringKind {
@@ -87,6 +118,8 @@ impl SteeringKind {
             | Self::TaskDoneTestGateExhausted { .. }
             | Self::TaskDoneTestGateIoFailure { .. } => "task_done_rejected",
             Self::StubDetected { .. } => "stub_detected",
+            Self::RepeatedRead { .. } => "repeated_read",
+            Self::TaskAlreadySatisfiedHint { .. } => "task_already_satisfied",
         }
     }
 }

@@ -80,6 +80,25 @@ struct TaskRunConfig {
     /// share a single parser + render pathway. Stays empty
     /// (`is_empty == true`) until the aura-os populator lands.
     agent_identity: super::dev_loop::AgentIdentityEnvelope,
+    /// Phase 3a (reread-efficiency plan): opt-in switch for the early
+    /// "is the test gate already green?" oracle. The state machine
+    /// + steering kind live in
+    /// `aura_agent::prompts::steering::EarlyTestOracle`; the field
+    /// here lets the dispatch JSON flip the oracle on/off per task.
+    ///
+    /// Defaults to `true` for `TaskRun` automatons because every
+    /// dev-loop task declares a `test_command`, and the hint is cheap
+    /// when the gate does not pass. Operators / dispatch authors can
+    /// set `"early_test_oracle": false` to disable it for a specific
+    /// task (e.g. ad-hoc chat-shaped runs that should not surface the
+    /// hint).
+    ///
+    /// Plumbing the field into the live agent loop is the documented
+    /// follow-up; today the field is parsed and stored so the
+    /// downstream patch can flip the executor on without re-touching
+    /// every dispatch site.
+    #[allow(dead_code)]
+    early_test_oracle: bool,
 }
 
 impl TaskRunConfig {
@@ -100,11 +119,16 @@ impl TaskRunConfig {
             .unwrap_or("default")
             .to_string();
         let agent_identity = super::dev_loop::AgentIdentityEnvelope::from_json(config);
+        let early_test_oracle = config
+            .get("early_test_oracle")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         Ok(Self {
             project_id,
             task_id,
             agent_instance_id,
             agent_identity,
+            early_test_oracle,
         })
     }
 }
@@ -390,5 +414,32 @@ mod tests {
         let err = TaskRunConfig::from_json(&json!({ "project_id": "proj-1" }))
             .expect_err("missing field");
         assert!(err.to_string().to_lowercase().contains("task_id"));
+    }
+
+    #[test]
+    fn from_json_defaults_early_test_oracle_to_true() {
+        let cfg = TaskRunConfig::from_json(&json!({
+            "project_id": "proj-1",
+            "task_id": "task-1",
+        }))
+        .expect("parse minimal config");
+        assert!(
+            cfg.early_test_oracle,
+            "Phase 3a oracle must default to ON for TaskRun automatons so every dev-loop task gets the hint without dispatch-side changes"
+        );
+    }
+
+    #[test]
+    fn from_json_respects_explicit_early_test_oracle_false() {
+        let cfg = TaskRunConfig::from_json(&json!({
+            "project_id": "proj-1",
+            "task_id": "task-1",
+            "early_test_oracle": false,
+        }))
+        .expect("parse with explicit oracle override");
+        assert!(
+            !cfg.early_test_oracle,
+            "explicit false in dispatch JSON must disable the oracle for this task"
+        );
     }
 }
