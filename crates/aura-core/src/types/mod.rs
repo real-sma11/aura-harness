@@ -27,7 +27,7 @@ pub use record::RecordEntry;
 pub use status::AgentStatus;
 pub use subagent::{
     SubagentBudget, SubagentDispatchRequest, SubagentExit, SubagentKindSpec, SubagentResult,
-    DEFAULT_SUBAGENT_TIMEOUT_MS,
+    DEFAULT_SUBAGENT_TIMEOUT_MS, MAX_TURNS,
 };
 #[allow(deprecated)]
 pub use tool::ToolDecision;

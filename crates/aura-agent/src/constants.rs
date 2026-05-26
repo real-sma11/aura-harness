@@ -41,17 +41,15 @@ pub fn tool_result_cache_key(tool_name: &str, input: &serde_json::Value) -> Stri
 
 /// Maximum tool-use iterations before the loop terminates.
 ///
-/// Defaults to `usize::MAX` (effectively unlimited). Termination is
-/// driven by `EndTurn` from the model, the credit/token budget,
-/// cooperative cancellation, or an explicit caller-supplied
+/// Derived from [`aura_core::MAX_TURNS`] — the single source of truth
+/// for every "max turns / max iterations" knob in the system. See the
+/// constant's doc comment for the full list of consumers. Termination
+/// is still driven by `EndTurn` from the model, the credit/token
+/// budget, cooperative cancellation, or an explicit caller-supplied
 /// `SessionInit.max_turns` override (see
-/// `aura_runtime::session::state::Session::apply_init`). Raised from
-/// 25 because long-running batch workflows (e.g. task extraction
-/// emitting many `create_task` calls) were silently terminated
-/// mid-run with `stop_reason: "cancelled"` after hitting the cap, and
-/// the wire format gives the UI no way to distinguish that case from
-/// a user-initiated cancel.
-pub const MAX_ITERATIONS: usize = usize::MAX;
+/// `aura_runtime::session::state::Session::apply_init`); this cap is
+/// the hard ceiling that guards against runaway loops.
+pub const MAX_ITERATIONS: usize = aura_core::MAX_TURNS as usize;
 
 /// Auto-build cooldown: minimum iterations between automatic build checks.
 pub const AUTO_BUILD_COOLDOWN: usize = 2;

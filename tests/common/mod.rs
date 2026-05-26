@@ -340,7 +340,7 @@ impl WsClient {
         let mut init = json!({
             "type": "session_init",
             "workspace": workspace.to_string_lossy(),
-            "max_turns": max_turns.unwrap_or(10),
+            "max_turns": max_turns.unwrap_or(aura_core::MAX_TURNS),
             "agent_permissions": default_agent_permissions_payload()
         });
         if let Some(t) = token {

@@ -107,13 +107,15 @@ impl ModelProvider for OverflowThenSuccessProvider {
 #[test]
 fn test_agent_loop_config_defaults() {
     let config = AgentLoopConfig::for_agent("claude-test-model");
-    // Default is `usize::MAX` (unlimited). Termination is driven by
-    // `EndTurn`, the credit budget, or cooperative cancellation. The
-    // 25-iteration cap was raised because it silently truncated
-    // long-running batch workflows (e.g. multi-`create_task`
-    // extraction) with `stop_reason: "cancelled"`. See
-    // `constants::MAX_ITERATIONS`.
-    assert_eq!(config.max_iterations, usize::MAX);
+    // Default flows from `aura_core::MAX_TURNS` — the single source of
+    // truth shared with the runtime session, agent runner, subagent
+    // budgets, and integration-test harness. Termination is still
+    // driven by `EndTurn`, the credit budget, or cooperative
+    // cancellation; this assertion just pins the per-turn cap and the
+    // companion E.1 caps to the same canonical value.
+    assert_eq!(config.max_iterations, aura_core::MAX_TURNS as usize);
+    assert_eq!(config.max_turns_per_task, aura_core::MAX_TURNS);
+    assert_eq!(config.max_iterations_per_task, aura_core::MAX_TURNS);
     assert_eq!(config.auto_build_cooldown, 2);
     assert_eq!(config.thinking_taper_after, 2);
     assert!((config.thinking_taper_factor - 0.6).abs() < f64::EPSILON);

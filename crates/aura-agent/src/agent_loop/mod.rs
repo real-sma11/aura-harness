@@ -70,15 +70,15 @@ use crate::types::{AgentLoopResult, AgentToolExecutor, BuildBaseline, TurnObserv
 pub struct AgentLoopConfig {
     /// Maximum iterations (model calls) per turn.
     ///
-    /// Defaults to [`crate::constants::MAX_ITERATIONS`] (`usize::MAX`,
-    /// effectively unlimited). The agent loop short-circuits the
-    /// iteration check and the utilization-based budget warnings when
-    /// this is `usize::MAX`, so the turn ends only on `EndTurn` from
-    /// the model, exhaustion of [`Self::credit_budget`], stall
-    /// detection, or cooperative cancellation. Callers (e.g.
-    /// `aura_runtime::session::state::Session::agent_loop_config`)
-    /// that bridge a wire-protocol `u32` should map `u32::MAX` →
-    /// `usize::MAX` to engage the unlimited-mode short-circuits.
+    /// Defaults to [`crate::constants::MAX_ITERATIONS`], which is
+    /// itself derived from [`aura_core::MAX_TURNS`] — the single
+    /// source of truth for every "max turns / max iterations" knob.
+    /// Termination is also driven by `EndTurn` from the model,
+    /// exhaustion of [`Self::credit_budget`], stall detection, or
+    /// cooperative cancellation. Callers can still pass `usize::MAX`
+    /// explicitly to opt into the unlimited-mode short-circuit in
+    /// [`crate::budget::should_stop_for_budget`] and
+    /// `aura_agent::agent_loop::context::check_budget_warnings`.
     pub max_iterations: usize,
     /// Maximum tokens per response.
     pub max_tokens: u32,
@@ -227,22 +227,18 @@ pub struct AgentLoopConfig {
     /// `regular.rs` task shell loops on turns until `input_queue` is
     /// empty. E.1 has no `input_queue` yet (lands in E.2), so the
     /// task shell runs exactly one turn per task and this cap is
-    /// effectively dormant. The default `50` matches codex's
-    /// recommended ergonomics: most user-driven sessions converge in
-    /// <10 turns; the cap exists to surface a typed
-    /// [`AgentError::TurnBudgetExceeded`](crate::AgentError::TurnBudgetExceeded)
+    /// effectively dormant. Default derives from
+    /// [`aura_core::MAX_TURNS`] — the single source of truth for every
+    /// "max turns / max iterations" knob. The cap exists to surface a
+    /// typed [`AgentError::TurnBudgetExceeded`](crate::AgentError::TurnBudgetExceeded)
     /// instead of letting a runaway `input_queue` push the agent
     /// indefinitely.
     pub max_turns_per_task: u32,
     /// Layer E.1: hard cap on the *total* number of sampling
     /// requests (model round-trips) across every turn of one task.
-    /// Independent of [`Self::max_iterations`] — that knob remains the
-    /// pre-E.1 global ceiling (default `usize::MAX` to avoid the
-    /// silent-cancel regression that the historic 25-cap caused for
-    /// long-running batch workflows). This cap defaults to `500` so
-    /// it stays well above the steady-state working size of every
-    /// existing dev-loop / chat scenario but trips on a genuine
-    /// runaway. Trips surface as
+    /// Companion to [`Self::max_iterations`] (per-turn) and
+    /// [`Self::max_turns_per_task`] (turn count); all three default to
+    /// [`aura_core::MAX_TURNS`]. Trips surface as
     /// [`AgentError::TurnBudgetExceeded`](crate::AgentError::TurnBudgetExceeded).
     pub max_iterations_per_task: u32,
     /// Layer E.3: per-event boundary timeout for the streaming
@@ -359,8 +355,8 @@ impl AgentLoopConfig {
             disable_thinking_iteration_0: false,
             dev_loop_completion_required: false,
             max_continuation_turns: 6,
-            max_turns_per_task: 50,
-            max_iterations_per_task: 500,
+            max_turns_per_task: aura_core::MAX_TURNS,
+            max_iterations_per_task: aura_core::MAX_TURNS,
             stream_event_timeout: Duration::from_secs(90),
             per_tool_timeout: Duration::from_secs(300),
             // E.4 flipped this to `true`. The pump now emits per-

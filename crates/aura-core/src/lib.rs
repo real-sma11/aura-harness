@@ -40,4 +40,5 @@ pub use types::{
     SystemKind, ToolAuth, ToolCall, ToolCallContext, ToolDefinition, ToolExecution,
     ToolGateVerdict, ToolProposal, ToolResult, ToolResultContent, ToolResultKind, ToolState, Trace,
     Transaction, TransactionType, UserDefaultMode, UserToolDefaults, DEFAULT_SUBAGENT_TIMEOUT_MS,
+    MAX_TURNS,
 };

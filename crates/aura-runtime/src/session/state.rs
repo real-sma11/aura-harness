@@ -62,12 +62,12 @@ pub struct Session {
     pub(crate) temperature: Option<f32>,
     /// Maximum agentic steps per turn.
     ///
-    /// Defaults to `u32::MAX` (effectively unlimited). The runtime maps
-    /// `u32::MAX` to `usize::MAX` in [`Session::agent_loop_config`] so
-    /// the agent loop's iteration check short-circuits and termination
-    /// is driven by `EndTurn` from the model, the credit/token budget,
-    /// or cooperative cancellation. Callers wanting bounded turns must
-    /// pass an explicit `SessionInit.max_turns`.
+    /// Defaults to [`aura_core::MAX_TURNS`] — the single source of
+    /// truth for every "max turns / max iterations" knob in the
+    /// system. Clients may override the cap by passing
+    /// [`SessionInit::max_turns`] on the wire; absent that, this
+    /// default flows through [`Session::agent_loop_config`] into
+    /// `AgentLoopConfig::max_iterations`.
     pub(crate) max_turns: u32,
     /// Installed tools registered for this session.
     pub(crate) installed_tools: Vec<InstalledToolDefinition>,
@@ -170,9 +170,10 @@ impl Session {
             provider_override: None,
             max_tokens: 16384,
             temperature: None,
-            // Effectively unlimited. See the field doc on `max_turns`
-            // for rationale and termination signals.
-            max_turns: u32::MAX,
+            // Canonical cap from `aura_core::MAX_TURNS`. See the field
+            // doc on `max_turns` for the override path and termination
+            // signals.
+            max_turns: aura_core::MAX_TURNS,
             installed_tools: Vec::new(),
             installed_integrations: Vec::new(),
             messages: Vec::new(),
@@ -457,12 +458,14 @@ impl Session {
             _ => base_prompt,
         };
 
-        // Wire-protocol `max_turns` is `u32`; map the `u32::MAX`
-        // sentinel to `usize::MAX` so the agent loop's unlimited-mode
-        // short-circuit (see `aura_agent::budget::should_stop_for_budget`
-        // and `aura_agent::agent_loop::context::check_budget_warnings`)
-        // engages and we don't accidentally stop at ~4.29B iterations
-        // or emit spurious utilization-based warnings.
+        // Wire-protocol `max_turns` is `u32`; the agent loop wants
+        // `usize`. The default flows from `aura_core::MAX_TURNS`, and
+        // clients overriding via `SessionInit.max_turns` still pass a
+        // bounded `u32`. Preserve the `u32::MAX → usize::MAX` mapping
+        // as a defensive translation so a client that explicitly opts
+        // out of the cap engages the unlimited-mode short-circuits in
+        // `aura_agent::budget::should_stop_for_budget` and
+        // `aura_agent::agent_loop::context::check_budget_warnings`.
         let max_iterations = if self.max_turns == u32::MAX {
             usize::MAX
         } else {

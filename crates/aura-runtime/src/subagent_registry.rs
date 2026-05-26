@@ -91,7 +91,7 @@ fn general_purpose() -> SubagentKindSpec {
         readonly: false,
         default_model: None,
         budget: SubagentBudget {
-            max_iterations: 20,
+            max_iterations: aura_core::MAX_TURNS,
             max_tokens: None,
             timeout_ms: 300_000,
         },
@@ -130,7 +130,7 @@ fn shell() -> SubagentKindSpec {
         readonly: false,
         default_model: None,
         budget: SubagentBudget {
-            max_iterations: 8,
+            max_iterations: aura_core::MAX_TURNS,
             max_tokens: None,
             timeout_ms: 180_000,
         },
@@ -147,7 +147,7 @@ fn readonly_kind(name: &str, description: &str, system_prompt: &str) -> Subagent
         readonly: true,
         default_model: None,
         budget: SubagentBudget {
-            max_iterations: 12,
+            max_iterations: aura_core::MAX_TURNS,
             max_tokens: None,
             timeout_ms: 180_000,
         },

@@ -9,6 +9,27 @@ use serde::{Deserialize, Serialize};
 /// Default maximum wall-clock time for a foreground subagent run.
 pub const DEFAULT_SUBAGENT_TIMEOUT_MS: u64 = 300_000;
 
+/// Canonical cap on agentic steps.
+///
+/// Single source of truth for every "max turns / max iterations" knob in
+/// the system:
+///
+/// - [`SubagentBudget::default`]'s `max_iterations`,
+/// - `aura_runtime::session::state::Session::max_turns` default and the
+///   wire-level `SessionInit.max_turns` fallback,
+/// - `aura_agent::AgentLoopConfig::{max_iterations, max_turns_per_task,
+///   max_iterations_per_task}` defaults,
+/// - `aura_agent::AgentRunnerConfig::max_agentic_iterations` default,
+/// - the integration-test harness default in `tests/common`.
+///
+/// Layers that consume a `usize` (e.g. `AgentLoopConfig::max_iterations`)
+/// cast `MAX_TURNS as usize` at the call site so this constant remains
+/// the only place the numeric value lives. Callers wanting a different
+/// bound — typically tests asserting budget-exhaustion behavior, or
+/// clients sending an explicit `SessionInit.max_turns` — still pass an
+/// override locally; the constant only governs the default.
+pub const MAX_TURNS: u32 = 300;
+
 /// Runtime limits for a subagent kind or concrete dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentBudget {
@@ -24,7 +45,7 @@ pub struct SubagentBudget {
 impl Default for SubagentBudget {
     fn default() -> Self {
         Self {
-            max_iterations: 20,
+            max_iterations: MAX_TURNS,
             max_tokens: None,
             timeout_ms: DEFAULT_SUBAGENT_TIMEOUT_MS,
         }

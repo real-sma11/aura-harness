@@ -163,7 +163,7 @@ impl AgentRunnerConfig {
     pub fn for_agent(model: impl Into<String>) -> Self {
         let model = model.into();
         Self {
-            max_agentic_iterations: 200,
+            max_agentic_iterations: aura_core::MAX_TURNS as usize,
             max_shell_task_retries: 4,
             task_execution_max_tokens: 16_384,
             // Stripped (2026-05): cut from 10_000 to 2_000.
