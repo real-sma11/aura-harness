@@ -26,6 +26,8 @@ use super::sections::{
     self, agent_identity as agent_identity_section, agent_skills as agent_skills_section,
     agent_system_prompt as agent_system_prompt_section, agents_md as agents_md_section,
     chat_capabilities as chat_capabilities_section, dev_loop_workflow as dev_loop_workflow_section,
+    editing_etiquette as editing_etiquette_section, frontend_design as frontend_design_section,
+    output_style as output_style_section, planning_guidance as planning_guidance_section,
     project_context as project_context_section, tool_discipline as tool_discipline_section,
 };
 use crate::prompts::{AgentIdentity, ProjectInfo};
@@ -134,6 +136,42 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn tool_discipline(mut self) -> Self {
         if let Some(text) = tool_discipline_section::render() {
+            self.sections.push(text);
+        }
+        self
+    }
+
+    /// Append the `<editing_etiquette>` section (codex-derived editing constraints).
+    #[must_use]
+    pub fn editing_etiquette(mut self) -> Self {
+        if let Some(text) = editing_etiquette_section::render() {
+            self.sections.push(text);
+        }
+        self
+    }
+
+    /// Append the `<planning_guidance>` section (dev-loop plan / submit_plan rules).
+    #[must_use]
+    pub fn planning_guidance(mut self) -> Self {
+        if let Some(text) = planning_guidance_section::render() {
+            self.sections.push(text);
+        }
+        self
+    }
+
+    /// Append the `<frontend_design>` section (codex-derived UI discipline).
+    #[must_use]
+    pub fn frontend_design(mut self) -> Self {
+        if let Some(text) = frontend_design_section::render() {
+            self.sections.push(text);
+        }
+        self
+    }
+
+    /// Append the `<output_style>` section (final-answer formatting rules).
+    #[must_use]
+    pub fn output_style(mut self) -> Self {
+        if let Some(text) = output_style_section::render() {
             self.sections.push(text);
         }
         self

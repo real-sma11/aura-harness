@@ -15,6 +15,10 @@ pub mod agent_system_prompt;
 pub mod agents_md;
 pub mod chat_capabilities;
 pub mod dev_loop_workflow;
+pub mod editing_etiquette;
+pub mod frontend_design;
+pub mod output_style;
+pub mod planning_guidance;
 pub mod project_context;
 pub mod tool_discipline;
 
