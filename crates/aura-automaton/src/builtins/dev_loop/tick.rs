@@ -181,14 +181,9 @@ impl DevLoopAutomaton {
             .await;
 
         // User-initiated stop fires the shared cancellation token, which the
-        // agent loop honours by returning an early `Ok(TaskExecutionResult)`
-        // with empty `file_ops` and `no_changes_needed = false`. Without this
-        // guard the empty result would trip `classify_execution_result`, mark
-        // the task `failed`, increment `STATE_FAILED_COUNT`, and emit a
-        // misleading `WARN Task execution failed ... task ended without writes
-        // and without no_changes_needed`. Cancellation is not a failure --
-        // log it cleanly and roll the task status back to `ready` so the
-        // next dev loop start can pick it up.
+        // agent loop honours by returning an early `Ok(TaskExecutionResult)`.
+        // Roll the task back to `ready` instead of marking it `done` or
+        // `failed` so the next dev loop start can pick it up.
         if ctx.is_cancelled() {
             return self
                 .record_task_cancelled(ctx, &task)
@@ -197,15 +192,9 @@ impl DevLoopAutomaton {
         }
 
         match result {
-            Ok(exec) => match classify_execution_result(&exec) {
-                Some(err) => {
-                    self.record_task_failure(ctx, &task, err).await?;
-                    return self.finish_failed(ctx);
-                }
-                None => {
-                    self.record_task_success(ctx, &task, exec).await?;
-                }
-            },
+            Ok(exec) => {
+                self.record_task_success(ctx, &task, exec).await?;
+            }
             Err(e) => {
                 self.record_task_failure(ctx, &task, e).await?;
                 return self.finish_failed(ctx);
@@ -508,20 +497,6 @@ impl LoopFinishOutcome {
     }
 }
 
-/// Layer C (Issue A defense-in-depth): classify an
-/// `Ok(TaskExecutionResult)` from
-/// [`aura_agent::agent_runner::AgentRunner::execute_task_tracked`]
-/// into "success" (returns `None`) or "treat as failure" (returns
-/// `Some(AutomatonError)`).
-///
-/// Refusing empty results here (no `file_ops` AND no explicit
-/// `no_changes_needed` flag) keeps the automaton honest regardless
-/// of what the loop did upstream.
-///
-/// `no_changes_needed = true` is the legitimate no-op completion
-/// (the agent inspected the codebase and concluded that the task
-/// description was satisfied by existing code); that branch returns
-/// `None` so the task is recorded as success.
 async fn verify_build_after_agent(
     project_folder: &str,
     build_command: Option<&str>,
@@ -557,23 +532,9 @@ fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
     idx
 }
 
-fn classify_execution_result(exec: &TaskExecutionResult) -> Option<AutomatonError> {
-    if exec.file_ops.is_empty() && !exec.no_changes_needed {
-        Some(AutomatonError::AgentExecution(
-            "task ended without writes and without no_changes_needed".into(),
-        ))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
-mod classify_tests {
+mod completion_tests {
     use super::*;
-
-    fn empty_exec() -> TaskExecutionResult {
-        TaskExecutionResult::default()
-    }
 
     fn test_context() -> (TickContext, tokio::sync::mpsc::Receiver<AutomatonEvent>) {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -586,43 +547,6 @@ mod classify_tests {
             tokio_util::sync::CancellationToken::new(),
         );
         (ctx, rx)
-    }
-
-    /// Layer C contract: an empty [`TaskExecutionResult`] (no
-    /// `file_ops` AND `no_changes_needed = false`) must be classified
-    /// as a failure so the dev-loop automaton records it via
-    /// [`super::Automaton::record_task_failure`] (incrementing
-    /// `STATE_FAILED_COUNT` and emitting `TaskFailed`) instead of
-    /// silently marking the task as `done`.
-    #[test]
-    fn empty_file_ops_and_no_no_changes_flag_classifies_as_failure() {
-        let exec = empty_exec();
-        let err = classify_execution_result(&exec)
-            .expect("empty TaskExecutionResult must classify as failure");
-        // The dev-loop automaton's `record_task_failure` surfaces the
-        // error string in the operator UI verbatim, so guarding it
-        // here pins the wire contract.
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ended without writes") && msg.contains("no_changes_needed"),
-            "the failure message must point at the empty-completion failure mode; got {msg:?}",
-        );
-    }
-
-    /// `no_changes_needed: true` is the legitimate no-op completion
-    /// path — the agent inspected the codebase and concluded the task
-    /// description was satisfied by existing code. Even with an empty
-    /// `file_ops` list, this must record as success so the loop
-    /// doesn't retry the task forever.
-    #[test]
-    fn no_changes_needed_flag_classifies_as_success() {
-        let mut exec = empty_exec();
-        exec.no_changes_needed = true;
-        assert!(
-            classify_execution_result(&exec).is_none(),
-            "`no_changes_needed: true` is the legitimate no-op completion path \
-             (task description satisfied by existing code) and must record as success",
-        );
     }
 
     #[test]
@@ -653,11 +577,4 @@ mod classify_tests {
         }
     }
 
-    // NOTE: a third case — non-empty `file_ops` classifies as success —
-    // is intentionally omitted here because `aura_agent::file_ops::FileOp`
-    // is `pub(crate)` within `aura-agent` and cannot be named from the
-    // `aura-automaton` test module. The empty-vs-non-empty branch is
-    // exercised end-to-end by the agent-loop / agent-runner test
-    // suites which DO have access to construct `FileOp` values; here
-    // we cover only the new defense-in-depth empty-empty rejection.
 }
