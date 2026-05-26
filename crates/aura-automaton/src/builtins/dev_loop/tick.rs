@@ -19,10 +19,10 @@ use aura_agent::prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
 use aura_tools::catalog::ToolProfile;
 use aura_tools::domain_tools::TaskDescriptor;
 
-use super::forward_event::forward_agent_event;
+use super::forward_event::spawn_agent_event_forwarder;
 use super::{
-    DevLoopAutomaton, DevLoopConfig, STATE_COMPLETED_COUNT, STATE_FAILED_COUNT,
-    STATE_INITIALIZED, STATE_LOOP_FINISHED, STATE_TASK_QUEUE,
+    DevLoopAutomaton, DevLoopConfig, STATE_COMPLETED_COUNT, STATE_FAILED_COUNT, STATE_INITIALIZED,
+    STATE_LOOP_FINISHED, STATE_TASK_QUEUE,
 };
 use crate::builtins::noop_executor::NoOpExecutor;
 use crate::context::TickContext;
@@ -293,14 +293,18 @@ impl DevLoopAutomaton {
             agent: agent_info.as_ref(),
         };
 
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);
-        let automaton_tx = ctx.event_tx.clone();
-        let task_id = task.id.clone();
-        tokio::spawn(async move {
-            while let Some(evt) = event_rx.recv().await {
-                forward_agent_event(&automaton_tx, evt, Some(&task_id));
-            }
-        });
+        // Inner channel: the agent loop emits advisory events
+        // (`TextDelta` / `ThinkingDelta` / `ToolStart` /
+        // `ToolInputSnapshot` / `ToolCallCompleted` / `ToolResult`)
+        // here at a high cadence on the E.4 streaming-pump path. The
+        // forwarder consumes them and projects through
+        // `forward_agent_event` onto `ctx.event_tx`. See
+        // `forward_event.rs` for the post-E.4 drop policy that keeps
+        // this from flooding the operator log when the outer consumer
+        // is briefly behind or has already torn down.
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+        let _forwarder =
+            spawn_agent_event_forwarder(ctx.event_tx.clone(), event_rx, Some(task.id.clone()));
 
         let inner_executor: Arc<dyn aura_agent::types::AgentToolExecutor> = self
             .tool_executor

@@ -658,13 +658,31 @@ async fn handle_streamed_tool_use(
     should_stop
 }
 
+/// Drop an advisory event onto the inner agent-event channel.
+///
+/// Layer E.4 turned the pump into a per-`OutputItemDone` event source
+/// (`TextDelta` / `ThinkingDelta` / `ToolStart` / `ToolInputSnapshot`
+/// / `ToolCallCompleted` / `ToolResult`), so this helper is now the
+/// hot path on the streaming sampling driver. The downstream
+/// consumer is the
+/// `aura_automaton::builtins::dev_loop::spawn_agent_event_forwarder`
+/// task, which already applies a debounced drop policy on its outer
+/// projection — replicating a per-event `WARN!` here just doubles the
+/// noise during a normal burst, and a closed inner channel is
+/// already a downstream lifecycle signal (the forwarder dropped its
+/// receiver because the wrapping run is winding down).
+///
+/// Policy: `try_send`; drop silently on `Full` / `Closed`. Logging
+/// downgraded to `debug!` so operators can opt back into per-event
+/// visibility with `RUST_LOG=aura_agent::agent_loop::stream_pump=debug`
+/// without paying the warn-cadence cost in production logs.
 fn emit_event(
     tx: Option<&tokio::sync::mpsc::Sender<crate::events::AgentLoopEvent>>,
     event: crate::events::AgentLoopEvent,
 ) {
     if let Some(tx) = tx {
         if let Err(e) = tx.try_send(event) {
-            tracing::warn!("agent event channel full or closed: {e}");
+            tracing::debug!("agent event channel full or closed: {e}");
         }
     }
 }

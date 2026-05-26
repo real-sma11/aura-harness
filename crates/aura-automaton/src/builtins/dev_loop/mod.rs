@@ -28,7 +28,7 @@ mod tick;
 #[cfg(test)]
 mod tests;
 
-pub use forward_event::forward_agent_event;
+pub use forward_event::{forward_agent_event, spawn_agent_event_forwarder, ForwardOutcome};
 
 // Per-automaton state keys. Only two cross-tick values survive the
 // simplification: the queue of remaining task IDs and an initialized

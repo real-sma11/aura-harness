@@ -243,14 +243,16 @@ impl TaskRunAutomaton {
             agent: agent_info.as_ref(),
         };
 
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);
-        let automaton_tx = ctx.event_tx.clone();
-        let task_id = task.id.clone();
-        tokio::spawn(async move {
-            while let Some(evt) = event_rx.recv().await {
-                super::dev_loop::forward_agent_event(&automaton_tx, evt, Some(&task_id));
-            }
-        });
+        // Advisory drain: same pattern as `dev_loop::tick::execute_task`
+        // and `chat::run_chat_loop`. See `dev_loop::forward_event` for
+        // the post-E.4 drop policy that keeps the high-cadence
+        // streaming-pump events from flooding the operator log.
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
+        let _forwarder = super::dev_loop::spawn_agent_event_forwarder(
+            ctx.event_tx.clone(),
+            event_rx,
+            Some(task.id.clone()),
+        );
 
         let cancel = ctx.cancellation_token().clone();
         let inner_executor: Arc<dyn aura_agent::types::AgentToolExecutor> = self
