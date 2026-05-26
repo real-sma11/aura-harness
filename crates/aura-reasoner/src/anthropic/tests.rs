@@ -146,13 +146,26 @@ fn model_request_parallel_tool_use_builder_override() {
 
 #[test]
 fn test_cache_control_on_system_block() {
-    let system = build_system_block("You are a helpful assistant.", true);
+    let system = build_system_block("You are a helpful assistant.", true)
+        .expect("non-empty prompt emits a system block");
     let arr = system.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     let block = &arr[0];
     assert_eq!(block["type"], "text");
     assert_eq!(block["text"], "You are a helpful assistant.");
     assert_eq!(block["cache_control"]["type"], "ephemeral");
+}
+
+/// Regression for `system.0: cache_control cannot be set for empty text
+/// blocks`. Chat sessions enter `complete()` with `system = ""` (see
+/// `crates/aura-runtime/src/session/state.rs` `Session::new`), so the
+/// build helper must omit the block entirely instead of producing an
+/// empty `text` block decorated with `cache_control`.
+#[test]
+fn build_system_block_returns_none_for_empty_prompt_even_with_caching() {
+    assert!(build_system_block("", true).is_none());
+    assert!(build_system_block("", false).is_none());
+    assert!(build_system_block("   \n\t  ", true).is_none());
 }
 
 #[test]
@@ -206,7 +219,7 @@ fn test_beta_header_present() {
     let config = AnthropicConfig::new("test-model");
     let provider = AnthropicProvider::new(config).unwrap();
 
-    let system = build_system_block("test", true);
+    let system = build_system_block("test", true).expect("non-empty prompt emits a system block");
     let json = serde_json::to_string(&system).unwrap();
     assert!(json.contains("cache_control"));
     assert!(json.contains("ephemeral"));
@@ -216,7 +229,8 @@ fn test_beta_header_present() {
 
 #[test]
 fn test_cache_control_omitted_when_prompt_caching_disabled() {
-    let system = build_system_block("test", false);
+    let system =
+        build_system_block("test", false).expect("non-empty prompt emits a system block");
     let json = serde_json::to_string(&system).unwrap();
     assert!(!json.contains("cache_control"));
 
@@ -550,8 +564,13 @@ fn thinking_effort_off_emits_no_config() {
     assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
 }
 
+/// Regression for `thinking.adaptive.budget_tokens: Extra inputs are not
+/// permitted`. Anthropic's `adaptive` thinking mode (Claude 4 family)
+/// rejects `budget_tokens` outright — the model picks its own budget.
+/// The Low/Medium/High effort knob must therefore translate to
+/// `{"type":"adaptive"}` with no `budget_tokens` for adaptive models.
 #[test]
-fn thinking_effort_low_emits_fixed_1024_budget() {
+fn thinking_effort_low_adaptive_omits_budget_tokens() {
     let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
         .max_tokens(16_384)
         .thinking_effort(Some(ThinkingEffort::Low))
@@ -559,14 +578,14 @@ fn thinking_effort_low_emits_fixed_1024_budget() {
         .unwrap();
     let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("Low emits a config");
     assert_eq!(thinking.thinking_type, "adaptive");
-    assert_eq!(thinking.budget_tokens, Some(1024));
+    assert_eq!(thinking.budget_tokens, None);
     // Low must NOT inherit the forced effort=high override — that's
     // exactly the spiral amplifier we want to cap.
     assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
 }
 
 #[test]
-fn thinking_effort_medium_emits_fixed_4096_budget() {
+fn thinking_effort_medium_adaptive_omits_budget_tokens() {
     let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
         .max_tokens(16_384)
         .thinking_effort(Some(ThinkingEffort::Medium))
@@ -574,13 +593,12 @@ fn thinking_effort_medium_emits_fixed_4096_budget() {
         .unwrap();
     let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("Medium emits a config");
     assert_eq!(thinking.thinking_type, "adaptive");
-    assert_eq!(thinking.budget_tokens, Some(4096));
+    assert_eq!(thinking.budget_tokens, None);
     assert!(resolve_output_config(&request, TEST_DEFAULT_MODEL).is_none());
 }
 
 #[test]
-fn thinking_effort_high_clamps_budget_to_8192_16000() {
-    // Small ceiling: clamp pushes the budget up to 8192.
+fn thinking_effort_high_adaptive_omits_budget_tokens_but_keeps_output_effort() {
     let request = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
         .max_tokens(8_192)
         .thinking_effort(Some(ThinkingEffort::High))
@@ -588,21 +606,62 @@ fn thinking_effort_high_clamps_budget_to_8192_16000() {
         .unwrap();
     let thinking = resolve_thinking(&request, TEST_DEFAULT_MODEL).expect("High emits a config");
     assert_eq!(thinking.thinking_type, "adaptive");
+    assert_eq!(thinking.budget_tokens, None);
+
+    // High retains the existing forced effort=high override for adaptive.
+    let out = resolve_output_config(&request, TEST_DEFAULT_MODEL).expect("High keeps effort=high");
+    assert_eq!(out.effort, "high");
+}
+
+/// Companion to the adaptive tests: the `enabled` thinking mode
+/// (Claude 3.7 sonnet) DOES accept `budget_tokens`, and the effort knob
+/// keeps the calibrated 1024 / 4096 / clamped budgets there.
+#[test]
+fn thinking_effort_low_enabled_sets_1024_budget() {
+    let request = ModelRequest::builder("claude-3-7-sonnet", "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Low))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, "claude-3-7-sonnet").expect("Low emits a config");
+    assert_eq!(thinking.thinking_type, "enabled");
+    assert_eq!(thinking.budget_tokens, Some(1024));
+}
+
+#[test]
+fn thinking_effort_medium_enabled_sets_4096_budget() {
+    let request = ModelRequest::builder("claude-3-7-sonnet", "system")
+        .max_tokens(16_384)
+        .thinking_effort(Some(ThinkingEffort::Medium))
+        .try_build()
+        .unwrap();
+    let thinking =
+        resolve_thinking(&request, "claude-3-7-sonnet").expect("Medium emits a config");
+    assert_eq!(thinking.thinking_type, "enabled");
+    assert_eq!(thinking.budget_tokens, Some(4096));
+}
+
+#[test]
+fn thinking_effort_high_enabled_clamps_budget_to_8192_16000() {
+    // Small ceiling: clamp pushes the budget up to 8192.
+    let request = ModelRequest::builder("claude-3-7-sonnet", "system")
+        .max_tokens(8_192)
+        .thinking_effort(Some(ThinkingEffort::High))
+        .try_build()
+        .unwrap();
+    let thinking = resolve_thinking(&request, "claude-3-7-sonnet").expect("High emits a config");
+    assert_eq!(thinking.thinking_type, "enabled");
     assert_eq!(thinking.budget_tokens, Some(8_192));
 
     // Large ceiling: clamp pulls the budget down to 16000.
-    let request_big = ModelRequest::builder(TEST_DEFAULT_MODEL, "system")
+    let request_big = ModelRequest::builder("claude-3-7-sonnet", "system")
         .max_tokens(64_000)
         .thinking_effort(Some(ThinkingEffort::High))
         .try_build()
         .unwrap();
     let thinking_big =
-        resolve_thinking(&request_big, TEST_DEFAULT_MODEL).expect("High emits a config");
+        resolve_thinking(&request_big, "claude-3-7-sonnet").expect("High emits a config");
     assert_eq!(thinking_big.budget_tokens, Some(16_000));
-
-    // High retains the existing forced effort=high override for adaptive.
-    let out = resolve_output_config(&request, TEST_DEFAULT_MODEL).expect("High keeps effort=high");
-    assert_eq!(out.effort, "high");
 }
 
 #[test]

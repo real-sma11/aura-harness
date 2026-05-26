@@ -52,15 +52,29 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
             ThinkingEffort::Off => None,
             ThinkingEffort::Low => Some(ApiThinkingConfig {
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
-                budget_tokens: Some(1024),
+                // Anthropic's `adaptive` thinking mode rejects
+                // `budget_tokens` outright (`thinking.adaptive.budget_tokens:
+                // Extra inputs are not permitted`); the model picks its
+                // own budget. Only `enabled` mode (Claude 3.7) accepts a
+                // budget. Mirrors the legacy branch below.
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => Some(1024),
+                },
             }),
             ThinkingEffort::Medium => Some(ApiThinkingConfig {
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
-                budget_tokens: Some(4096),
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => Some(4096),
+                },
             }),
             ThinkingEffort::High => Some(ApiThinkingConfig {
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
-                budget_tokens: Some((request.max_tokens.get() / 2).clamp(8192, 16000)),
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => Some((request.max_tokens.get() / 2).clamp(8192, 16000)),
+                },
             }),
         };
     }
@@ -118,21 +132,38 @@ pub(super) fn resolve_output_config(
 }
 
 /// Build the system block as a JSON array, optionally adding `cache_control`.
+///
+/// Returns `None` when `system_prompt` is empty (or whitespace-only). The
+/// caller must omit the `system` field from the outgoing Anthropic request
+/// in that case, because:
+///
+/// * `[{ "type":"text", "text":"", "cache_control":{...} }]` is rejected
+///   with `system.0: cache_control cannot be set for empty text blocks`,
+///   and
+/// * even without `cache_control`, an empty `text` block is wasteful and
+///   easy for the API to reject in the future.
+///
+/// Chat sessions start with `system_prompt = ""` (see
+/// [`crates/aura-runtime/src/session/state.rs`] `Session::new`), so this
+/// guard is reached on real production traffic.
 pub(super) fn build_system_block(
     system_prompt: &str,
     prompt_caching_enabled: bool,
-) -> serde_json::Value {
+) -> Option<serde_json::Value> {
+    if system_prompt.trim().is_empty() {
+        return None;
+    }
     if prompt_caching_enabled {
-        serde_json::json!([{
+        Some(serde_json::json!([{
             "type": "text",
             "text": system_prompt,
             "cache_control": {"type": "ephemeral"}
-        }])
+        }]))
     } else {
-        serde_json::json!([{
+        Some(serde_json::json!([{
             "type": "text",
             "text": system_prompt
-        }])
+        }]))
     }
 }
 

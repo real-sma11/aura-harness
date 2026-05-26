@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize)]
 pub(super) struct ApiRequest {
     pub model: String,
-    pub system: serde_json::Value,
+    /// `None` when the caller did not supply a system prompt; the field
+    /// is omitted from the wire payload entirely so Anthropic does not
+    /// reject an empty system block (see `build_system_block`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<serde_json::Value>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ApiTool>>,
@@ -145,7 +149,9 @@ pub(super) struct ApiUsage {
 #[derive(Debug, Serialize)]
 pub(super) struct StreamingApiRequest {
     pub model: String,
-    pub system: serde_json::Value,
+    /// See [`ApiRequest::system`] for why this is optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<serde_json::Value>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ApiTool>>,
