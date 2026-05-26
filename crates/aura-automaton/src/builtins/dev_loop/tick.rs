@@ -164,7 +164,10 @@ impl DevLoopAutomaton {
         let result = self.execute_task(ctx, cfg, &task).await;
 
         match result {
-            Ok(exec) => self.record_task_success(ctx, &task, exec).await?,
+            Ok(exec) => match classify_execution_result(&exec) {
+                Some(err) => self.record_task_failure(ctx, &task, err).await?,
+                None => self.record_task_success(ctx, &task, exec).await?,
+            },
             Err(e) => self.record_task_failure(ctx, &task, e).await?,
         }
 
@@ -342,4 +345,90 @@ impl DevLoopAutomaton {
         })?;
         Ok(TickOutcome::Done)
     }
+}
+
+/// Layer C (Issue A defense-in-depth): classify an
+/// `Ok(TaskExecutionResult)` from
+/// [`aura_agent::agent_runner::AgentRunner::execute_task_tracked`]
+/// into "success" (returns `None`) or "treat as failure" (returns
+/// `Some(AutomatonError)`).
+///
+/// The dev-loop automaton historically treated every `Ok(_)` as a
+/// successful completion. The agent loop's
+/// `dev_loop_completion_required` intercept (Layer A) now routes
+/// empty `EndTurn` / `MaxTokens`-empty terminations back through
+/// `GoalRuntime` so they nudge / escalate instead of completing
+/// silently, but a future regression that re-introduces the
+/// short-circuit would still leak an empty `TaskExecutionResult`
+/// out here and silently mark the task as `done` with zero writes.
+/// Refusing empty results here (no `file_ops` AND no explicit
+/// `no_changes_needed` flag) keeps the automaton honest regardless
+/// of what the loop did upstream.
+///
+/// `no_changes_needed = true` is the legitimate no-op completion
+/// (the agent inspected the codebase and concluded that the task
+/// description was satisfied by existing code); that branch returns
+/// `None` so the task is recorded as success.
+fn classify_execution_result(exec: &TaskExecutionResult) -> Option<AutomatonError> {
+    if exec.file_ops.is_empty() && !exec.no_changes_needed {
+        Some(AutomatonError::AgentExecution(
+            "task ended without writes and without no_changes_needed".into(),
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn empty_exec() -> TaskExecutionResult {
+        TaskExecutionResult::default()
+    }
+
+    /// Layer C contract: an empty [`TaskExecutionResult`] (no
+    /// `file_ops` AND `no_changes_needed = false`) must be classified
+    /// as a failure so the dev-loop automaton records it via
+    /// [`super::Automaton::record_task_failure`] (incrementing
+    /// `STATE_FAILED_COUNT` and emitting `TaskFailed`) instead of
+    /// silently marking the task as `done`.
+    #[test]
+    fn empty_file_ops_and_no_no_changes_flag_classifies_as_failure() {
+        let exec = empty_exec();
+        let err = classify_execution_result(&exec)
+            .expect("empty TaskExecutionResult must classify as failure");
+        // The dev-loop automaton's `record_task_failure` surfaces the
+        // error string in the operator UI verbatim, so guarding it
+        // here pins the wire contract.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ended without writes") && msg.contains("no_changes_needed"),
+            "the failure message must point at the empty-completion failure mode; got {msg:?}",
+        );
+    }
+
+    /// `no_changes_needed: true` is the legitimate no-op completion
+    /// path — the agent inspected the codebase and concluded the task
+    /// description was satisfied by existing code. Even with an empty
+    /// `file_ops` list, this must record as success so the loop
+    /// doesn't retry the task forever.
+    #[test]
+    fn no_changes_needed_flag_classifies_as_success() {
+        let mut exec = empty_exec();
+        exec.no_changes_needed = true;
+        assert!(
+            classify_execution_result(&exec).is_none(),
+            "`no_changes_needed: true` is the legitimate no-op completion path \
+             (task description satisfied by existing code) and must record as success",
+        );
+    }
+
+    // NOTE: a third case — non-empty `file_ops` classifies as success —
+    // is intentionally omitted here because `aura_agent::file_ops::FileOp`
+    // is `pub(crate)` within `aura-agent` and cannot be named from the
+    // `aura-automaton` test module. The empty-vs-non-empty branch is
+    // exercised end-to-end by the agent-loop / agent-runner test
+    // suites which DO have access to construct `FileOp` values; here
+    // we cover only the new defense-in-depth empty-empty rejection.
 }
