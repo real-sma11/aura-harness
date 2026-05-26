@@ -45,20 +45,22 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use aura_reasoner::anthropic::exp_backoff_with_jitter;
 use aura_reasoner::{
-    ContentBlock, Message, ModelProvider, ModelRequest, ModelResponse, OutputItem, ProviderTrace,
-    ResponseEvent, ResponseEventStream, Role, StopReason, Usage,
+    ContentBlock, Message, ModelProvider, ModelRequest, ModelResponse, OutputItem, PartialToolUse,
+    ProviderTrace, ReasonerError, ResponseEvent, ResponseEventStream, Role, StopReason, Usage,
 };
-use futures_util::stream::FuturesOrdered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesOrdered;
 use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tracing::{error, warn};
 
+use crate::AgentError;
 use crate::events::AgentLoopEvent;
 use crate::session::input_queue::InputQueue;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
-use crate::AgentError;
 
 use super::AgentLoopConfig;
 
@@ -97,6 +99,13 @@ pub(super) enum StreamPumpOutcome {
     /// closed, etc.). Carries the [`AgentError`] so the caller can
     /// fold it into the loop result without re-wrapping.
     Error(AgentError),
+    /// The response stream aborted while a `tool_use` block was
+    /// still being accumulated. `run_stream_pump` consumes this
+    /// internal outcome to drive the per-tool-call retry loop.
+    AbortedWithPartial {
+        reason: String,
+        partial_tool_use: Option<PartialToolUse>,
+    },
 }
 
 /// Drive one sampling request through the streaming pump.
@@ -118,24 +127,161 @@ pub(super) async fn run_stream_pump(
     state: &mut super::LoopState,
 ) -> StreamPumpOutcome {
     let model_name = request.model.as_ref().to_string();
-    let stream = match provider.complete_response_stream(request).await {
-        Ok(s) => s,
-        Err(err) => {
-            return StreamPumpOutcome::Error(AgentError::Reason(err));
-        }
-    };
+    let (max_retries, backoff_initial_ms, backoff_cap_ms) = stream_retry_params();
+    let mut retry_state: Option<PartialRetryState> = None;
 
-    drive_stream(
-        config,
-        executor,
-        stream,
-        cancellation_token,
-        input_queue,
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let Some(state) = retry_state.as_ref() else {
+                return StreamPumpOutcome::Error(AgentError::Reason(ReasonerError::Internal(
+                    "stream retry requested without partial tool-use state".to_string(),
+                )));
+            };
+            let delay = exp_backoff_with_jitter(attempt - 1, backoff_initial_ms, backoff_cap_ms);
+            let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+            warn!(
+                attempt,
+                max_attempts = max_retries,
+                delay_ms,
+                tool_use_id = %state.tool_use_id,
+                tool_name = %state.tool_name,
+                reason = %state.reason,
+                "Per-tool-call streaming retry scheduled after pump stream abort"
+            );
+            emit_event(
+                event_tx,
+                AgentLoopEvent::ToolCallRetrying {
+                    tool_use_id: state.tool_use_id.clone(),
+                    tool_name: state.tool_name.clone(),
+                    attempt,
+                    max_attempts: max_retries,
+                    delay_ms,
+                    reason: state.reason.clone(),
+                },
+            );
+            if let Some(token) = cancellation_token {
+                tokio::select! {
+                    () = token.cancelled() => return StreamPumpOutcome::Cancelled,
+                    () = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                }
+            } else {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+
+        let stream = match provider.complete_response_stream(request.clone()).await {
+            Ok(s) => s,
+            Err(ReasonerError::StreamAbortedWithPartial {
+                reason,
+                partial_tool_use,
+            }) => {
+                retry_state = Some(update_partial_retry_state(
+                    retry_state,
+                    reason,
+                    partial_tool_use,
+                ));
+                continue;
+            }
+            Err(err) => return StreamPumpOutcome::Error(AgentError::Reason(err)),
+        };
+
+        match drive_stream(
+            config,
+            executor,
+            stream,
+            cancellation_token,
+            input_queue,
+            event_tx,
+            state,
+            &model_name,
+        )
+        .await
+        {
+            StreamPumpOutcome::AbortedWithPartial {
+                reason,
+                partial_tool_use,
+            } => {
+                retry_state = Some(update_partial_retry_state(
+                    retry_state,
+                    reason,
+                    partial_tool_use,
+                ));
+            }
+            other => return other,
+        }
+    }
+
+    let state = retry_state.unwrap_or_else(|| PartialRetryState {
+        tool_use_id: "<unknown>".to_string(),
+        tool_name: "<unknown>".to_string(),
+        reason: "stream aborted while tool_use was in flight".to_string(),
+    });
+    error!(
+        attempts = max_retries,
+        tool_use_id = %state.tool_use_id,
+        tool_name = %state.tool_name,
+        reason = %state.reason,
+        "Per-tool-call streaming retry budget exhausted in pump; giving up"
+    );
+    emit_event(
         event_tx,
-        state,
-        &model_name,
-    )
-    .await
+        AgentLoopEvent::ToolCallFailed {
+            tool_use_id: state.tool_use_id,
+            tool_name: state.tool_name,
+            reason: state.reason.clone(),
+        },
+    );
+    StreamPumpOutcome::Error(AgentError::Reason(
+        ReasonerError::StreamAbortedWithPartial {
+            reason: state.reason,
+            partial_tool_use: None,
+        },
+    ))
+}
+
+struct PartialRetryState {
+    tool_use_id: String,
+    tool_name: String,
+    reason: String,
+}
+
+fn update_partial_retry_state(
+    previous: Option<PartialRetryState>,
+    reason: String,
+    partial_tool_use: Option<PartialToolUse>,
+) -> PartialRetryState {
+    let (prev_id, prev_name) = previous.map_or_else(
+        || ("<unknown>".to_string(), "<unknown>".to_string()),
+        |state| (state.tool_use_id, state.tool_name),
+    );
+    let (tool_use_id, tool_name) = partial_tool_use.map_or((prev_id, prev_name), |partial| {
+        (partial.tool_use_id, partial.tool_name)
+    });
+    PartialRetryState {
+        tool_use_id,
+        tool_name,
+        reason,
+    }
+}
+
+/// Retry budget / backoff envelope shared with the legacy buffered
+/// streaming retry path. Reads the same env vars as
+/// `aura_reasoner::AnthropicConfig` so operators tune both paths
+/// together.
+fn stream_retry_params() -> (u32, u64, u64) {
+    let max_retries: u32 = std::env::var("AURA_LLM_MAX_RETRIES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let backoff_initial_ms: u64 = std::env::var("AURA_LLM_BACKOFF_INITIAL_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(250);
+    let backoff_cap_ms: u64 = std::env::var("AURA_LLM_BACKOFF_CAP_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30_000);
+    (max_retries, backoff_initial_ms, backoff_cap_ms)
 }
 
 /// Inner driver — separated so the unit tests can hand it a
@@ -196,7 +342,16 @@ pub(super) async fn drive_stream(
                 });
             }
             StreamStep::TransportErr(err) => {
-                return StreamPumpOutcome::Error(AgentError::Stream(err));
+                return match err {
+                    aura_reasoner::StreamError::StreamAbortedWithPartial {
+                        reason,
+                        partial_tool_use,
+                    } => StreamPumpOutcome::AbortedWithPartial {
+                        reason,
+                        partial_tool_use,
+                    },
+                    other => StreamPumpOutcome::Error(AgentError::Stream(other)),
+                };
             }
             StreamStep::End => break,
             StreamStep::Event(event) => match event {
@@ -302,7 +457,16 @@ pub(super) async fn drive_stream(
                     break;
                 }
                 ResponseEvent::Error(err) => {
-                    return StreamPumpOutcome::Error(AgentError::Stream(err));
+                    return match err {
+                        aura_reasoner::StreamError::StreamAbortedWithPartial {
+                            reason,
+                            partial_tool_use,
+                        } => StreamPumpOutcome::AbortedWithPartial {
+                            reason,
+                            partial_tool_use,
+                        },
+                        other => StreamPumpOutcome::Error(AgentError::Stream(other)),
+                    };
                 }
             },
         }
@@ -1345,6 +1509,10 @@ mod tests {
                     .finish(),
                 Self::Cancelled => write!(f, "Cancelled"),
                 Self::Error(e) => write!(f, "Error({e:?})"),
+                Self::AbortedWithPartial { reason, .. } => f
+                    .debug_struct("AbortedWithPartial")
+                    .field("reason", reason)
+                    .finish(),
             }
         }
     }

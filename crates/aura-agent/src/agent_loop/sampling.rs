@@ -36,8 +36,8 @@ use tracing::{debug, instrument};
 use crate::events::AgentLoopEvent;
 use crate::types::AgentToolExecutor;
 
-use super::stream_pump::{run_stream_pump, StreamPumpOutcome};
-use super::{context, is_cancelled, iteration, streaming, AgentLoop, LoopState};
+use super::stream_pump::{StreamPumpOutcome, run_stream_pump};
+use super::{AgentLoop, LoopState, context, is_cancelled, iteration, streaming};
 
 /// Outcome of a single sampling request inside a turn.
 ///
@@ -318,6 +318,17 @@ async fn run_sampling_request_streaming(
                 other => iteration::LlmCallError::Fatal(other.to_string()),
             };
             llm_err.apply(&mut state.result, event_tx);
+            return SamplingRequestResult {
+                needs_follow_up: false,
+                stop_reason: StopReason::EndTurn,
+                broke_for_error: true,
+            };
+        }
+        StreamPumpOutcome::AbortedWithPartial { .. } => {
+            iteration::LlmCallError::Fatal(
+                "stream pump returned an unretried partial tool-use abort".to_string(),
+            )
+            .apply(&mut state.result, event_tx);
             return SamplingRequestResult {
                 needs_follow_up: false,
                 stop_reason: StopReason::EndTurn,

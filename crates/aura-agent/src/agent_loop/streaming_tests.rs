@@ -136,11 +136,17 @@ fn default_config() -> AgentLoopConfig {
     AgentLoopConfig {
         system_prompt: "streaming test agent".to_string(),
         // These tests exercise the legacy buffered-streaming path's
-        // `retry_streaming_for_partial_tool_use` / `StreamReset` flow,
-        // which has not yet been ported onto the pump's
-        // `ResponseEventStream` (deferred per Phase E.4 plan note).
-        // Pin them to the legacy path until the pump-side port lands.
+        // `StreamReset` non-streaming fallback flow. The partial
+        // tool-use retry tests below opt back into the pump path.
         use_stream_pump: false,
+        ..AgentLoopConfig::for_agent("claude-test-model")
+    }
+}
+
+fn pump_config() -> AgentLoopConfig {
+    AgentLoopConfig {
+        system_prompt: "streaming test agent".to_string(),
+        use_stream_pump: true,
         ..AgentLoopConfig::for_agent("claude-test-model")
     }
 }
@@ -420,7 +426,7 @@ async fn stream_aborted_with_partial_retries_then_succeeds() {
 
     let provider = FlakyPartialProvider::new(2, "recovered");
     let executor = NoOpExecutor;
-    let agent = AgentLoop::new(default_config());
+    let agent = AgentLoop::new(pump_config());
     let (tx, rx) = mpsc::channel(1024);
     let messages = vec![Message::user("hello")];
 
@@ -471,7 +477,7 @@ async fn stream_aborted_with_partial_exhausts_and_fails() {
 
     let provider = FlakyPartialProvider::new(1_000, "never-used");
     let executor = NoOpExecutor;
-    let agent = AgentLoop::new(default_config());
+    let agent = AgentLoop::new(pump_config());
     let (tx, rx) = mpsc::channel(1024);
     let messages = vec![Message::user("hello")];
 

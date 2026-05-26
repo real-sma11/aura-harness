@@ -34,7 +34,9 @@ use std::pin::Pin;
 use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 
-use crate::types::{ContentBlock, StopReason, StreamAccumulator, StreamEvent, Usage};
+use crate::types::{
+    ContentBlock, PartialToolUse, StopReason, StreamAccumulator, StreamEvent, Usage,
+};
 use crate::{ModelResponse, StreamEventStream};
 
 /// A complete top-level item emitted by the model during streaming.
@@ -102,6 +104,17 @@ pub enum StreamError {
     Timeout {
         /// Configured boundary timeout in milliseconds.
         elapsed_ms: u64,
+    },
+    /// The stream aborted while a `tool_use` block was still being
+    /// accumulated. Carries the in-flight tool identity so agent
+    /// callers can retry the streaming request without losing which
+    /// write/edit attempt was interrupted.
+    #[error("{reason}")]
+    StreamAbortedWithPartial {
+        /// Human-readable provider/transport failure context.
+        reason: String,
+        /// In-flight tool-use captured just before the stream died.
+        partial_tool_use: Option<PartialToolUse>,
     },
 }
 
@@ -228,15 +241,14 @@ pub fn response_stream_from_event_stream(stream: StreamEventStream) -> ResponseE
                     }
                     Some(Err(err)) => {
                         state.terminated = true;
-                        return Some((
-                            Err(StreamError::TransportClosed {
-                                context: err.to_string(),
-                            }),
-                            state,
-                        ));
+                        let err = state.transport_error(err.to_string());
+                        return Some((Err(err), state));
                     }
                     None => {
                         state.terminated = true;
+                        if let Some(err) = state.closed_with_partial_error() {
+                            return Some((Err(err), state));
+                        }
                         if !state.completed_emitted {
                             let event = state.synthesize_completed();
                             return Some((Ok(event), state));
@@ -271,13 +283,81 @@ impl AdapterState {
                 self.pending.push_back(Ok(event));
             }
             StreamEvent::Error { message, .. } => {
-                self.pending
-                    .push_back(Ok(ResponseEvent::Error(StreamError::InvalidEvent {
-                        reason: message.clone(),
-                    })));
+                let err = self.provider_error(message.clone());
+                match err {
+                    StreamError::StreamAbortedWithPartial { .. } => {
+                        self.pending.push_back(Err(err));
+                    }
+                    other => {
+                        self.pending.push_back(Ok(ResponseEvent::Error(other)));
+                    }
+                }
             }
             _ => {}
         }
+    }
+
+    fn provider_error(&mut self, message: String) -> StreamError {
+        if self.accumulator.current_tool_use.is_some() {
+            return StreamError::StreamAbortedWithPartial {
+                reason: self.format_stream_error_reason(&message),
+                partial_tool_use: self.take_partial_tool_use(),
+            };
+        }
+        StreamError::InvalidEvent { reason: message }
+    }
+
+    fn transport_error(&mut self, context: String) -> StreamError {
+        if self.accumulator.current_tool_use.is_some() {
+            return StreamError::StreamAbortedWithPartial {
+                reason: self.format_stream_error_reason(&context),
+                partial_tool_use: self.take_partial_tool_use(),
+            };
+        }
+        StreamError::TransportClosed { context }
+    }
+
+    fn closed_with_partial_error(&mut self) -> Option<StreamError> {
+        if self.accumulator.current_tool_use.is_some() {
+            Some(StreamError::StreamAbortedWithPartial {
+                reason: self.format_stream_error_reason("transport closed before stream completed"),
+                partial_tool_use: self.take_partial_tool_use(),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn take_partial_tool_use(&mut self) -> Option<PartialToolUse> {
+        self.accumulator
+            .current_tool_use
+            .take()
+            .map(|pending| PartialToolUse {
+                tool_use_id: pending.id,
+                tool_name: pending.name,
+                partial_json: pending.input_json,
+            })
+    }
+
+    fn format_stream_error_reason(&self, message: &str) -> String {
+        let mut context_parts: Vec<String> = Vec::new();
+        if !self.accumulator.model.is_empty() {
+            context_parts.push(format!("model={}", self.accumulator.model));
+        }
+        if !self.accumulator.message_id.is_empty() {
+            context_parts.push(format!("msg_id={}", self.accumulator.message_id));
+        }
+        if let Some(ref req_id) = self.accumulator.provider_request_id {
+            if !req_id.is_empty() {
+                context_parts.push(format!("request_id={req_id}"));
+            }
+        }
+        let context = if context_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", context_parts.join(", "))
+        };
+        format!("stream terminated with error{context}: {message}")
     }
 
     /// Pull whichever item the accumulator finished last. The
@@ -466,5 +546,48 @@ mod tests {
             }
         }
         assert!(got_err, "transport error must surface as TransportClosed");
+    }
+
+    #[tokio::test]
+    async fn response_stream_from_event_stream_preserves_partial_tool_abort() {
+        use crate::types::StreamContentType;
+        let events: Vec<Result<StreamEvent, ReasonerError>> = vec![
+            Ok(StreamEvent::MessageStart {
+                message_id: "msg_partial".into(),
+                model: "test".into(),
+                input_tokens: Some(1),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamContentType::ToolUse {
+                    id: "toolu_partial".into(),
+                    name: "write_file".into(),
+                },
+            }),
+            Ok(StreamEvent::InputJsonDelta {
+                partial_json: "{\"path\":\"src/".into(),
+            }),
+            Ok(StreamEvent::Error {
+                message: "overloaded_error: upstream flaked".into(),
+                request_id: None,
+            }),
+        ];
+        let underlying: StreamEventStream = Box::pin(futures_util::stream::iter(events));
+        let mut stream = response_stream_from_event_stream(underlying);
+
+        match stream.next().await.expect("stream should emit abort") {
+            Err(StreamError::StreamAbortedWithPartial {
+                reason,
+                partial_tool_use: Some(partial),
+            }) => {
+                assert!(reason.contains("overloaded_error"));
+                assert_eq!(partial.tool_use_id, "toolu_partial");
+                assert_eq!(partial.tool_name, "write_file");
+                assert_eq!(partial.partial_json, "{\"path\":\"src/");
+            }
+            other => panic!("expected partial abort, got {other:?}"),
+        }
     }
 }

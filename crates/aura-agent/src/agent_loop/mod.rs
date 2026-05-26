@@ -42,8 +42,8 @@ mod tests;
 mod tests_advanced;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aura_reasoner::{
@@ -286,15 +286,10 @@ pub struct AgentLoopConfig {
     ///
     /// # Remaining caveats
     ///
-    /// `retry_streaming_for_partial_tool_use` (per-tool-call
-    /// streaming retry on `StreamAbortedWithPartial`) is not yet
-    /// ported onto `ResponseEventStream`. Callers that depend on
-    /// that recovery path should set this flag to `false` and stay
-    /// on the buffered path until a follow-up commit lands the
-    /// port. Sub-block per-token deltas also remain on the
-    /// buffered path — the pump emits one delta per finished
-    /// block, which is sufficient for chat UX continuity but
-    /// coarser than the per-token feel of the buffered path.
+    /// Sub-block per-token deltas remain on the buffered path — the
+    /// pump emits one delta per finished block, which is sufficient
+    /// for chat UX continuity but coarser than the per-token feel of
+    /// the buffered path.
     pub use_stream_pump: bool,
 }
 
@@ -371,11 +366,8 @@ impl AgentLoopConfig {
             // `OutputItemDone` block deltas, consults the per-run
             // tool cache, and fires auto-build on writes — closing
             // the parity gaps that kept the pump opt-in in E.3.
-            // Operators that need to fall back to the legacy
-            // buffered path (e.g. for the pre-E.4
-            // `retry_streaming_for_partial_tool_use` semantics
-            // which has not yet been ported) can flip this back to
-            // `false` per call site.
+            // Operators that need to fall back to the legacy buffered
+            // path can flip this back to `false` per call site.
             use_stream_pump: true,
         }
     }
