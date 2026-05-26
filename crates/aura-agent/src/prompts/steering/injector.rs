@@ -36,38 +36,6 @@ pub enum SteeringKind {
     /// `task_done` rejected because no write/edit/delete tool calls
     /// were tracked and the agent did not set `no_changes_needed`.
     TaskDoneNoWrites,
-    /// `task_done` rejected because the Definition-of-Done test gate
-    /// ran the configured test command and the suite reported
-    /// failures. `failures_block` and `stderr_block` are
-    /// pre-rendered (already trimmed/truncated by the caller) so the
-    /// renderer is purely textual.
-    TaskDoneTestGateFailed {
-        cmd: String,
-        attempt: usize,
-        max_attempts: usize,
-        summary: String,
-        failures_block: String,
-        stderr_block: String,
-    },
-    /// `task_done` rejected and the DoD test gate retry budget is
-    /// exhausted. The renderer appends a "retry budget is exhausted"
-    /// footer to the [`Self::TaskDoneTestGateFailed`] body.
-    TaskDoneTestGateExhausted {
-        cmd: String,
-        attempt: usize,
-        max_attempts: usize,
-        summary: String,
-        failures_block: String,
-        stderr_block: String,
-    },
-    /// The DoD test runner itself failed to execute the configured
-    /// test command (spawn error, command not found, etc.).
-    TaskDoneTestGateIoFailure {
-        cmd: String,
-        error: String,
-        attempt: usize,
-        max_attempts: usize,
-    },
     /// Post-write stub detector found one or more incomplete
     /// implementations and is asking the agent to fill them in
     /// before re-calling `task_done`.
@@ -113,10 +81,7 @@ impl SteeringKind {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
-            Self::TaskDoneNoWrites
-            | Self::TaskDoneTestGateFailed { .. }
-            | Self::TaskDoneTestGateExhausted { .. }
-            | Self::TaskDoneTestGateIoFailure { .. } => "task_done_rejected",
+            Self::TaskDoneNoWrites => "task_done_rejected",
             Self::StubDetected { .. } => "stub_detected",
             Self::RepeatedRead { .. } => "repeated_read",
             Self::TaskAlreadySatisfiedHint { .. } => "task_already_satisfied",

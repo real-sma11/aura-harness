@@ -25,48 +25,23 @@ use crate::verify::{infer_default_build_command, infer_default_test_command, Tes
 
 const MAX_STUB_FIX_ATTEMPTS: u32 = 2;
 
-/// Maximum number of times the `task_done` hard gate will reject a completion
-/// because the project test suite is failing.
-///
-/// The gate runs the full project test command on every `task_done` call, so
-/// each attempt costs a full test-suite execution. The cap exists to bound
-/// runaway loops on intractable failures: once the agent has had this many
-/// chances to make the suite green it is allowed to surface the failure as a
-/// hard `task_failed` with the `dod_test_gate_exhausted` flag set.
-pub const MAX_TASK_DONE_TEST_RETRIES: u32 = 8;
-
-/// Environment variable that disables the `task_done` test gate.
-///
-/// This is an explicit operator escape hatch for emergency/manual runs only.
-/// The reader accepts only the literal `"1"`; typo-prone truthy values keep
-/// the gate active. Normal projects should configure a test command instead.
-pub(crate) const DISABLE_TEST_GATE_ENV: &str = "AURA_DOD_DISABLE_TEST_GATE";
-
 /// Environment variable that overrides the project-configured test command
-/// for the `task_done` hard gate.
+/// used by the post-`task_done` best-effort test run.
 ///
 /// This remains an operator override, not a fallback. Empty or whitespace-only
 /// values are treated as unset so a shell can clear the override without
-/// accidentally disabling the gate.
+/// accidentally suppressing the test run.
 ///
-/// Resolution order at gate time, highest precedence first:
+/// Resolution order at call time, highest precedence first:
 ///   1. `AURA_DOD_TEST_COMMAND` (this env var, captured at executor construction)
 ///   2. `Project.test_command` (per-project config)
 ///   3. `infer_default_test_command(project_root)` (manifest auto-detect)
 pub(crate) const TEST_COMMAND_OVERRIDE_ENV: &str = "AURA_DOD_TEST_COMMAND";
 
-/// Read the [`DISABLE_TEST_GATE_ENV`] env var at construction time. Returns
-/// `true` only when explicitly set to `"1"`. Captured once per executor so
-/// concurrent tests that mutate the global env cannot race the gate.
-#[must_use]
-pub(crate) fn read_disable_test_gate_env() -> bool {
-    std::env::var(DISABLE_TEST_GATE_ENV).ok().as_deref() == Some("1")
-}
-
 /// Read the [`TEST_COMMAND_OVERRIDE_ENV`] env var at construction time.
 /// Returns the override string when present and non-empty, otherwise `None`.
 /// Captured once per executor so concurrent tests that mutate the global env
-/// cannot race the gate.
+/// cannot race the executor.
 #[must_use]
 pub(crate) fn read_test_command_override_env() -> Option<String> {
     let raw = std::env::var(TEST_COMMAND_OVERRIDE_ENV).ok()?;
@@ -126,15 +101,17 @@ pub(crate) struct TaskToolExecutor {
     pub project_folder: String,
     /// Build command (from project config or auto-detected).
     pub build_command: Option<String>,
-    /// Test command used by the `task_done` hard gate. When `None`, the gate
-    /// tries to infer one from the project manifest and otherwise no-ops with
-    /// a warning. Configured per project via `Project.test_command`.
+    /// Test command used by the best-effort post-`task_done` test run.
+    /// When `None`, the executor tries to infer one from the project
+    /// manifest and otherwise no-ops. Configured per project via
+    /// `Project.test_command`. Codex parity: failures are a warning,
+    /// not a gate.
     pub test_command: Option<String>,
     /// Operator override for the project test command, captured at executor
     /// construction from [`TEST_COMMAND_OVERRIDE_ENV`]. When `Some`, this
     /// wins over [`Self::test_command`] and any inferred default. Captured
     /// once so concurrent tests that mutate the global env don't race the
-    /// gate.
+    /// executor.
     pub test_command_override: Option<String>,
     /// Pre-built task context for `get_task_context` handler.
     pub task_context: String,
@@ -146,17 +123,10 @@ pub(crate) struct TaskToolExecutor {
     pub follow_ups: Arc<Mutex<Vec<FollowUpSuggestion>>>,
     /// Counter for stub-fix rejection attempts.
     pub stub_fix_attempts: Arc<Mutex<u32>>,
-    /// Counter for `task_done` rejections caused by the all-tests-pass gate.
-    /// Bounded by [`MAX_TASK_DONE_TEST_RETRIES`].
-    pub test_gate_attempts: Arc<Mutex<u32>>,
-    /// Pluggable runner the `task_done` hard gate uses to execute the
-    /// project's test suite. Tests inject a mock; real automatons use
-    /// [`RealTaskTestRunner`].
+    /// Pluggable runner the post-`task_done` best-effort test run
+    /// uses to execute the project's test suite. Tests inject a mock;
+    /// real automatons use [`RealTaskTestRunner`].
     pub test_runner: Arc<dyn TaskTestRunner>,
-    /// When `true`, the `task_done` test gate is skipped entirely. Captured
-    /// at construction time from the [`DISABLE_TEST_GATE_ENV`] environment
-    /// variable so that concurrent unit tests cannot race on the global env.
-    pub disable_test_gate: bool,
     /// Current task phase (explore vs implement).
     pub task_phase: Arc<Mutex<TaskPhase>>,
     /// Self-review guard tracking writes vs reads.
@@ -166,11 +136,6 @@ pub(crate) struct TaskToolExecutor {
     /// Set to true when the agent explicitly declares no file changes are
     /// required for this task (via `no_changes_needed` in `task_done` input).
     pub no_changes_needed: Arc<Mutex<bool>>,
-    /// Set to true when the `task_done` test gate has rejected
-    /// [`MAX_TASK_DONE_TEST_RETRIES`] consecutive completions and is now
-    /// surfacing the failure as a hard `task_failed`. Consumed by automatons
-    /// that emit DoD telemetry.
-    pub dod_test_gate_exhausted: Arc<Mutex<bool>>,
     /// Rolling counters for recent tool call outcomes (success / error).
     pub recent_tool_outcomes: Arc<Mutex<RecentToolOutcomes>>,
     /// Shared flag observed by the agent loop's

@@ -147,6 +147,23 @@ pub enum TurnEvent {
         reason: String,
     },
 
+    /// Best-effort test-suite outcome surfaced after `task_done`.
+    ///
+    /// Codex-parity (May 2026): the harness no longer hard-gates
+    /// completions on the project test suite. The suite is still run
+    /// once on `task_done` so the operator/UI sees whether it passed,
+    /// but a failing run no longer blocks the task — it is surfaced as
+    /// this warning instead. `task_executor::handle_task_done` emits
+    /// it before returning the success tool_result.
+    TestSuiteWarning {
+        /// `true` when the project test suite reported success.
+        passed: bool,
+        /// Short human-readable summary line (e.g. `"9 passed, 1 failed"`).
+        summary: String,
+        /// Names of failing tests as reported by the test runner.
+        failed_tests: Vec<String>,
+    },
+
     /// A warning was injected into the context.
     Warning(String),
 

@@ -108,6 +108,16 @@ pub trait TurnEventSink: Send {
         _reason: String,
     ) {
     }
+    /// Best-effort test-suite outcome after `task_done` (Codex parity).
+    /// Default no-op so sinks that don't surface DoD telemetry keep
+    /// compiling without changes.
+    async fn on_test_suite_warning(
+        &mut self,
+        _passed: bool,
+        _summary: String,
+        _failed_tests: Vec<String>,
+    ) {
+    }
     async fn on_debug(&mut self, _event: DebugEvent) {}
 }
 
@@ -201,6 +211,14 @@ where
             reason,
         } => {
             sink.on_tool_call_failed(tool_use_id, tool_name, reason)
+                .await;
+        }
+        AgentLoopEvent::TestSuiteWarning {
+            passed,
+            summary,
+            failed_tests,
+        } => {
+            sink.on_test_suite_warning(passed, summary, failed_tests)
                 .await;
         }
         AgentLoopEvent::Debug(event) => sink.on_debug(event).await,

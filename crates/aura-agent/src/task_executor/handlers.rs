@@ -2,27 +2,9 @@ use super::{
     classify_build_errors, error_category_guidance, file_ops, format_tool_arg_hint,
     infer_default_test_command, looks_like_compiler_errors, AgentLoopEvent, FileOp,
     FollowUpSuggestion, Path, TaskPhase, TaskPlan, TaskToolExecutor, ToolCallInfo, ToolCallResult,
-    DISABLE_TEST_GATE_ENV, MAX_STUB_FIX_ATTEMPTS, MAX_TASK_DONE_TEST_RETRIES,
+    MAX_STUB_FIX_ATTEMPTS,
 };
 use crate::prompts::{SteeringInjector, SteeringKind};
-
-/// Outcome of the `task_done` test-suite hard gate.
-#[derive(Debug)]
-pub(super) enum TestGateOutcome {
-    /// Suite passed (or no failures were detected and exit code was zero).
-    Passed,
-    /// Gate was skipped because there is no test command and no default could
-    /// be inferred, or the operator opted out via [`DISABLE_TEST_GATE_ENV`].
-    /// Skipping is logged at WARN to keep the operator honest.
-    Skipped,
-    /// Suite failed and the retry budget still has room. `prompt` is the
-    /// rejection message routed back to the agent so it can fix the failures
-    /// and call `task_done` again.
-    Failed { prompt: String },
-    /// Suite failed AND the retry budget is exhausted. The loop stops; the
-    /// `dod_test_gate_exhausted` flag is set on `TaskExecutionResult`.
-    Exhausted { prompt: String },
-}
 
 pub(super) fn enrich_compiler_output_sync(project_folder: &str, raw_output: &str) -> String {
     if !looks_like_compiler_errors(raw_output) {
@@ -129,41 +111,22 @@ impl TaskToolExecutor {
             return;
         }
 
-        if self.should_skip_test_gate_for_no_change_completion().await {
-            results.push(Self::tool_result(
-                tc,
-                r#"{"status":"completed"}"#,
-                false,
-                true,
-            ));
-            *stop = true;
-            return;
+        if !self.should_skip_test_gate_for_no_change_completion().await {
+            // Codex parity (May 2026): the project test suite is no
+            // longer a hard gate. We still run it once, best-effort,
+            // so the UI/operator sees the outcome — a failing run
+            // emits a `TestSuiteWarning` event but does NOT block the
+            // `task_done` success path or trigger a retry.
+            self.run_test_suite_warning().await;
         }
 
-        // Final gate: the full project test suite must be green. Pre-existing
-        // failures count — the agent owns them as part of this task. The
-        // `check_all_tests_pass` helper handles its own retry budget, the
-        // env-var escape hatch, and emits status text on failure.
-        match self.check_all_tests_pass().await {
-            TestGateOutcome::Passed | TestGateOutcome::Skipped => {
-                results.push(Self::tool_result(
-                    tc,
-                    r#"{"status":"completed"}"#,
-                    false,
-                    true,
-                ));
-                *stop = true;
-            }
-            TestGateOutcome::Failed { prompt } => {
-                results.push(Self::gate_rejection(tc, prompt));
-            }
-            TestGateOutcome::Exhausted { prompt } => {
-                // Budget exhausted: stop the loop and let the automaton see
-                // the dod_test_gate_exhausted flag on the merged result.
-                results.push(Self::tool_result(tc, prompt, true, true));
-                *stop = true;
-            }
-        }
+        results.push(Self::tool_result(
+            tc,
+            r#"{"status":"completed"}"#,
+            false,
+            true,
+        ));
+        *stop = true;
     }
 
     pub(super) async fn extract_notes_and_follow_ups(&self, tc: &ToolCallInfo) {
@@ -284,134 +247,72 @@ impl TaskToolExecutor {
         self.tracked_file_ops.lock().await.is_empty()
     }
 
-    /// Run the full project test suite and translate the outcome into a
-    /// [`TestGateOutcome`] for `handle_task_done`.
+    /// Run the full project test suite once, best-effort, after the
+    /// model called `task_done`. The outcome is surfaced as a
+    /// [`AgentLoopEvent::TestSuiteWarning`] but never blocks the
+    /// completion — see the Codex-parity note in `handle_task_done`.
     ///
-    /// The command actually executed is resolved at gate time, in priority
-    /// order:
+    /// The command is resolved at call time, in priority order:
     ///   1. [`Self::test_command_override`] — operator-supplied via
-    ///      [`TEST_COMMAND_OVERRIDE_ENV`] at executor construction.
+    ///      [`super::TEST_COMMAND_OVERRIDE_ENV`] at executor construction.
     ///   2. [`Self::test_command`] — per-project configuration.
     ///   3. [`infer_default_test_command`] — manifest-driven auto-detect
     ///      (cargo, npm/pnpm/yarn/bun, deno, pytest, go, rspec/rake,
     ///      maven, gradle, dotnet — chained with `&&` for polyglot
     ///      monorepos).
     ///
-    /// When all three return nothing the gate skips with a warning; this
-    /// is intentional so analysis-only or doc-only projects don't get
-    /// permanently jammed by the DoD requirement.
-    pub(super) async fn check_all_tests_pass(&self) -> TestGateOutcome {
-        if self.disable_test_gate {
-            tracing::warn!(
-                "{DISABLE_TEST_GATE_ENV}=1 — skipping task_done test gate (operator opt-out)"
-            );
-            return TestGateOutcome::Skipped;
-        }
-
+    /// When all three return nothing the call no-ops with a debug
+    /// log; analysis-only / doc-only projects continue to get clean
+    /// `task_done` completions.
+    pub(super) async fn run_test_suite_warning(&self) {
         let project_root = Path::new(&self.project_folder);
         let (cmd, source) = match self.resolve_test_command(project_root) {
             Some(resolved) => resolved,
             None => {
-                tracing::warn!(
+                tracing::debug!(
                     project = %self.project_folder,
-                    "no test_command configured (no override, no project value, no inferable default) \
-                     — skipping task_done test gate"
+                    "no test_command configured — skipping post-task_done test run"
                 );
-                return TestGateOutcome::Skipped;
+                return;
             }
         };
 
         self.emit_text(format!(
-            "\n[task_done test gate: {cmd} (source: {source})]\n"
+            "\n[post-task_done test run: {cmd} (source: {source})]\n"
         ));
 
         let outcome = match self.test_runner.run_tests(project_root, &cmd).await {
             Ok(outcome) => outcome,
             Err(e) => {
-                let attempt = {
-                    let mut a = self.test_gate_attempts.lock().await;
-                    *a += 1;
-                    *a
-                };
-                let prompt = SteeringInjector::render(&SteeringKind::TaskDoneTestGateIoFailure {
-                    cmd: cmd.clone(),
-                    error: e.to_string(),
-                    attempt: attempt as usize,
-                    max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
+                tracing::warn!(error = %e, cmd, "post-task_done test run failed to execute");
+                self.emit_event(AgentLoopEvent::TestSuiteWarning {
+                    passed: false,
+                    summary: format!("failed to execute `{cmd}`: {e}"),
+                    failed_tests: Vec::new(),
                 });
-                if attempt >= MAX_TASK_DONE_TEST_RETRIES {
-                    *self.dod_test_gate_exhausted.lock().await = true;
-                    return TestGateOutcome::Exhausted { prompt };
-                }
-                return TestGateOutcome::Failed { prompt };
+                return;
             }
         };
 
         if outcome.passed {
             self.emit_text(format!(
-                "\n[task_done test gate: PASSED in {ms}ms — {summary}]\n",
+                "\n[post-task_done test run: PASSED in {ms}ms — {summary}]\n",
                 ms = outcome.duration_ms,
                 summary = outcome.summary,
             ));
-            return TestGateOutcome::Passed;
+        } else {
+            self.emit_text(format!(
+                "\n[post-task_done test run: FAILED — {summary}; \
+                 task_done still succeeded (Codex-parity: warning, not gate)]\n",
+                summary = outcome.summary,
+            ));
         }
 
-        let attempt = {
-            let mut a = self.test_gate_attempts.lock().await;
-            *a += 1;
-            *a
-        };
-
-        let failures_block = if outcome.failed_tests.is_empty() {
-            String::new()
-        } else {
-            let mut s = String::from("\n\nFailing tests:\n");
-            for name in outcome.failed_tests.iter().take(20) {
-                s.push_str("- ");
-                s.push_str(name);
-                s.push('\n');
-            }
-            if outcome.failed_tests.len() > 20 {
-                s.push_str(&format!(
-                    "... and {} more\n",
-                    outcome.failed_tests.len() - 20
-                ));
-            }
-            s
-        };
-
-        let stderr_tail = tail(&outcome.raw_stderr, 4_000);
-        let stderr_block = if stderr_tail.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nLast stderr:\n{stderr_tail}")
-        };
-
-        if attempt >= MAX_TASK_DONE_TEST_RETRIES {
-            *self.dod_test_gate_exhausted.lock().await = true;
-            let exhausted_prompt =
-                SteeringInjector::render(&SteeringKind::TaskDoneTestGateExhausted {
-                    cmd: cmd.clone(),
-                    attempt: attempt as usize,
-                    max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
-                    summary: outcome.summary.clone(),
-                    failures_block,
-                    stderr_block,
-                });
-            return TestGateOutcome::Exhausted {
-                prompt: exhausted_prompt,
-            };
-        }
-
-        let prompt = SteeringInjector::render(&SteeringKind::TaskDoneTestGateFailed {
-            cmd: cmd.clone(),
-            attempt: attempt as usize,
-            max_attempts: MAX_TASK_DONE_TEST_RETRIES as usize,
+        self.emit_event(AgentLoopEvent::TestSuiteWarning {
+            passed: outcome.passed,
             summary: outcome.summary,
-            failures_block,
-            stderr_block,
+            failed_tests: outcome.failed_tests,
         });
-        TestGateOutcome::Failed { prompt }
     }
 
     /// Resolve which test command the gate should run, returning the
@@ -556,37 +457,21 @@ impl TaskToolExecutor {
         }
         exec.follow_up_tasks = self.follow_ups.lock().await.clone();
         exec.no_changes_needed = *self.no_changes_needed.lock().await;
-        exec.dod_test_gate_exhausted = *self.dod_test_gate_exhausted.lock().await;
         let phase = self.task_phase.lock().await;
         exec.reached_implementing =
             matches!(*phase, crate::planning::TaskPhase::Implementing { .. });
     }
 
     pub(super) fn emit_text(&self, text: String) {
+        self.emit_event(AgentLoopEvent::TextDelta(text));
+    }
+
+    pub(super) fn emit_event(&self, event: AgentLoopEvent) {
         if let Some(tx) = &self.event_tx {
-            if let Err(e) = tx.try_send(AgentLoopEvent::TextDelta(text)) {
+            if let Err(e) = tx.try_send(event) {
                 tracing::warn!("event channel full or closed: {e}");
             }
         }
     }
 }
 
-/// Return at most `max_bytes` of the trailing portion of `s`, preferring a
-/// newline boundary and prefixing a `[truncated …]` marker when content was
-/// dropped. Used to keep the test-gate rejection prompt under the agent's
-/// context window.
-fn tail(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let start = s.len() - max_bytes;
-    let cut = s[start..]
-        .char_indices()
-        .find_map(|(i, c)| if c == '\n' { Some(start + i + 1) } else { None })
-        .unwrap_or(start);
-    format!(
-        "[truncated; showing last {} bytes]\n{}",
-        s.len() - cut,
-        &s[cut..]
-    )
-}

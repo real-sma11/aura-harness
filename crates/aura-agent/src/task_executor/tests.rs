@@ -51,7 +51,7 @@ impl MockTestRunner {
 
     fn always_fail() -> Self {
         let mut q = Vec::new();
-        for _ in 0..(MAX_TASK_DONE_TEST_RETRIES + 4) {
+        for _ in 0..12 {
             q.push(Ok(TestSuiteOutcome {
                 passed: false,
                 summary: "9 passed, 1 failed".to_string(),
@@ -97,16 +97,13 @@ fn make_executor_with_runner(runner: Arc<dyn TaskTestRunner>) -> TaskToolExecuto
         notes: Default::default(),
         follow_ups: Default::default(),
         stub_fix_attempts: Default::default(),
-        test_gate_attempts: Default::default(),
         test_runner: runner,
-        disable_test_gate: false,
         task_phase: Arc::new(Mutex::new(TaskPhase::Implementing {
             plan: crate::planning::TaskPlan::empty(),
         })),
         self_review: Default::default(),
         event_tx: None,
         no_changes_needed: Default::default(),
-        dod_test_gate_exhausted: Default::default(),
         recent_tool_outcomes: Default::default(),
         reset_explore_on_phase_change: Arc::new(AtomicBool::new(false)),
     }
@@ -510,14 +507,11 @@ fn make_exploring_executor() -> TaskToolExecutor {
         notes: Default::default(),
         follow_ups: Default::default(),
         stub_fix_attempts: Default::default(),
-        test_gate_attempts: Default::default(),
         test_runner: Arc::new(MockTestRunner::always_pass()),
-        disable_test_gate: false,
         task_phase: Arc::new(Mutex::new(TaskPhase::Exploring)),
         self_review: Default::default(),
         event_tx: None,
         no_changes_needed: Default::default(),
-        dod_test_gate_exhausted: Default::default(),
         recent_tool_outcomes: Default::default(),
         reset_explore_on_phase_change: Arc::new(AtomicBool::new(false)),
     }
@@ -565,14 +559,11 @@ async fn submit_plan_resets_outcome_window() {
         notes: Default::default(),
         follow_ups: Default::default(),
         stub_fix_attempts: Default::default(),
-        test_gate_attempts: Default::default(),
         test_runner: Arc::new(MockTestRunner::always_pass()),
-        disable_test_gate: false,
         task_phase: Arc::new(Mutex::new(TaskPhase::Exploring)),
         self_review: Default::default(),
         event_tx: None,
         no_changes_needed: Default::default(),
-        dod_test_gate_exhausted: Default::default(),
         recent_tool_outcomes: Default::default(),
         reset_explore_on_phase_change: Arc::new(AtomicBool::new(false)),
     };
@@ -630,7 +621,7 @@ async fn extract_parses_no_changes_needed_flag() {
 }
 
 // ------------------------------------------------------------------
-// task_done test gate (Definition-of-Done) tests
+// Codex parity: post-task_done best-effort test run tests
 // ------------------------------------------------------------------
 
 async fn seed_with_file_op(executor: &TaskToolExecutor) {
@@ -646,224 +637,48 @@ async fn seed_with_file_op(executor: &TaskToolExecutor) {
 }
 
 #[tokio::test]
-async fn task_done_passes_gate_when_tests_pass() {
-    let runner = Arc::new(MockTestRunner::always_pass());
-    let executor = make_executor_with_runner(runner.clone());
+async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
+    // Codex parity replacement for the deleted retry/exhaustion suite:
+    // a failing test suite is now a `TestSuiteWarning` event, not a
+    // hard rejection. The runner must be invoked exactly once and the
+    // `task_done` tool_result must succeed and stop the loop.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentLoopEvent>(8);
+    let runner = Arc::new(MockTestRunner::always_fail());
+    let mut executor = make_executor_with_runner(runner.clone());
+    executor.event_tx = Some(tx);
     seed_with_file_op(&executor).await;
 
-    let calls = [task_done_call("done")];
-    let results = executor.execute(&calls).await;
+    let results = executor.execute(&[task_done_call("done")]).await;
 
     assert_eq!(results.len(), 1);
     assert!(
         !results[0].is_error,
-        "task_done should pass when tests pass: {}",
+        "task_done must succeed even when the test suite fails: {}",
         results[0].content
     );
-    assert!(results[0].stop_loop);
+    assert!(results[0].stop_loop, "successful task_done must stop the loop");
     assert_eq!(
         *runner.calls.lock().await,
         1,
-        "test runner should be invoked exactly once"
+        "the suite must run exactly once — no retry budget after Codex parity"
     );
-    assert!(!*executor.dod_test_gate_exhausted.lock().await);
-}
 
-#[tokio::test]
-async fn task_done_rejects_when_tests_fail_within_budget() {
-    let runner = Arc::new(MockTestRunner::always_fail());
-    let executor = make_executor_with_runner(runner.clone());
-    seed_with_file_op(&executor).await;
-
-    let calls = [task_done_call("done")];
-    let results = executor.execute(&calls).await;
-
-    assert_eq!(results.len(), 1);
-    assert!(results[0].is_error);
-    assert!(!results[0].stop_loop, "must keep iterating within budget");
-    assert!(
-        results[0].content.contains("Definition-of-Done test gate"),
-        "rejection prompt missing DoD framing: {}",
-        results[0].content
-    );
-    assert!(
-        results[0].content.contains("my_crate::tests::it_works"),
-        "rejection prompt should list failing test names"
-    );
-    assert!(!*executor.dod_test_gate_exhausted.lock().await);
-    assert_eq!(*executor.test_gate_attempts.lock().await, 1);
-}
-
-#[tokio::test]
-async fn task_done_test_gate_marks_exhausted_after_budget() {
-    let runner = Arc::new(MockTestRunner::always_fail());
-    let executor = make_executor_with_runner(runner.clone());
-    seed_with_file_op(&executor).await;
-
-    // Hammer the gate. Each call increments test_gate_attempts; once it
-    // reaches MAX_TASK_DONE_TEST_RETRIES the gate must flip to Exhausted
-    // (stop_loop=true, dod_test_gate_exhausted=true).
-    let mut last = None;
-    for _ in 0..MAX_TASK_DONE_TEST_RETRIES {
-        let results = executor.execute(&[task_done_call("done")]).await;
-        last = Some(results);
+    let mut warning_events = 0;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentLoopEvent::TestSuiteWarning { passed, summary, failed_tests } = event {
+            warning_events += 1;
+            assert!(!passed, "warning must reflect the failing run");
+            assert!(
+                summary.contains("9 passed"),
+                "warning summary must carry the runner outcome: {summary}"
+            );
+            assert_eq!(failed_tests, vec!["my_crate::tests::it_works".to_string()]);
+        }
     }
-
-    let last = last.expect("at least one iteration");
-    assert!(last[0].is_error);
-    assert!(
-        last[0].stop_loop,
-        "exhausted budget must stop the agent loop"
-    );
-    assert!(
-        last[0].content.contains("retry budget is exhausted"),
-        "exhaustion prompt missing budget language: {}",
-        last[0].content
-    );
-    assert!(
-        *executor.dod_test_gate_exhausted.lock().await,
-        "dod_test_gate_exhausted flag must be set"
-    );
     assert_eq!(
-        *executor.test_gate_attempts.lock().await,
-        MAX_TASK_DONE_TEST_RETRIES
+        warning_events, 1,
+        "exactly one TestSuiteWarning must be emitted for a single failed run"
     );
-
-    let mut result = TaskExecutionResult::default();
-    executor.merge_into_result(&mut result).await;
-    assert!(
-        result.dod_test_gate_exhausted,
-        "merge_into_result must propagate the exhausted flag"
-    );
-}
-
-#[tokio::test]
-async fn task_done_test_gate_skipped_when_no_command_or_default() {
-    // /tmp/test isn't a real project root, so infer_default_test_command
-    // returns None. With test_command also None the gate must skip rather
-    // than block.
-    let runner = Arc::new(MockTestRunner::always_pass());
-    let executor = TaskToolExecutor {
-        inner: Arc::new(NoOpInner),
-        project_folder: "/this/path/definitely/does/not/exist".to_string(),
-        build_command: None,
-        test_command: None,
-        test_command_override: None,
-        task_context: String::new(),
-        tracked_file_ops: Default::default(),
-        notes: Default::default(),
-        follow_ups: Default::default(),
-        stub_fix_attempts: Default::default(),
-        test_gate_attempts: Default::default(),
-        test_runner: runner.clone(),
-        disable_test_gate: false,
-        task_phase: Arc::new(Mutex::new(TaskPhase::Implementing {
-            plan: crate::planning::TaskPlan::empty(),
-        })),
-        self_review: Default::default(),
-        event_tx: None,
-        no_changes_needed: Default::default(),
-        dod_test_gate_exhausted: Default::default(),
-        recent_tool_outcomes: Default::default(),
-        reset_explore_on_phase_change: Arc::new(AtomicBool::new(false)),
-    };
-    seed_with_file_op(&executor).await;
-
-    let results = executor.execute(&[task_done_call("done")]).await;
-    assert!(!results[0].is_error);
-    assert!(results[0].stop_loop);
-    assert_eq!(
-        *runner.calls.lock().await,
-        0,
-        "test runner must not be called when gate is skipped"
-    );
-}
-
-#[tokio::test]
-async fn task_done_test_gate_honors_disable_flag() {
-    // The `disable_test_gate` field captures the env var at construction
-    // time so the runtime gate check is just a struct read. Simulating
-    // the operator opt-out is therefore a per-executor toggle rather than
-    // a global env mutation that would race other tests.
-    let runner = Arc::new(MockTestRunner::always_fail());
-    let mut executor = make_executor_with_runner(runner.clone());
-    executor.disable_test_gate = true;
-    seed_with_file_op(&executor).await;
-
-    let results = executor.execute(&[task_done_call("done")]).await;
-    assert!(!results[0].is_error, "{}", results[0].content);
-    assert!(results[0].stop_loop);
-    assert_eq!(
-        *runner.calls.lock().await,
-        0,
-        "test runner must not be called when the disable flag is set"
-    );
-}
-
-#[tokio::test]
-async fn task_done_no_changes_skips_test_gate_when_no_file_ops() {
-    let runner = Arc::new(MockTestRunner::always_fail());
-    let executor = make_executor_with_runner(runner.clone());
-
-    let results = executor
-        .execute(&[task_done_no_changes(
-            "task was already satisfied by existing implementation",
-        )])
-        .await;
-
-    assert!(!results[0].is_error, "{}", results[0].content);
-    assert!(results[0].stop_loop);
-    assert_eq!(
-        *runner.calls.lock().await,
-        0,
-        "no-change completions without file ops should not run the DoD test gate"
-    );
-}
-
-#[tokio::test]
-async fn task_done_no_changes_with_file_ops_still_runs_test_gate() {
-    let runner = Arc::new(MockTestRunner::always_fail());
-    let executor = make_executor_with_runner(runner.clone());
-    seed_with_file_op(&executor).await;
-
-    let results = executor
-        .execute(&[task_done_no_changes(
-            "changed code while also marking no_changes_needed",
-        )])
-        .await;
-
-    assert!(results[0].is_error);
-    assert!(
-        results[0].content.contains("Definition-of-Done test gate"),
-        "{}",
-        results[0].content
-    );
-    assert_eq!(
-        *runner.calls.lock().await,
-        1,
-        "real file edits must still pass through the DoD test gate"
-    );
-}
-
-#[test]
-fn read_disable_test_gate_env_only_matches_one() {
-    // Defence-in-depth on the env reader: only the literal "1" disables
-    // the gate. Anything else (empty, "0", "true", "yes", typos) keeps
-    // the gate live. This guards against an operator setting the var to
-    // a truthy-looking value and being silently surprised.
-    let prev = std::env::var(DISABLE_TEST_GATE_ENV).ok();
-    for (val, expected) in [("1", true), ("0", false), ("true", false), ("", false)] {
-        std::env::set_var(DISABLE_TEST_GATE_ENV, val);
-        assert_eq!(
-            super::read_disable_test_gate_env(),
-            expected,
-            "value {val:?} should map to {expected}"
-        );
-    }
-    match prev {
-        Some(v) => std::env::set_var(DISABLE_TEST_GATE_ENV, v),
-        None => std::env::remove_var(DISABLE_TEST_GATE_ENV),
-    }
 }
 
 #[test]
@@ -947,30 +762,6 @@ async fn resolve_test_command_falls_back_to_inferred_default() {
     assert_eq!(source, "manifest auto-detect");
 }
 
-#[tokio::test]
-async fn task_done_gate_uses_env_override_command() {
-    // End-to-end: when the override is set, the gate must hand THAT
-    // command to the runner, not the project's configured one. This
-    // is the contract operators rely on to redirect the gate without
-    // editing the project record.
-    let runner = Arc::new(MockTestRunner::always_pass());
-    let mut executor = make_executor_with_runner(runner.clone());
-    executor.test_command = Some("cargo test --workspace".to_string());
-    executor.test_command_override = Some("custom-runner --smoke".to_string());
-    seed_with_file_op(&executor).await;
-
-    let results = executor.execute(&[task_done_call("done")]).await;
-    assert!(!results[0].is_error, "{}", results[0].content);
-    assert!(results[0].stop_loop);
-
-    let cmds = runner.commands.lock().await;
-    assert_eq!(cmds.len(), 1);
-    assert_eq!(
-        cmds[0], "custom-runner --smoke",
-        "gate must run the override, not the project config"
-    );
-}
-
 // ------------------------------------------------------------------
 // Phase-reset handshake tests
 // ------------------------------------------------------------------
@@ -990,14 +781,11 @@ fn make_exploring_executor_with_signal(signal: Arc<AtomicBool>) -> TaskToolExecu
         notes: Default::default(),
         follow_ups: Default::default(),
         stub_fix_attempts: Default::default(),
-        test_gate_attempts: Default::default(),
         test_runner: Arc::new(MockTestRunner::always_pass()),
-        disable_test_gate: false,
         task_phase: Arc::new(Mutex::new(TaskPhase::Exploring)),
         self_review: Default::default(),
         event_tx: None,
         no_changes_needed: Default::default(),
-        dod_test_gate_exhausted: Default::default(),
         recent_tool_outcomes: Default::default(),
         reset_explore_on_phase_change: signal,
     }

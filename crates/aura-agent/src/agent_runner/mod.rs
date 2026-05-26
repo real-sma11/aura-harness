@@ -52,11 +52,6 @@ pub struct TaskExecutionResult {
     /// submitted a plan. Automatons use this to distinguish "never tried"
     /// from "tried but was interrupted" when `file_ops` is empty.
     pub reached_implementing: bool,
-    /// When true, the `task_done` hard gate rejected
-    /// [`crate::task_executor::MAX_TASK_DONE_TEST_RETRIES`] consecutive
-    /// completions because the project test suite kept failing. Automatons
-    /// surface this as a `task_failed` reason rather than retrying again.
-    pub dod_test_gate_exhausted: bool,
     /// Final message history from the agent loop. Downstream validators use
     /// this to build recovery hints (e.g. which file paths the agent tried
     /// to write before truncation).
@@ -398,16 +393,13 @@ impl AgentRunner {
             notes: Arc::default(),
             follow_ups: Arc::default(),
             stub_fix_attempts: Arc::default(),
-            test_gate_attempts: Arc::default(),
             test_runner: Arc::new(crate::task_executor::RealTaskTestRunner),
-            disable_test_gate: crate::task_executor::read_disable_test_gate_env(),
             task_phase: Arc::new(Mutex::new(TaskPhase::Implementing {
                 plan: TaskPlan::empty(),
             })),
             self_review: Arc::default(),
             event_tx: event_tx.clone(),
             no_changes_needed: Arc::default(),
-            dod_test_gate_exhausted: Arc::default(),
             recent_tool_outcomes: Arc::default(),
             reset_explore_on_phase_change: Arc::clone(&reset_signal),
         };
@@ -726,7 +718,6 @@ fn finalize_loop_result(result: AgentLoopResult) -> TaskExecutionResult {
         files_already_applied: true,
         no_changes_needed: false,
         reached_implementing: false,
-        dod_test_gate_exhausted: false,
         messages,
     }
 }
