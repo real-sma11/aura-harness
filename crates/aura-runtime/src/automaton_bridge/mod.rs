@@ -310,7 +310,16 @@ impl AutomatonBridge {
     // ------------------------------------------------------------------
 
     /// Pause an automaton by its ID.
-    pub fn pause_by_id(&self, automaton_id: &str) -> Result<(), String> {
+    ///
+    /// Mirrors [`Self::stop_by_id`]'s audit trail by recording a
+    /// `System::AutomatonLifecycle { event: "pause_dev_loop" }`
+    /// transaction on the owning agent's log. Without this entry
+    /// operators inspecting the record log can see start / stop
+    /// transitions but not the intentional pauses between them,
+    /// making "the run halted at 19:27 — was that a pause or a
+    /// stop?" impossible to answer from the audit trail alone.
+    pub async fn pause_by_id(&self, automaton_id: &str) -> Result<(), String> {
+        let mut target: Option<AgentId> = None;
         for entry in self.project_handles.iter() {
             let tracked = entry.value();
             if tracked.automaton_id == automaton_id {
@@ -318,9 +327,15 @@ impl AutomatonBridge {
                     return Err("Automaton has already finished".into());
                 }
                 tracked.handle.pause();
-                info!(automaton_id, "Automaton paused via REST");
-                return Ok(());
+                target = Some(tracked.agent_id);
+                break;
             }
+        }
+        if let Some(agent_id) = target {
+            self.record_lifecycle_event(agent_id, automaton_id, "pause_dev_loop")
+                .await;
+            info!(automaton_id, "Automaton paused via REST");
+            return Ok(());
         }
         Err(format!("Automaton {automaton_id} not found"))
     }
@@ -396,16 +411,23 @@ impl AutomatonController for AutomatonBridge {
     }
 
     async fn pause_dev_loop(&self, project_id: &str) -> Result<(), String> {
-        let entry = self
-            .project_handles
-            .get(project_id)
-            .ok_or_else(|| format!("No running dev loop for project {project_id}"))?;
-        let tracked = entry.value();
-        if tracked.handle.is_finished() {
-            return Err("Dev loop has already finished".into());
-        }
-        tracked.handle.pause();
-        info!(project_id, "Dev loop paused");
+        let (automaton_id, agent_id) = {
+            let entry = self
+                .project_handles
+                .get(project_id)
+                .ok_or_else(|| format!("No running dev loop for project {project_id}"))?;
+            let tracked = entry.value();
+            if tracked.handle.is_finished() {
+                return Err("Dev loop has already finished".into());
+            }
+            tracked.handle.pause();
+            (tracked.automaton_id.clone(), tracked.agent_id)
+        };
+        // Mirror `stop_dev_loop`'s audit trail. See `pause_by_id` for
+        // why the `System::AutomatonLifecycle` write matters.
+        self.record_lifecycle_event(agent_id, &automaton_id, "pause_dev_loop")
+            .await;
+        info!(project_id, automaton_id = %automaton_id, "Dev loop paused");
         Ok(())
     }
 

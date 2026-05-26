@@ -163,6 +163,19 @@ impl DevLoopAutomaton {
 
         let result = self.execute_task(ctx, cfg, &task).await;
 
+        // User-initiated stop fires the shared cancellation token, which the
+        // agent loop honours by returning an early `Ok(TaskExecutionResult)`
+        // with empty `file_ops` and `no_changes_needed = false`. Without this
+        // guard the empty result would trip `classify_execution_result`, mark
+        // the task `failed`, increment `STATE_FAILED_COUNT`, and emit a
+        // misleading `WARN Task execution failed ... task ended without writes
+        // and without no_changes_needed`. Cancellation is not a failure — log
+        // it cleanly and roll the task status back to `ready` so the next dev
+        // loop start can pick it up.
+        if ctx.is_cancelled() {
+            return self.record_task_cancelled(ctx, &task).await.map(|()| TickOutcome::Done);
+        }
+
         match result {
             Ok(exec) => match classify_execution_result(&exec) {
                 Some(err) => self.record_task_failure(ctx, &task, err).await?,
@@ -172,6 +185,39 @@ impl DevLoopAutomaton {
         }
 
         Ok(TickOutcome::Continue)
+    }
+
+    /// Mid-task cancellation handler.
+    ///
+    /// Called when the operator triggers a stop while a task is in flight.
+    /// Distinguishes intentional cancellation from genuine failure: logs at
+    /// `INFO`, leaves `STATE_FAILED_COUNT` untouched, transitions the task
+    /// back to `ready`, and emits a `LogLine` event so the operator UI shows
+    /// "Task <id> cancelled by stop request" instead of a phantom failure.
+    async fn record_task_cancelled(
+        &self,
+        ctx: &mut TickContext,
+        task: &TaskDescriptor,
+    ) -> Result<(), AutomatonError> {
+        info!(
+            automaton_id = %ctx.automaton_id,
+            task_id = %task.id,
+            title = %task.title,
+            "Task cancelled by user stop"
+        );
+
+        if let Err(e) = self.domain.transition_task(&task.id, "ready", None).await {
+            warn!(
+                task_id = %task.id,
+                error = %e,
+                "Failed to roll cancelled task back to ready"
+            );
+        }
+
+        ctx.emit(AutomatonEvent::LogLine {
+            message: format!("Task {} cancelled by stop request", task.id),
+        })?;
+        Ok(())
     }
 
     async fn record_task_success(

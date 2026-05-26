@@ -238,6 +238,7 @@ pub(super) async fn automaton_pause_handler(
 
     bridge
         .pause_by_id(&automaton_id)
+        .await
         .map_err(|e| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))))?;
 
     Ok(Json(

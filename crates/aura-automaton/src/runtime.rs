@@ -169,6 +169,18 @@ impl AutomatonRuntime {
 
         let final_status = loop {
             if cancel.is_cancelled() {
+                // Distinguishes a clean user-driven stop from the
+                // generic `Stopped` final-status fan-out below. The
+                // operator-facing log previously only carried a
+                // `Stopped` reason via `AutomatonEvent::Stopped`,
+                // which read identically to a natural completion or
+                // crash-driven cleanup; emitting an explicit INFO
+                // here makes user-initiated cancellation greppable
+                // in production logs.
+                info!(
+                    automaton_id = %id,
+                    "Automaton run loop observed cancellation; stopping"
+                );
                 break AutomatonStatus::Stopped;
             }
 
@@ -193,6 +205,10 @@ impl AutomatonRuntime {
                     }
                 }
                 if cancel.is_cancelled() {
+                    info!(
+                        automaton_id = %id,
+                        "Automaton stopped while paused"
+                    );
                     break AutomatonStatus::Stopped;
                 }
             }
@@ -385,6 +401,93 @@ mod tests {
 
         let removed = Registry::remove(&mut runtime, &id);
         assert!(removed.is_none(), "direct remove is unsupported");
+    }
+
+    /// Slow-tick automaton used to exercise the user-stop path.
+    ///
+    /// Each tick races a 50ms timer against the shared cancellation
+    /// token and always returns `Continue` — the runtime loop top
+    /// is what observes cancellation and exits with
+    /// `AutomatonStatus::Stopped`. Returning `Done` from inside the
+    /// tick would route the exit through the natural-completion
+    /// branch (`AutomatonStatus::Completed`), masking the stop path
+    /// this test is meant to cover. The short timer keeps the
+    /// post-stop loop iteration tight so the test finishes quickly
+    /// without sacrificing the "tick was actually running" invariant.
+    struct SlowAutomaton;
+
+    #[async_trait::async_trait]
+    impl Automaton for SlowAutomaton {
+        fn kind(&self) -> &str {
+            "slow"
+        }
+
+        async fn tick(&self, ctx: &mut TickContext) -> Result<TickOutcome, AutomatonError> {
+            tokio::select! {
+                () = ctx.cancellation_token().cancelled() => Ok(TickOutcome::Continue),
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    Ok(TickOutcome::Continue)
+                }
+            }
+        }
+    }
+
+    /// Operator-initiated `stop()` on a long-running automaton must
+    /// surface a `Stopped { reason: "Stopped" }` event so downstream
+    /// observers (the `aura-os-server` run-log forwarder, the
+    /// operator UI's status badge, the `/stream/automaton/:id` WS
+    /// consumer) can distinguish a user-driven halt from a natural
+    /// completion (`reason: "Completed"`) or a crash
+    /// (`reason: "Failed"`).
+    ///
+    /// Companion to the dev-loop `record_task_cancelled` /
+    /// task-run `finalize_task` cancellation guards: those keep the
+    /// in-flight task out of the failed bucket, this asserts the
+    /// outer automaton lifecycle event still fires with the right
+    /// reason string.
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_stop_emits_stopped_event_with_stopped_reason() {
+        let runtime = AutomatonRuntime::new();
+        let (handle, mut rx) = runtime
+            .install(Box::new(SlowAutomaton), serde_json::json!({}), None)
+            .await
+            .unwrap();
+
+        // Wait for `Started` so we know the loop is actually running
+        // (i.e. the cancellation fires mid-execution, not before
+        // `on_install`).
+        let mut saw_started = false;
+        while let Ok(Some(evt)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+        {
+            if matches!(evt, AutomatonEvent::Started { .. }) {
+                saw_started = true;
+                break;
+            }
+        }
+        assert!(saw_started, "automaton must reach Started before stop()");
+
+        handle.stop();
+
+        let mut stop_reason: Option<String> = None;
+        while let Ok(Some(evt)) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+        {
+            match evt {
+                AutomatonEvent::Stopped { reason, .. } => {
+                    stop_reason = Some(reason);
+                }
+                AutomatonEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            stop_reason.as_deref(),
+            Some("Stopped"),
+            "user-initiated stop must emit Stopped {{ reason: \"Stopped\" }} \
+             so downstream observers can distinguish it from Completed/Failed"
+        );
     }
 
     #[tokio::test]

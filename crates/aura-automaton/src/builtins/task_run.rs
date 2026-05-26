@@ -287,6 +287,33 @@ impl TaskRunAutomaton {
         task_id: &str,
         result: Result<aura_agent::agent_runner::TaskExecutionResult, AutomatonError>,
     ) -> Result<TickOutcome, AutomatonError> {
+        // User-initiated stop fires the shared cancellation token. The agent
+        // loop unwinds with either an empty `Ok(TaskExecutionResult)` or an
+        // `Err(AgentExecution(...))` carrying the cancelled-stream message.
+        // Either way it is NOT a task failure: report it cleanly so the audit
+        // trail shows "cancelled by stop" instead of "task execution failed"
+        // and skip transitioning the task to `failed` (rolling back to
+        // `ready` mirrors the dev-loop behaviour and leaves the task in a
+        // state the next run can pick up).
+        if ctx.is_cancelled() {
+            info!(
+                automaton_id = %ctx.automaton_id,
+                task_id,
+                "Task run cancelled by user stop"
+            );
+            if let Err(te) = self.domain.transition_task(task_id, "ready", None).await {
+                warn!(
+                    task_id,
+                    error = %te,
+                    "Failed to roll cancelled task back to ready"
+                );
+            }
+            ctx.emit(AutomatonEvent::LogLine {
+                message: format!("Task {task_id} cancelled by stop request"),
+            })?;
+            return Ok(TickOutcome::Done);
+        }
+
         match result {
             Ok(exec) => {
                 if let Err(e) = self.domain.transition_task(task_id, "done", None).await {
