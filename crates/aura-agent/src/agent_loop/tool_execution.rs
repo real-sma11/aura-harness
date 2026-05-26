@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use crate::constants::{tool_result_cache_key, CACHEABLE_TOOLS};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, ToolResultContent};
 use tokio::sync::mpsc::Sender;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
+use crate::console;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
@@ -56,12 +57,12 @@ async fn execute_and_cache_tools(
     if tool_calls.is_empty() {
         return None;
     }
-    info!(
+    debug!(
         tool_count = tool_calls.len(),
         "Processing tool_use stop reason"
     );
     for tc in &tool_calls {
-        info!(
+        debug!(
             tool_use_id = %tc.id,
             tool_name = %tc.name,
             is_write = helpers::is_write_tool(&tc.name),
@@ -78,7 +79,7 @@ async fn execute_and_cache_tools(
         .iter()
         .map(|r| r.tool_use_id.clone())
         .collect();
-    info!(
+    debug!(
         cached_count = cached_results.len(),
         execute_count = uncached_calls.len(),
         "Resolved cached vs executable tool calls"
@@ -121,6 +122,17 @@ async fn execute_and_cache_tools(
 const TOOL_ERROR_PREVIEW_LIMIT: usize = 1024;
 
 fn emit_and_log_results(event_tx: Option<&Sender<AgentLoopEvent>>, tools: &ExecutedTools) {
+    // Single visual block summarising the whole batch — replaces the
+    // pre-block stream of per-tool `Tool call completed` INFO lines.
+    // The forensic per-tool lines stay available under
+    // `RUST_LOG=aura_agent=debug` for log dumps that need them.
+    console::tools_block(
+        &tools.tool_calls,
+        &tools.all_results,
+        &tools.cached_ids,
+        &tools.blocked_ids,
+    );
+
     for r in &tools.all_results {
         let tool_name = tools
             .tool_calls
@@ -136,7 +148,7 @@ fn emit_and_log_results(event_tx: Option<&Sender<AgentLoopEvent>>, tools: &Execu
         };
         if r.is_error {
             let preview = truncate_preview(&r.content, TOOL_ERROR_PREVIEW_LIMIT);
-            info!(
+            debug!(
                 tool_use_id = %r.tool_use_id,
                 tool_name = tool_name,
                 is_write = helpers::is_write_tool(tool_name),
@@ -148,7 +160,7 @@ fn emit_and_log_results(event_tx: Option<&Sender<AgentLoopEvent>>, tools: &Execu
                 "Tool call completed"
             );
         } else {
-            info!(
+            debug!(
                 tool_use_id = %r.tool_use_id,
                 tool_name = tool_name,
                 is_write = helpers::is_write_tool(tool_name),
@@ -276,7 +288,7 @@ pub(super) fn split_cached(
 
         let exact_key = tool_result_cache_key(&tc.name, &tc.input);
         if let Some(hit) = cache.get(&exact_key) {
-            info!(
+            debug!(
                 tool_use_id = %tc.id,
                 tool_name = %tc.name,
                 source = "cache:exact",
@@ -292,7 +304,7 @@ pub(super) fn split_cached(
         // because their keys already describe a single resource.
         if let Some(fkey) = normalized_search_key(&tc.name, &tc.input) {
             if let Some(hit) = fuzzy_cache.get(&fkey) {
-                info!(
+                debug!(
                     tool_use_id = %tc.id,
                     tool_name = %tc.name,
                     source = "cache:fuzzy",

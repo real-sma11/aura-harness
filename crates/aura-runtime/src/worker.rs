@@ -20,7 +20,13 @@ pub struct ProcessedAgent {
 /// Detailed variant used by foreground subagent dispatch to retrieve the
 /// final child result while preserving the normal worker path for callers that
 /// only need a processed-count.
-#[instrument(skip(kernel, agent_loop, tools), fields(agent_id = %agent_id))]
+///
+/// Span name `worker` keeps the chain compact: the parent
+/// `agent{id=…}` span (installed by
+/// [`crate::scheduler::Scheduler::schedule_agent_with_overrides`])
+/// already carries the agent id, so this span adds only the structural
+/// hop without re-emitting the id field.
+#[instrument(name = "worker", skip_all)]
 pub async fn process_agent_detailed(
     agent_id: AgentId,
     kernel: Arc<Kernel>,

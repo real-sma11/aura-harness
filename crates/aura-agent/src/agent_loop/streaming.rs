@@ -351,6 +351,7 @@ impl AgentLoop {
         let latency_ms = start.elapsed().as_millis() as u64;
         match accumulator.into_response(0, latency_ms) {
             Ok(response) => {
+                aura_reasoner::console::emit_response_block(&response, latency_ms, 200, "OK");
                 emit_debug_llm_call(event_tx, provider_name, model_name, &response, latency_ms);
                 Ok(response)
             }
@@ -653,6 +654,7 @@ impl super::AgentLoop {
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         match accumulator.into_response(0, latency_ms) {
             Ok(response) => {
+                aura_reasoner::console::emit_response_block(&response, latency_ms, 200, "OK");
                 emit_debug_llm_call(event_tx, provider_name, &model_name, &response, latency_ms);
                 Ok(response)
             }

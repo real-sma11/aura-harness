@@ -376,8 +376,40 @@ impl AnthropicProvider {
         let routing_context = RequestRoutingContext::from_request(request_ctx);
         let prompt_caching_header_enabled = self.config.prompt_caching_enabled
             && Self::supports_anthropic_proxy_features(request_ctx, model);
+        let headers_present_str =
+            request_headers_present(request_ctx, prompt_caching_header_enabled);
+        let request_kind_label = format!("{:?}", content_profile.kind);
+        let tool_choice_label = request_summary
+            .tool_choice
+            .as_deref()
+            .map(strip_tool_choice_braces)
+            .unwrap_or_else(|| "n/a".to_string());
+        let thinking_label = if request_summary.has_thinking {
+            "on"
+        } else {
+            "off"
+        };
 
-        info!(
+        // Visual block for human-scannable transcripts. The forensic
+        // field-by-field log is preserved at `debug!` below so
+        // operators can still grep / pivot on individual fields when
+        // chasing WAF / cap regressions.
+        crate::console::anthropic_request_block(crate::console::AnthropicRequestView {
+            model,
+            kind: &request_kind_label,
+            body_bytes: final_bytes.len(),
+            messages_count,
+            tools_count: request_summary.tools_count,
+            tool_choice: &tool_choice_label,
+            thinking_label,
+            system_bytes: request_summary.system_bytes,
+            last_user_bytes: request_summary.last_user_text_bytes,
+            last_user_hash: request_summary.last_user_text_hash.as_deref(),
+            headers_present: &headers_present_str,
+            request_hash: &request_summary.body_hash,
+        });
+
+        debug!(
             model = %model,
             body_bytes = final_bytes.len(),
             messages_count,
@@ -400,7 +432,7 @@ impl AnthropicProvider {
             content_signature = %content_profile.content_signature,
             thinking = request_summary.has_thinking,
             output_config = request_summary.has_output_config,
-            headers_present = %request_headers_present(request_ctx, prompt_caching_header_enabled),
+            headers_present = %headers_present_str,
             aura_project_id = routing_context.project_label(),
             aura_agent_id = routing_context.agent_label(),
             aura_org_id = routing_context.org_label(),
@@ -1130,6 +1162,19 @@ fn request_headers_present(request_ctx: &ModelRequest, prompt_caching_enabled: b
 fn non_empty(value: &str) -> bool {
     !value.trim().is_empty()
 }
+
+/// Render `{"type":"auto"}` → `auto` for the visual block. Falls back
+/// to the raw string when the shape is unfamiliar so we never lose
+/// information.
+fn strip_tool_choice_braces(raw: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(ty) = value.get("type").and_then(serde_json::Value::as_str) {
+            return ty.to_string();
+        }
+    }
+    raw.to_string()
+}
+
 
 async fn throttle_outbound_request(min_interval_ms: u64, model: &str) {
     if min_interval_ms == 0 {
@@ -2329,14 +2374,16 @@ impl ModelProvider for AnthropicProvider {
                         "Failed to parse Anthropic response: {e}"
                     )))
                 })?;
-                Ok(parse_complete_response(
+                let parsed = parse_complete_response(
                     api_response,
                     ctx.model_idx,
                     request_ref.model.as_ref(),
                     &model,
                     latency_ms,
                     provider_request_id,
-                ))
+                );
+                crate::console::emit_response_block(&parsed, latency_ms, 200, "OK");
+                Ok(parsed)
             })
         })
         .await

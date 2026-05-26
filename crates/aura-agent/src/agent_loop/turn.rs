@@ -44,7 +44,9 @@
 use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument;
 
+use crate::console;
 use crate::events::AgentLoopEvent;
 use crate::session::input_queue::InputQueue;
 use crate::session::UserInput;
@@ -121,6 +123,11 @@ pub(crate) struct StopHookOutcome {
 /// collapses to E.1 (one drain-free sampling loop until the model
 /// signals stop).
 #[allow(clippy::too_many_arguments)]
+#[instrument(
+    name = "turn",
+    skip_all,
+    fields(idx = turn_index, iter_offset = iteration_offset),
+)]
 pub(crate) async fn run_turn(
     agent: &AgentLoop,
     provider: &dyn ModelProvider,
@@ -170,6 +177,11 @@ pub(crate) async fn run_turn(
                 turn_index,
             });
         }
+
+        // Visual separator at the top of each sampling iteration so
+        // operators can scan a single log file and immediately see
+        // where one round-trip ends and the next begins.
+        console::sampling_boundary(&task_id.to_string(), turn_index, iteration);
 
         let sampling_result: SamplingRequestResult = run_sampling_request(
             agent,

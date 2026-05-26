@@ -44,9 +44,10 @@ use std::sync::Arc;
 use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{field, instrument, Span};
 use uuid::Uuid;
 
+use crate::console;
 use crate::events::AgentLoopEvent;
 use crate::session::input_queue::InputQueue;
 use crate::types::{AgentLoopResult, AgentToolExecutor};
@@ -90,6 +91,14 @@ impl std::fmt::Display for TaskId {
     }
 }
 
+/// Return the first 8 hex chars of a UUID string (the prefix is
+/// universally enough to disambiguate concurrent tasks in a single
+/// log file). Used to populate the `task{id=...}` span field without
+/// flooding every nested log line with a 36-char UUID.
+fn short_id(task_id: &str) -> &str {
+    task_id.get(..8).unwrap_or(task_id)
+}
+
 /// Drive one task to completion.
 ///
 /// E.1 wired the codex-shaped nesting (task → turn → sampling). E.2
@@ -117,6 +126,11 @@ impl std::fmt::Display for TaskId {
 /// pre-E.1 caller contract — "`run` always returns `Ok` with errors
 /// folded into the result" — survives).
 #[allow(clippy::too_many_arguments)]
+#[instrument(
+    name = "task",
+    skip_all,
+    fields(id = field::Empty),
+)]
 pub(crate) async fn run_task(
     agent: &AgentLoop,
     provider: &dyn ModelProvider,
@@ -128,9 +142,18 @@ pub(crate) async fn run_task(
     input_queue: Option<Arc<InputQueue>>,
 ) -> Result<AgentLoopResult, AgentError> {
     let task_id = TaskId::new_v4();
+    let task_id_str = task_id.to_string();
+    Span::current().record("id", field::display(short_id(&task_id_str)));
+
     let mut state = LoopState::new(&agent.config, messages);
     state.build_baseline = executor.capture_build_baseline().await;
-    info!(
+
+    console::task_start_banner(
+        &task_id_str,
+        agent.config.max_turns_per_task,
+        agent.config.max_iterations_per_task,
+    );
+    tracing::debug!(
         task_id = %task_id,
         max_iterations = agent.config.max_iterations,
         max_turns_per_task = agent.config.max_turns_per_task,

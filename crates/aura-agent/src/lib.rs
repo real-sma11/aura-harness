@@ -45,6 +45,7 @@
 mod agent_loop;
 mod budget;
 pub(crate) mod build;
+pub mod console;
 pub mod constants;
 pub(crate) mod events;
 pub(crate) mod file_ops;

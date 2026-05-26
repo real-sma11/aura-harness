@@ -75,7 +75,10 @@ async fn run_with_args(args: RunArgs) -> anyhow::Result<()> {
             };
 
             tracing_subscriber::registry()
-                .with(fmt::layer().with_target(false))
+                .with(
+                    fmt::layer()
+                        .event_format(aura_runtime::console_format::AuraConsoleFormat::new()),
+                )
                 .with(filter)
                 .init();
 

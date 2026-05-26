@@ -1,5 +1,6 @@
 //! Aura Node binary entry point.
 
+use aura_runtime::console_format::AuraConsoleFormat;
 use aura_runtime::{Node, NodeConfig};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -8,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().event_format(AuraConsoleFormat::new()))
         .with(EnvFilter::from_default_env().add_directive("aura=info".parse()?))
         .init();
 

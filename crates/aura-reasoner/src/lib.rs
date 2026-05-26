@@ -22,6 +22,7 @@
 #![warn(clippy::all)]
 
 pub mod anthropic;
+pub mod console;
 mod error;
 mod kernel_propose;
 mod mock;

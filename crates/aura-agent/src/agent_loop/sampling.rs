@@ -31,7 +31,7 @@ use std::time::Instant;
 use aura_reasoner::{ModelProvider, StopReason, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::events::AgentLoopEvent;
 use crate::types::AgentToolExecutor;
@@ -85,6 +85,11 @@ pub(crate) struct SamplingRequestResult {
 /// than introduce a one-shot builder type that would be thrown away
 /// almost immediately.
 #[allow(clippy::too_many_arguments)] // E.3 collapses into SamplingContext.
+#[instrument(
+    name = "sampling",
+    skip_all,
+    fields(iter = iteration),
+)]
 pub(crate) async fn run_sampling_request(
     agent: &AgentLoop,
     provider: &dyn ModelProvider,

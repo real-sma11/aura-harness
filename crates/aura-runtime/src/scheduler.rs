@@ -153,7 +153,11 @@ impl Scheduler {
     ///
     /// Constructs a per-agent [`Kernel`] and routes all transactions through
     /// kernel-mediated processing.
-    #[instrument(skip(self), fields(agent_id = %agent_id))]
+    ///
+    /// No `#[instrument]` here: this is a one-line shim that immediately
+    /// delegates to [`Self::schedule_agent_with_overrides`], which owns
+    /// the canonical `agent{id=...}` span so the prefix chain doesn't
+    /// duplicate the `agent_id` field.
     pub async fn schedule_agent(&self, agent_id: AgentId) -> anyhow::Result<u64> {
         self.schedule_agent_with_overrides(agent_id, None, None)
             .await
@@ -164,7 +168,14 @@ impl Scheduler {
     ///
     /// Subagent dispatch uses this to run a child with narrowed policy and a
     /// per-kind loop configuration while preserving the single-writer claim.
-    #[instrument(skip(self, agent_loop_config, policy), fields(agent_id = %agent_id))]
+    ///
+    /// Span name `agent{id=…}` is the canonical root of the runtime →
+    /// agent-loop span chain; downstream spans (`worker`, `task{id}`,
+    /// `turn`, `sampling`, `complete{model}`) all inherit from it so
+    /// the visible prefix in the structured console transcript reads
+    /// `agent{id}:worker:task{id}:turn{T}:sampling{I}:complete{model}`
+    /// — every level adds new information.
+    #[instrument(name = "agent", skip(self, agent_loop_config, policy), fields(id = %agent_id))]
     pub async fn schedule_agent_with_overrides(
         &self,
         agent_id: AgentId,
