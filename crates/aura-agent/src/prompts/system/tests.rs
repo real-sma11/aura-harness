@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 use crate::prompts::AgentIdentity;
 
 fn test_project(folder: &str) -> ProjectInfo<'_> {
@@ -81,8 +81,9 @@ fn agentic_prompt_leads_with_action_oriented_move_set() {
     let prompt = agentic_execution_system_prompt(&project, None);
 
     assert!(
-        prompt
-            .contains("Edit code with write_file / edit_file / delete_file. Finish with task_done."),
+        prompt.contains(
+            "Edit code with write_file / edit_file / delete_file. Finish with task_done."
+        ),
         "action-oriented lead line missing: {prompt}"
     );
     assert!(
@@ -486,7 +487,8 @@ fn assert_snapshot(name: &str, actual: &str) {
     });
     let expected_norm = expected.replace("\r\n", "\n");
     assert_eq!(
-        expected_norm, actual,
+        expected_norm,
+        actual,
         "snapshot {} mismatch",
         path.display()
     );

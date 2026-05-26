@@ -742,8 +742,7 @@ mod tests {
         // The overwrite path should NOT re-flag the module-link gap; it
         // only fires for fresh creations to avoid spamming on every edit.
         let _ = fs_write(&sandbox, "src/hpke_hybrid.rs", "pub fn a() {}\n", false).unwrap();
-        let result =
-            fs_write(&sandbox, "src/hpke_hybrid.rs", "pub fn b() {}\nx\n", false).unwrap();
+        let result = fs_write(&sandbox, "src/hpke_hybrid.rs", "pub fn b() {}\nx\n", false).unwrap();
         assert!(
             !result.metadata.contains_key("unlinked_module"),
             "overwrite must not re-emit the warning"

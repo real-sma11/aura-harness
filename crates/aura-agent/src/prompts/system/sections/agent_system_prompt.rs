@@ -12,5 +12,7 @@ pub(crate) fn render(prompt: Option<&str>) -> Option<String> {
     if body.is_empty() {
         return None;
     }
-    Some(format!("<agent_system_prompt>\n{body}\n</agent_system_prompt>"))
+    Some(format!(
+        "<agent_system_prompt>\n{body}\n</agent_system_prompt>"
+    ))
 }

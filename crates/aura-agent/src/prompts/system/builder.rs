@@ -89,8 +89,7 @@ impl SystemPromptBuilder {
     /// the prompt.
     #[must_use]
     pub fn project_context(mut self, project: &ProjectInfo<'_>) -> Self {
-        self.sections
-            .push(project_context_section::render(project));
+        self.sections.push(project_context_section::render(project));
         self
     }
 

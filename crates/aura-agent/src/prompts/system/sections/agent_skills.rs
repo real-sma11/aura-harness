@@ -7,10 +7,7 @@
 /// Render the agent-skills section, or `None` when the list is empty.
 #[must_use]
 pub(crate) fn render(skills: &[String]) -> Option<String> {
-    let mut filtered = skills
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    let mut filtered = skills.iter().map(|s| s.trim()).filter(|s| !s.is_empty());
     let first = filtered.next()?;
 
     let mut body = String::new();

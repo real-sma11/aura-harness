@@ -277,8 +277,7 @@ mod tests {
         let max_bytes = 5usize;
         let result = fs_read(&sandbox, "test.txt", max_bytes, None, None).unwrap();
         assert!(result.ok, "truncation must surface as a successful result");
-        let expected_marker =
-            truncation_marker(content.len() - max_bytes, content.len());
+        let expected_marker = truncation_marker(content.len() - max_bytes, content.len());
         let expected_len = max_bytes + expected_marker.as_bytes().len();
         assert_eq!(
             result.stdout.len(),
@@ -360,14 +359,7 @@ mod tests {
             "line-numbered output must exceed max_bytes for this test to exercise the line-render cap"
         );
 
-        let result = fs_read(
-            &sandbox,
-            "lines.txt",
-            max_bytes,
-            Some(1),
-            Some(line_count),
-        )
-        .unwrap();
+        let result = fs_read(&sandbox, "lines.txt", max_bytes, Some(1), Some(line_count)).unwrap();
         assert!(result.ok);
 
         let body = String::from_utf8(result.stdout.to_vec())

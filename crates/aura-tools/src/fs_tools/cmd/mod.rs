@@ -763,6 +763,16 @@ fn check_binary_allowlist(
         ));
     }
 
+    if Path::new(program).components().count() == 1
+        && !allowlist
+            .iter()
+            .any(|allowed| allowed == &strip_windows_executable_suffix(program))
+    {
+        return Err(ToolError::Forbidden(format!(
+            "program '{program}' is not present in ToolConfig::command.binary_allowlist"
+        )));
+    }
+
     // When the caller already passes an absolute/relative path, honor it;
     // otherwise resolve via PATH. `which` handles the Windows `.exe`
     // extension normalization for us.

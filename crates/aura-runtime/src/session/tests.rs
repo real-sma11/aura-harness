@@ -455,24 +455,63 @@ fn apply_init_typed_fields_path_takes_priority_over_legacy_system_prompt() {
         "typed-fields path must ignore the legacy system_prompt payload; got prompt:\n{prompt}",
     );
 
-    assert!(prompt.contains("<chat_capabilities>"), "missing <chat_capabilities>: {prompt}");
-    assert!(prompt.contains("<agent_identity>"), "missing <agent_identity>: {prompt}");
-    assert!(prompt.contains("name: Atlas"), "missing identity name: {prompt}");
-    assert!(prompt.contains("role: Engineer"), "missing identity role: {prompt}");
-    assert!(prompt.contains("Precise and methodical"), "missing personality: {prompt}");
-    assert!(prompt.contains("<agent_skills>"), "missing <agent_skills>: {prompt}");
+    assert!(
+        prompt.contains("<chat_capabilities>"),
+        "missing <chat_capabilities>: {prompt}"
+    );
+    assert!(
+        prompt.contains("<agent_identity>"),
+        "missing <agent_identity>: {prompt}"
+    );
+    assert!(
+        prompt.contains("name: Atlas"),
+        "missing identity name: {prompt}"
+    );
+    assert!(
+        prompt.contains("role: Engineer"),
+        "missing identity role: {prompt}"
+    );
+    assert!(
+        prompt.contains("Precise and methodical"),
+        "missing personality: {prompt}"
+    );
+    assert!(
+        prompt.contains("<agent_skills>"),
+        "missing <agent_skills>: {prompt}"
+    );
     assert!(prompt.contains("- Rust"), "missing Rust skill: {prompt}");
-    assert!(prompt.contains("- TypeScript"), "missing TypeScript skill: {prompt}");
-    assert!(prompt.contains("<agent_system_prompt>"), "missing <agent_system_prompt>: {prompt}");
-    assert!(prompt.contains("Use TDD on every change."), "missing operator prompt body: {prompt}");
-    assert!(prompt.contains("<project_context>"), "missing <project_context>: {prompt}");
+    assert!(
+        prompt.contains("- TypeScript"),
+        "missing TypeScript skill: {prompt}"
+    );
+    assert!(
+        prompt.contains("<agent_system_prompt>"),
+        "missing <agent_system_prompt>: {prompt}"
+    );
+    assert!(
+        prompt.contains("Use TDD on every change."),
+        "missing operator prompt body: {prompt}"
+    );
+    assert!(
+        prompt.contains("<project_context>"),
+        "missing <project_context>: {prompt}"
+    );
     assert!(
         prompt.contains("project_id: 00000000-0000-0000-0000-000000000001"),
         "missing project id: {prompt}",
     );
-    assert!(prompt.contains("project_name: Demo"), "missing project name: {prompt}");
-    assert!(prompt.contains("build_command: cargo build"), "missing build command: {prompt}");
-    assert!(prompt.contains("test_command: cargo test"), "missing test command: {prompt}");
+    assert!(
+        prompt.contains("project_name: Demo"),
+        "missing project name: {prompt}"
+    );
+    assert!(
+        prompt.contains("build_command: cargo build"),
+        "missing build command: {prompt}"
+    );
+    assert!(
+        prompt.contains("test_command: cargo test"),
+        "missing test command: {prompt}"
+    );
 }
 
 /// Chat-WS migration regression: when EVERY typed field is absent

@@ -31,11 +31,7 @@ use crate::error::ToolError;
 /// Names of dependency tables we structurally guard. Anything under
 /// `target.<cfg>.dependencies` etc. matches via prefix; the bare names
 /// below are matched exactly.
-const DEPENDENCY_TABLE_NAMES: &[&str] = &[
-    "dependencies",
-    "dev-dependencies",
-    "build-dependencies",
-];
+const DEPENDENCY_TABLE_NAMES: &[&str] = &["dependencies", "dev-dependencies", "build-dependencies"];
 
 /// Does this path look like a Cargo manifest? Matches the file name
 /// case-insensitively so Windows paths with mixed case still trip the

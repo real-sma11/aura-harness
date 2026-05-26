@@ -143,7 +143,9 @@ impl Automaton for TaskRunAutomaton {
             warn!(task_id = %task.id, error = %e, "Failed to transition task to in_progress (continuing anyway)");
         }
 
-        let result = self.run_agentic_task(ctx, &cfg, &project, &spec, &task).await;
+        let result = self
+            .run_agentic_task(ctx, &cfg, &project, &spec, &task)
+            .await;
         self.finalize_task(ctx, &task.id, result).await
     }
 }

@@ -162,10 +162,7 @@ fn inject_appends_envelope_to_user_message_via_append_warning() {
 #[test]
 fn inject_after_assistant_message_pushes_new_user_message() {
     let mut messages = vec![Message::assistant("hi")];
-    let _returned = SteeringInjector::inject(
-        &mut messages,
-        SteeringKind::TaskDoneNoWrites,
-    );
+    let _returned = SteeringInjector::inject(&mut messages, SteeringKind::TaskDoneNoWrites);
 
     assert_eq!(
         messages.len(),

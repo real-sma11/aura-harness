@@ -324,14 +324,9 @@ async fn bind_listener(addr: SocketAddr) -> anyhow::Result<TcpListener> {
                     }
                 }
             }
-            Err(anyhow::anyhow!(
-                "{}",
-                format_addr_in_use_error(addr, &err)
-            ))
+            Err(anyhow::anyhow!("{}", format_addr_in_use_error(addr, &err)))
         }
-        Err(err) => {
-            Err(anyhow::Error::new(err).context(format!("binding TCP listener on {addr}")))
-        }
+        Err(err) => Err(anyhow::Error::new(err).context(format!("binding TCP listener on {addr}"))),
     }
 }
 
@@ -379,10 +374,7 @@ async fn try_self_heal_orphan(addr: SocketAddr) -> anyhow::Result<bool> {
 /// or release binary) and cargo's `aura-node-0.1.0-<hash>.exe`
 /// scratch builds that orphan most often during iterative dev.
 fn is_aura_node_image(image: &str) -> bool {
-    image
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("aura-node")
+    image.trim().to_ascii_lowercase().starts_with("aura-node")
 }
 
 #[cfg(windows)]
@@ -483,7 +475,10 @@ async fn kill_pid(pid: u32) -> anyhow::Result<()> {
         .await
         .context("running taskkill")?;
     if !status.success() {
-        anyhow::bail!("taskkill exited with status {}", status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "taskkill exited with status {}",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }
@@ -685,7 +680,9 @@ mod tests {
     #[test]
     fn is_aura_node_image_matches_both_release_and_cargo_builds() {
         assert!(super::is_aura_node_image("aura-node.exe"));
-        assert!(super::is_aura_node_image("aura-node-0.1.0-23616512-abcdef.exe"));
+        assert!(super::is_aura_node_image(
+            "aura-node-0.1.0-23616512-abcdef.exe"
+        ));
         assert!(super::is_aura_node_image("aura-node"));
         assert!(super::is_aura_node_image("AURA-NODE.EXE"));
         assert!(super::is_aura_node_image("  aura-node.exe  "));

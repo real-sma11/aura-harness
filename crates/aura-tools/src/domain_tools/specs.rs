@@ -288,11 +288,7 @@ mod tests {
         async fn get_task(&self, _: &str, _: Option<&str>) -> anyhow::Result<TaskDescriptor> {
             anyhow::bail!("unused")
         }
-        async fn get_project(
-            &self,
-            _: &str,
-            _: Option<&str>,
-        ) -> anyhow::Result<ProjectDescriptor> {
+        async fn get_project(&self, _: &str, _: Option<&str>) -> anyhow::Result<ProjectDescriptor> {
             anyhow::bail!("unused")
         }
         async fn update_project(
@@ -330,11 +326,7 @@ mod tests {
         ) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
-        async fn list_messages(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> anyhow::Result<Vec<MessageDescriptor>> {
+        async fn list_messages(&self, _: &str, _: &str) -> anyhow::Result<Vec<MessageDescriptor>> {
             Ok(vec![])
         }
         async fn save_message(&self, _: SaveMessageParams) -> anyhow::Result<()> {
@@ -346,10 +338,7 @@ mod tests {
         ) -> anyhow::Result<SessionDescriptor> {
             anyhow::bail!("unused")
         }
-        async fn get_active_session(
-            &self,
-            _: &str,
-        ) -> anyhow::Result<Option<SessionDescriptor>> {
+        async fn get_active_session(&self, _: &str) -> anyhow::Result<Option<SessionDescriptor>> {
             Ok(None)
         }
         async fn orbit_api_call(
@@ -425,7 +414,8 @@ mod tests {
             "total_markdown_bytes must report the original (pre-truncation) size"
         );
         assert_eq!(
-            spec["id"], json!("s1"),
+            spec["id"],
+            json!("s1"),
             "non-markdown fields must pass through unchanged"
         );
         assert_eq!(spec["title"], json!("spec s1"));
@@ -447,8 +437,7 @@ mod tests {
             "small bodies must pass through byte-for-byte"
         );
         assert!(
-            spec.get("truncated_markdown").is_none()
-                || spec["truncated_markdown"] == json!(false),
+            spec.get("truncated_markdown").is_none() || spec["truncated_markdown"] == json!(false),
             "truncated_markdown must be absent (or false) when the body fits"
         );
         assert!(
@@ -483,7 +472,8 @@ mod tests {
             "list_specs entries must not leak the raw content field either"
         );
         assert_eq!(
-            entry_a["spec_id"], json!("s1"),
+            entry_a["spec_id"],
+            json!("s1"),
             "id metadata must round-trip"
         );
         assert_eq!(entry_a["title"], json!("spec s1"));

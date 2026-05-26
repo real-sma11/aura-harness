@@ -223,9 +223,7 @@ mod tests {
         let probe = probe_agents_md(&folder);
 
         match probe {
-            AgentsMdProbe::Found {
-                bytes, variant, ..
-            } => {
+            AgentsMdProbe::Found { bytes, variant, .. } => {
                 assert_eq!(bytes, "guidance body".len());
                 // Cross-platform: case-insensitive FS may resolve any
                 // of the three variants. Accept whichever matched

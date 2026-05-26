@@ -220,7 +220,10 @@ mod tests {
             "mod hpke_hybrid_inner;",
             "hpke_hybrid"
         ));
-        assert!(!contains_mod_declaration("// mod hpke_hybrid;", "hpke_hybrid"));
+        assert!(!contains_mod_declaration(
+            "// mod hpke_hybrid;",
+            "hpke_hybrid"
+        ));
         assert!(!contains_mod_declaration(
             "use crate::hpke_hybrid;",
             "hpke_hybrid"

@@ -30,10 +30,18 @@ pub(crate) fn render(project: &ProjectInfo<'_>) -> String {
         body.push_str(&format!("description: {description}\n"));
     }
     body.push_str(&format!("folder: {}\n", project.folder_path));
-    if let Some(build) = project.build_command.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(build) = project
+        .build_command
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         body.push_str(&format!("build_command: {build}\n"));
     }
-    if let Some(test) = project.test_command.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(test) = project
+        .test_command
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         body.push_str(&format!("test_command: {test}\n"));
     }
     body.push_str(&format!(

@@ -118,9 +118,7 @@ pub(super) async fn automaton_start_handler(
 
     let agent_identity = req.agent_identity.filter(|wire| !wire.is_empty());
     let agent_skills = req.agent_skills;
-    let agent_system_prompt = req
-        .agent_system_prompt
-        .filter(|s| !s.trim().is_empty());
+    let agent_system_prompt = req.agent_system_prompt.filter(|s| !s.trim().is_empty());
 
     let automaton_id = if let Some(task_id) = req.task_id {
         bridge
@@ -166,7 +164,7 @@ pub(super) async fn automaton_start_handler(
             )
             .await
     }
-    .map_err(|e| (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))))?;
+    .map_err(automaton_start_error_response)?;
 
     Ok((
         StatusCode::CREATED,
@@ -175,6 +173,17 @@ pub(super) async fn automaton_start_handler(
             automaton_id,
         }),
     ))
+}
+
+fn automaton_start_error_response(e: String) -> (StatusCode, Json<serde_json::Value>) {
+    let status = if e.to_ascii_lowercase().contains("already running") {
+        StatusCode::CONFLICT
+    } else if e.starts_with("missing model") {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(serde_json::json!({"error": e})))
 }
 
 /// Get the status of a running automaton.

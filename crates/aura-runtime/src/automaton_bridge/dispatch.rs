@@ -25,7 +25,7 @@ use aura_kernel::Kernel;
 use aura_protocol::AgentIdentityWire;
 use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::protocol::installed_integration_to_core;
 use crate::runtime_capabilities;
@@ -219,11 +219,20 @@ impl AutomatonBridge {
 
         if let Some(entry) = self.project_handles.get(project_id) {
             let tracked = entry.value();
-            if !tracked.handle.is_finished() {
+            if !tracked.handle.is_finished()
+                && self.runtime.get_info(&tracked.automaton_id).is_some()
+            {
                 return Err(format!(
                     "A dev loop is already running for project {project_id} (automaton_id: {})",
                     tracked.automaton_id
                 ));
+            }
+            if !tracked.handle.is_finished() {
+                warn!(
+                    project_id,
+                    automaton_id = %tracked.automaton_id,
+                    "dropping stale dev-loop project handle with no matching runtime automaton"
+                );
             }
             drop(entry);
             self.project_handles.remove(project_id);
@@ -258,6 +267,7 @@ impl AutomatonBridge {
 
         let config = serde_json::json!({
             "project_id": project_id,
+            "model": model,
             "git_repo_url": git_repo_url,
             "git_branch": git_branch,
             "auth_token": auth_token.as_deref(),
@@ -378,6 +388,7 @@ impl AutomatonBridge {
         let config = serde_json::json!({
             "project_id": project_id,
             "task_id": task_id,
+            "model": model,
             "git_repo_url": git_repo_url,
             "git_branch": git_branch,
             "auth_token": auth_token.as_deref(),

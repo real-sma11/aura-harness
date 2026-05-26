@@ -59,9 +59,7 @@ async fn main() -> anyhow::Result<()> {
                     if stream.recv().await.is_some() {
                         tracing::warn!("received Ctrl+Break; initiating graceful shutdown");
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        tracing::warn!(
-                            "graceful shutdown timeout reached; exiting with code 130"
-                        );
+                        tracing::warn!("graceful shutdown timeout reached; exiting with code 130");
                         std::process::exit(130);
                     }
                 });

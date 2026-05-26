@@ -73,7 +73,9 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
                 budget_tokens: match thinking_mode {
                     ThinkingMode::Adaptive => None,
-                    ThinkingMode::Enabled => Some((request.max_tokens.get() / 2).clamp(8192, 16000)),
+                    ThinkingMode::Enabled => {
+                        Some((request.max_tokens.get() / 2).clamp(8192, 16000))
+                    }
                 },
             }),
         };

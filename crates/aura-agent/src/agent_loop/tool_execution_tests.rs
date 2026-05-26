@@ -288,4 +288,3 @@ fn truncate_preview_uses_ascii_marker() {
     assert_eq!(preview, "abc...");
     assert!(!preview.contains('\u{2026}'));
 }
-

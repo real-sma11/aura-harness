@@ -146,9 +146,7 @@ const SKIP_DIRS: &[&str] = &[
 impl WorkspaceReader for FsWorkspace {
     async fn exists(&self, relative_path: &str) -> bool {
         let full = self.root.join(relative_path);
-        tokio::fs::metadata(&full)
-            .await
-            .is_ok_and(|m| m.is_file())
+        tokio::fs::metadata(&full).await.is_ok_and(|m| m.is_file())
     }
 
     async fn read_file_head(&self, relative_path: &str, max_lines: usize) -> Option<String> {
@@ -276,15 +274,76 @@ fn grep_one(root: &Path, symbol: &str, max_hits: usize) -> Vec<SymbolHit> {
 /// (a real input that the harness saw + a regression test pinning the
 /// fix).
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "this", "that", "from", "into", "into_",
-    "self", "true", "false", "none", "some", "ok", "err", "fn", "pub",
-    "impl", "struct", "trait", "enum", "type", "mod", "use", "let", "mut",
-    "ref", "where", "match", "if", "else", "loop", "while", "for_each",
-    "return", "break", "continue", "as", "in", "of", "on", "to", "at",
-    "by", "or", "not", "is", "be", "do", "we", "you", "it", "an", "a",
-    "todo", "fixme", "note", "tip", "warning", "see", "test", "tests",
+    "the",
+    "and",
+    "for",
+    "with",
+    "this",
+    "that",
+    "from",
+    "into",
+    "into_",
+    "self",
+    "true",
+    "false",
+    "none",
+    "some",
+    "ok",
+    "err",
+    "fn",
+    "pub",
+    "impl",
+    "struct",
+    "trait",
+    "enum",
+    "type",
+    "mod",
+    "use",
+    "let",
+    "mut",
+    "ref",
+    "where",
+    "match",
+    "if",
+    "else",
+    "loop",
+    "while",
+    "for_each",
+    "return",
+    "break",
+    "continue",
+    "as",
+    "in",
+    "of",
+    "on",
+    "to",
+    "at",
+    "by",
+    "or",
+    "not",
+    "is",
+    "be",
+    "do",
+    "we",
+    "you",
+    "it",
+    "an",
+    "a",
+    "todo",
+    "fixme",
+    "note",
+    "tip",
+    "warning",
+    "see",
+    "test",
+    "tests",
     // bare_camel_regex (Phase A) coverage:
-    "refactor", "implement", "implementation", "then", "defines", "define",
+    "refactor",
+    "implement",
+    "implementation",
+    "then",
+    "defines",
+    "define",
 ];
 
 /// Extract candidate paths and symbol names from a task description.
@@ -332,7 +391,8 @@ fn ordered_unique<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
 /// Extensions are restricted to 1-6 word-chars to avoid matching
 /// sentences (e.g. "src/main.rs." would have stopped at `rs`).
 fn path_top_level_regex() -> Regex {
-    Regex::new(r"(?x)
+    Regex::new(
+        r"(?x)
         \b
         (?:crates|apps|src|tests|examples|docs|scripts|benches|bin)
         /
@@ -340,18 +400,21 @@ fn path_top_level_regex() -> Regex {
         \.
         [A-Za-z][A-Za-z0-9]{0,5}
         \b
-    ")
+    ",
+    )
     .expect("path_top_level_regex must compile")
 }
 
 /// Match backtick- or double-quote-wrapped tokens whose body looks
 /// like a path (contains a `/` and ends in `.ext`).
 fn quoted_path_regex() -> Regex {
-    Regex::new(r#"(?x)
+    Regex::new(
+        r#"(?x)
         [`"]
         ([A-Za-z0-9_./-]+ / [A-Za-z0-9_./-]* \. [A-Za-z][A-Za-z0-9]{0,5})
         [`"]
-    "#)
+    "#,
+    )
     .expect("quoted_path_regex must compile")
 }
 
@@ -415,8 +478,7 @@ fn backtick_ident_regex() -> Regex {
     // intentionally exclude function-call shapes (`foo(`), paths
     // (`foo/bar`), and macro shapes (`foo!`) — those carry too many
     // false positives.
-    Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)`")
-        .expect("backtick_ident_regex must compile")
+    Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)`").expect("backtick_ident_regex must compile")
 }
 
 /// Match bare (unquoted, no `::`) CamelCase identifiers in prose,
@@ -674,13 +736,11 @@ pub async fn resolve_hints<R: WorkspaceReader + ?Sized>(
 
     let mut resolved_symbols = Vec::new();
     for symbol in hints.symbols.iter().take(caps.max_symbols) {
-        let hits = tokio::time::timeout(
-            caps.per_call_timeout,
-            workspace.grep_definition(symbol, 3),
-        )
-        .await
-        .ok()
-        .unwrap_or_default();
+        let hits =
+            tokio::time::timeout(caps.per_call_timeout, workspace.grep_definition(symbol, 3))
+                .await
+                .ok()
+                .unwrap_or_default();
         if !hits.is_empty() {
             resolved_symbols.push(ResolvedSymbol {
                 symbol: symbol.clone(),
@@ -739,17 +799,12 @@ mod tests {
             self.files.lock().unwrap().contains_key(relative_path)
         }
 
-        async fn read_file_head(
-            &self,
-            relative_path: &str,
-            max_lines: usize,
-        ) -> Option<String> {
-            self.files.lock().unwrap().get(relative_path).map(|body| {
-                body.lines()
-                    .take(max_lines)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
+        async fn read_file_head(&self, relative_path: &str, max_lines: usize) -> Option<String> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(relative_path)
+                .map(|body| body.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
         }
 
         async fn grep_definition(&self, symbol: &str, max_hits: usize) -> Vec<SymbolHit> {
@@ -770,12 +825,16 @@ mod tests {
                     `Outbox` type already exists; reuse its `enqueue_batch` helper.";
         let hints = extract_hints(desc);
         assert!(
-            hints.paths.contains(&"crates/zero-network/src/publisher.rs".to_string()),
+            hints
+                .paths
+                .contains(&"crates/zero-network/src/publisher.rs".to_string()),
             "expected publisher.rs in paths, got {:?}",
             hints.paths
         );
         assert!(
-            hints.paths.contains(&"crates/zero-storage/src/outbox.rs".to_string()),
+            hints
+                .paths
+                .contains(&"crates/zero-storage/src/outbox.rs".to_string()),
             "expected outbox.rs in paths, got {:?}",
             hints.paths
         );
@@ -808,10 +867,7 @@ mod tests {
                 !p.contains("example.com"),
                 "URL path leaked into hints: {p}"
             );
-            assert!(
-                !p.starts_with("http"),
-                "URL leaked into hints: {p}"
-            );
+            assert!(!p.starts_with("http"), "URL leaked into hints: {p}");
         }
         for s in &hints.symbols {
             assert_ne!(s, "and");
@@ -911,10 +967,7 @@ mod tests {
         let desc = "We use `Outbox` for queueing. The Outbox type \
                     backs zero_storage::Outbox in the storage crate.";
         let symbols = extract_symbols(desc);
-        let outbox_count = symbols
-            .iter()
-            .filter(|s| s.as_str() == "Outbox")
-            .count();
+        let outbox_count = symbols.iter().filter(|s| s.as_str() == "Outbox").count();
         assert_eq!(
             outbox_count, 1,
             "expected exactly one bare Outbox, got {symbols:?}",
@@ -960,10 +1013,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_hints_skips_missing_files_silently() {
-        let workspace = StubWorkspace::default().with_file(
-            "crates/zero-storage/src/outbox.rs",
-            "pub struct Outbox;",
-        );
+        let workspace = StubWorkspace::default()
+            .with_file("crates/zero-storage/src/outbox.rs", "pub struct Outbox;");
         let hints = ContextHints {
             paths: vec![
                 "crates/zero-storage/src/outbox.rs".into(),
@@ -1002,10 +1053,7 @@ mod tests {
             .with_file("crates/a/src/lib.rs", &big_body)
             .with_file("crates/b/src/lib.rs", &big_body);
         let hints = ContextHints {
-            paths: vec![
-                "crates/a/src/lib.rs".into(),
-                "crates/b/src/lib.rs".into(),
-            ],
+            paths: vec!["crates/a/src/lib.rs".into(), "crates/b/src/lib.rs".into()],
             symbols: vec![],
         };
         let caps = ResolveCaps {

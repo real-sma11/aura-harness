@@ -81,11 +81,6 @@ fn scan_file(path: &Path, offenders: &mut Vec<String>) {
         if !line.contains(FORBIDDEN_ENVELOPE_LITERAL) {
             continue;
         }
-        offenders.push(format!(
-            "  {}:{}: {}",
-            path.display(),
-            idx + 1,
-            line.trim()
-        ));
+        offenders.push(format!("  {}:{}: {}", path.display(), idx + 1, line.trim()));
     }
 }
