@@ -3,8 +3,8 @@
 //! Port of codex's `TurnDiffTracker`
 //! ([codex-rs/core/src/turn_diff_tracker.rs:16](https://github.com/.../codex-rs/core/src/turn_diff_tracker.rs))
 //! adapted to aura's `write_file` / `edit_file` / `delete_file` tool
-//! surface (codex's tracker is `apply_patch`-shaped; aura keeps the
-//! granular write tools after Layer 0.4 deleted `apply_patch`).
+//! surface (the codex tracker is shaped around its single-tool patch
+//! envelope; aura keeps the granular write tools after Layer 0.4).
 //!
 //! Phase 1.A foundation for [`super::continuation`]: the continuation
 //! runtime needs path-level data — not just a `had_any_file_write:
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Later calls in the same iteration override earlier ones — e.g. a
 /// `delete_file` after a `write_file` collapses to `Deleted`. Codex's
-/// tracker does the same coalescing on its `apply_patch` ops.
+/// tracker does the same coalescing on its single-envelope patch ops.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileOp {
     Created,
@@ -71,7 +71,6 @@ impl TurnDiff {
     /// Returns true when no write/edit/delete landed this iteration.
     /// This is the per-iteration "no forward motion" signal consumed
     /// by `ContinuationState::on_iteration_end` (Phase 1.B).
-    #[allow(dead_code)] // Wired up in Phase 1.B.
     pub(crate) fn is_empty(&self) -> bool {
         self.writes.is_empty()
     }

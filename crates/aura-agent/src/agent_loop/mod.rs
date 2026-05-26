@@ -5,6 +5,7 @@
 //! compaction, sanitization, budget management, etc.
 
 mod context;
+mod continuation;
 mod iteration;
 mod search_cache;
 mod streaming;
@@ -50,6 +51,7 @@ use crate::constants::{
     THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
 use crate::events::{AgentLoopEvent, DebugEvent};
+use crate::helpers;
 use crate::types::{AgentLoopResult, AgentToolExecutor, BuildBaseline, TurnObserver};
 
 /// Configuration for the agent loop.
@@ -201,6 +203,13 @@ pub struct AgentLoopConfig {
     /// generic runs, but it no longer influences the agent loop's
     /// termination behavior — `EndTurn` always terminates the loop.
     pub dev_loop_completion_required: bool,
+    /// Phase 1.B: hard cap on the number of consecutive-no-write
+    /// continuation prompts the loop will inject before failing the
+    /// task with `task_blocked`. Default `6` (matches codex's
+    /// `continuation.md` ergonomics: 2 soft nudges + up to 4 blocked
+    /// audits before giving up). Only consulted when
+    /// [`Self::dev_loop_completion_required`] is true.
+    pub max_continuation_turns: u32,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -257,6 +266,7 @@ impl Default for AgentLoopConfig {
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
             dev_loop_completion_required: false,
+            max_continuation_turns: 6,
         }
     }
 }
@@ -758,6 +768,15 @@ pub struct LoopState {
     /// top of every iteration; consulted by Phase 1.B's continuation
     /// runtime to detect "no forward motion this turn".
     pub(crate) turn_diff: turn_diff::TurnDiff,
+    /// Phase 1.B: streak tracker for consecutive no-write iterations.
+    /// Persists across the loop's iteration boundary so the
+    /// continuation runtime can escalate Nudge → Blocked after three
+    /// consecutive no-write turns.
+    pub(crate) continuation: continuation::ContinuationState,
+    /// Phase 1.B: cumulative count of continuation prompts injected
+    /// this run. The loop fails the task with `task_blocked` once
+    /// this hits [`AgentLoopConfig::max_continuation_turns`].
+    pub(crate) total_continuation_turns: u32,
 }
 
 impl LoopState {
@@ -786,6 +805,8 @@ impl LoopState {
             messages,
             build_baseline: None,
             turn_diff: turn_diff::TurnDiff::default(),
+            continuation: continuation::ContinuationState::default(),
+            total_continuation_turns: 0,
         }
     }
 
@@ -1017,11 +1038,84 @@ fn post_iteration_checks(
     iteration: usize,
 ) -> bool {
     context::emit_checkpoint_if_needed(event_tx, state);
+    if maybe_inject_continuation(config, event_tx, state, iteration) {
+        return true;
+    }
     context::check_budget_warnings(config, event_tx, state, iteration);
     if context::should_stop_for_budget(config, state, iteration) {
         state.result.timed_out = true;
         return true;
     }
+    false
+}
+
+/// Phase 1.B: when an iteration of a dev-loop task ends with no
+/// write_file / edit_file / delete_file and the task is not yet
+/// complete, push the agent forward with a continuation prompt
+/// (codex's `goals/continuation.md` analog). After
+/// `max_continuation_turns` consecutive injections without progress,
+/// fail the task with `task_blocked` so the harness surfaces the
+/// stall instead of burning the iteration budget on read-loops.
+///
+/// Returns `true` if the loop must terminate (task_blocked path).
+fn maybe_inject_continuation(
+    config: &AgentLoopConfig,
+    event_tx: Option<&Sender<AgentLoopEvent>>,
+    state: &mut LoopState,
+    iteration: usize,
+) -> bool {
+    if !config.dev_loop_completion_required {
+        return false;
+    }
+    // A clean `task_done` already terminates the loop in
+    // `dispatch_stop_reason`; the continuation runtime only fires on
+    // iterations that the loop intends to continue.
+    if state.task_done_completed {
+        return false;
+    }
+    // Placeholder until the iteration_read_paths plumbing lands;
+    // ContinuationState's nudge/blocked decision is on the diff alone,
+    // so the empty set keeps the streak counter correct. The
+    // blocker_signature follow-up will replace this with the real
+    // set of read paths from this iteration.
+    let read_paths = std::collections::HashSet::new();
+    let Some(kind) = state.continuation.on_iteration_end(&state.turn_diff, read_paths) else {
+        return false;
+    };
+
+    if state.total_continuation_turns >= config.max_continuation_turns {
+        // task_blocked: there is no dedicated `AgentLoopResult` variant
+        // for "blocked-after-N-continuations" today, so we co-opt the
+        // existing failure shape — `stalled = true` + an `llm_error`
+        // string with the canonical `task_blocked:` prefix so the
+        // harness / dashboards can grep for it. Follow-up should
+        // introduce a dedicated bool / enum variant.
+        let reason = format!(
+            "task_blocked: max_continuation_turns ({}) exceeded without a write at iteration {}",
+            config.max_continuation_turns, iteration
+        );
+        warn!(
+            iteration,
+            consecutive_no_write = state.continuation.consecutive_no_write,
+            total_continuation_turns = state.total_continuation_turns,
+            "{reason}"
+        );
+        state.result.stalled = true;
+        if state.result.llm_error.is_none() {
+            state.result.llm_error = Some(reason.clone());
+        }
+        streaming::emit(event_tx, AgentLoopEvent::Warning(reason));
+        return true;
+    }
+
+    let body = continuation::render(
+        kind,
+        iteration,
+        state.continuation.consecutive_no_write,
+    );
+    helpers::append_warning(&mut state.messages, &body);
+    streaming::emit(event_tx, AgentLoopEvent::Warning(body));
+    state.total_continuation_turns = state.total_continuation_turns.saturating_add(1);
     false
 }
 
