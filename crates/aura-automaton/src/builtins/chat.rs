@@ -134,14 +134,17 @@ impl ChatAutomaton {
             .domain
             .list_messages(&cfg.project_id, &cfg.instance_id)
             .await
-            .map_err(|e| AutomatonError::DomainApi(format!("list_messages: {e}")))?;
+            .map_err(|e| AutomatonError::domain_api(None, e.context("list_messages")))?;
 
         if stored.is_empty() {
             ctx.emit(AutomatonEvent::Error {
                 automaton_id: ctx.automaton_id.to_string(),
                 message: "No messages to process".into(),
             })?;
-            return Err(AutomatonError::DomainApi("No messages to process".into()));
+            return Err(AutomatonError::domain_api(
+                None,
+                anyhow::anyhow!("No messages to process"),
+            ));
         }
 
         Ok(stored)
@@ -169,7 +172,7 @@ impl ChatAutomaton {
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(None, e))?;
 
         let api_messages = convert_descriptors_to_messages(stored);
         let tools = self.catalog.tools_for_profile(ToolProfile::Agent);
@@ -223,7 +226,7 @@ impl ChatAutomaton {
                 Some(cancel),
             )
             .await
-            .map_err(|e| AutomatonError::AgentExecution(e.to_string()))?;
+            .map_err(|e| AutomatonError::agent_execution(None, e))?;
 
         info!(
             input_tokens = result.total_input_tokens,

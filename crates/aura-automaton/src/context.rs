@@ -70,9 +70,9 @@ impl TickContext {
                 }
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                Err(AutomatonError::EventDelivery(format!("channel full: {event:?}")))
-            }
+            Err(mpsc::error::TrySendError::Full(event)) => Err(AutomatonError::EventDelivery(
+                format!("channel full: {event:?}"),
+            )),
         }
     }
 

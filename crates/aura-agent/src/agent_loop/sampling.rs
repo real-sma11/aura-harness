@@ -28,7 +28,7 @@
 
 use std::time::Instant;
 
-use aura_reasoner::{ModelProvider, StopReason, ToolDefinition};
+use aura_reasoner::{ModelProvider, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
@@ -51,16 +51,6 @@ pub(crate) struct SamplingRequestResult {
     /// [`super::turn::run_turn_stop_hooks`] to produce the final
     /// `needs_follow_up` decision in the turn loop.
     pub(crate) needs_follow_up: bool,
-    /// Why the model emitted its terminal event this sampling
-    /// request. Carried in the sampling result so E.3's stream-level
-    /// driver can distinguish a clean `EndTurn` from a `MaxTokens`
-    /// truncation when deciding whether to drain in-flight tools
-    /// without firing another sampling. E.1's turn loop folds the
-    /// outcome into the `needs_follow_up` bit and currently doesn't
-    /// inspect this field; the field is preserved so E.3 / E.4 can
-    /// consume it without re-plumbing the return shape.
-    #[allow(dead_code)] // Consumed by E.3 (stream driver) / E.4 (GoalRuntime).
-    pub(crate) stop_reason: StopReason,
     /// `true` when the sampling failed in a way that the turn loop
     /// must observe (fatal model error, cancellation). In this case
     /// the loop must break and not run stop hooks — the result has
@@ -105,7 +95,6 @@ pub(crate) async fn run_sampling_request(
         debug!("Cancellation requested before sampling, stopping loop");
         return SamplingRequestResult {
             needs_follow_up: false,
-            stop_reason: StopReason::EndTurn,
             broke_for_error: true,
         };
     }
@@ -138,7 +127,6 @@ pub(crate) async fn run_sampling_request(
             iteration::LlmCallError::Fatal(e.to_string()).apply(&mut state.result, event_tx);
             return SamplingRequestResult {
                 needs_follow_up: false,
-                stop_reason: StopReason::EndTurn,
                 broke_for_error: true,
             };
         }
@@ -188,7 +176,6 @@ pub(crate) async fn run_sampling_request(
                     e.apply(&mut state.result, event_tx);
                     return SamplingRequestResult {
                         needs_follow_up: false,
-                        stop_reason: StopReason::EndTurn,
                         broke_for_error: true,
                     };
                 }
@@ -198,7 +185,6 @@ pub(crate) async fn run_sampling_request(
             e.apply(&mut state.result, event_tx);
             return SamplingRequestResult {
                 needs_follow_up: false,
-                stop_reason: StopReason::EndTurn,
                 broke_for_error: true,
             };
         }
@@ -223,7 +209,6 @@ pub(crate) async fn run_sampling_request(
         debug!("Cancellation observed after model call; skipping tool dispatch");
         return SamplingRequestResult {
             needs_follow_up: false,
-            stop_reason: response.stop_reason,
             broke_for_error: true,
         };
     }
@@ -239,7 +224,6 @@ pub(crate) async fn run_sampling_request(
 
     SamplingRequestResult {
         needs_follow_up: !dispatch_says_break,
-        stop_reason: response.stop_reason,
         broke_for_error: false,
     }
 }
@@ -307,7 +291,6 @@ async fn run_sampling_request_streaming(
             debug!("stream pump observed cancellation; bailing the sampling request");
             return SamplingRequestResult {
                 needs_follow_up: false,
-                stop_reason: StopReason::EndTurn,
                 broke_for_error: true,
             };
         }
@@ -321,7 +304,6 @@ async fn run_sampling_request_streaming(
             llm_err.apply(&mut state.result, event_tx);
             return SamplingRequestResult {
                 needs_follow_up: false,
-                stop_reason: StopReason::EndTurn,
                 broke_for_error: true,
             };
         }
@@ -332,7 +314,6 @@ async fn run_sampling_request_streaming(
             .apply(&mut state.result, event_tx);
             return SamplingRequestResult {
                 needs_follow_up: false,
-                stop_reason: StopReason::EndTurn,
                 broke_for_error: true,
             };
         }
@@ -351,7 +332,6 @@ async fn run_sampling_request_streaming(
         debug!("Cancellation observed after stream pump; skipping tool dispatch");
         return SamplingRequestResult {
             needs_follow_up: false,
-            stop_reason: response.stop_reason,
             broke_for_error: true,
         };
     }
@@ -368,7 +348,6 @@ async fn run_sampling_request_streaming(
 
     SamplingRequestResult {
         needs_follow_up: !dispatch_says_break,
-        stop_reason: response.stop_reason,
         broke_for_error: false,
     }
 }

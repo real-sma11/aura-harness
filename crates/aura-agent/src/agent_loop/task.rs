@@ -1,11 +1,9 @@
-//! Task shell loop (Layer E.1).
+//! Task shell loop.
 //!
 //! A *task* is the outermost unit of agent work: it owns the
-//! conversation state, the build baseline, and (once E.2 lands) the
-//! `input_queue` that lets the user steer the agent mid-task. Codex's
-//! task shell at [codex-rs/core/src/tasks/regular.rs:73 analog](
-//! https://github.com/.../codex-rs/core/src/tasks/regular.rs) drives
-//! the pattern:
+//! conversation state and (via the enclosing [`crate::session::Session`])
+//! the `input_queue` that lets the user steer the agent mid-task.
+//! The shell mirrors codex's `tasks::regular::run` shape:
 //!
 //! ```text
 //! loop {
@@ -14,30 +12,32 @@
 //! }
 //! ```
 //!
-//! E.1 wired the nesting (`run_task` → [`super::turn::run_turn`] →
-//! [`super::sampling::run_sampling_request`]) with the
-//! `input_queue.has_pending()` probe stubbed out to `false`. E.2 lifts
-//! the stub: when an `input_queue` is supplied, the task shell loops
-//! until the queue is empty AND the active turn terminates cleanly.
-//! When no queue is supplied (`input_queue == None`), the task shell
-//! runs exactly one turn — preserving the pre-E.1 behaviour where
-//! one `AgentLoop::run_inner` call drove the whole conversation.
+//! [`run_task`] threads the nesting `run_task → [`super::turn::run_turn`] →
+//! [`super::sampling::run_sampling_request`]` and trusts the model's
+//! `EndTurn` stop reason as the authoritative end-of-task signal.
+//! The `input_queue` is always present today (session-scoped, allocated
+//! by [`crate::session::Session`]); the `has_pending()` probe at the
+//! end of every turn decides whether to spin another turn or return
+//! to the caller. The pre-codex-parity continuation runtime that
+//! lived in `session::goal_runtime` is gone — there is no
+//! `GoalRuntime::continuation` accumulator; the only persistent
+//! cross-turn state is the conversation history on [`super::LoopState`].
 //!
 //! The task shell owns two safety nets per Rule 4.3:
 //!
-//! - [`AgentLoopConfig::max_turns_per_task`]: hard cap on how many
-//!   turns one task can run. Default `50` matches the codex pattern.
-//! - [`AgentLoopConfig::max_iterations_per_task`]: hard cap on the
-//!   total number of sampling requests across all turns of one task.
-//!   Default `500` keeps the existing long-batch workflows
+//! - [`super::AgentLoopConfig::max_turns_per_task`]: hard cap on how
+//!   many turns one task can run. Default `50` matches the codex
+//!   pattern.
+//! - [`super::AgentLoopConfig::max_iterations_per_task`]: hard cap on
+//!   the total number of sampling requests across all turns of one
+//!   task. Default `500` keeps the existing long-batch workflows
 //!   (e.g. multi-`create_task` extraction) inside the envelope
 //!   without the silent-cancel regression that the 25-iteration cap
 //!   used to cause.
 //!
-//! Both ceilings surface an
-//! [`AgentError::TurnBudgetExceeded`] with structured context so the
-//! UI / dashboards can correlate the failure with the task that
-//! produced it.
+//! Both ceilings surface an [`AgentError::TurnBudgetExceeded`] with
+//! structured context so the UI / dashboards can correlate the
+//! failure with the task that produced it.
 
 use std::sync::Arc;
 
@@ -238,13 +238,14 @@ pub(crate) async fn run_task(
             break;
         }
 
-        // E.2: only spin another turn when the input queue has
-        // pending entries. With the session-scoped queue ALWAYS
-        // present in E.4, the gate collapses to a single
-        // `has_pending()` probe. The streak counter on
-        // [`GoalRuntime::continuation`] is session-scoped so the
-        // restart inherits the prior task's accumulator (codex
-        // parity).
+        // Only spin another turn when the input queue has pending
+        // entries. The queue is session-scoped (always present), so
+        // the gate is a single `has_pending()` probe — codex parity
+        // with `tasks::regular::run`. The pre-codex-parity
+        // continuation accumulator on `GoalRuntime` is gone: the
+        // only cross-turn state is the conversation history on
+        // [`super::LoopState`], so no streak counter needs to be
+        // inherited here.
         if input_queue_ref.has_pending() {
             continue;
         }

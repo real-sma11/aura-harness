@@ -404,11 +404,12 @@ fn read_file_range_cache_serves_subset_from_superset() {
         1,
         "subset hits must NOT mint new entries; superset is the only one"
     );
-    let superset_hash = entries[0]
-        .content_hash
-        .as_ref()
-        .expect("content_hash must be stamped on every cached read");
 
+    // The superset's rendered body is the single source of truth for
+    // every subset response; checking both subsets came from the same
+    // entry (`fs_read_calls == 1` above) plus the line-number prefix
+    // assertions below covers the contract end-to-end without
+    // requiring the entry to carry a redundant `content_hash`.
     let body1 = r_subset1.content;
     let body2 = r_subset2.content;
     assert!(body1.contains("     1|alpha"));
@@ -417,34 +418,16 @@ fn read_file_range_cache_serves_subset_from_superset() {
     assert!(body2.contains("    30|alpha"));
     assert!(body2.contains("   100|alpha"));
     assert!(!body2.contains("    29|alpha"));
-
-    // The "same content_hash" invariant: the per-path entry's hash
-    // is the single source of truth for every subset response, so
-    // checking the entry covers the contract (subset responses
-    // themselves carry just the sliced rendered body — Phase 1
-    // intentionally does not widen `ToolCallResult` with a
-    // `content_hash` field; that lives behind the per-path index
-    // and is what downstream compaction dedup will consult).
-    assert_eq!(
-        superset_hash,
-        entries[0]
-            .content_hash
-            .as_ref()
-            .expect("stable hash on the cached entry"),
-        "superset hash must be stable across subset lookups"
-    );
-    // Sanity: the full response we got back from the superset call
-    // must also rehash to the same value the entry recorded.
-    let recomputed = {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        r_full.content.as_bytes().hash(&mut h);
-        format!("{:016x}", h.finish())
-    };
-    assert_eq!(
-        &recomputed, superset_hash,
-        "stored content_hash must match the rehash of the original rendered output"
-    );
+    // The full superset response must contain every line both subsets
+    // claim — confirms both subsets really did slice from the same
+    // cached bytes.
+    for line in 1..=100 {
+        let needle = format!("{:>6}|alpha", line);
+        assert!(
+            r_full.content.contains(&needle),
+            "superset must include line {line}"
+        );
+    }
 }
 
 #[test]
@@ -495,13 +478,6 @@ fn write_invalidates_only_overlapping_path() {
         std::slice::from_ref(&write_result),
     );
 
-    assert!(
-        cache
-            .recent_write_paths
-            .iter()
-            .any(|p| p.to_string_lossy().ends_with("crates/A/foo.rs")),
-        "write path should be recorded in recent_write_paths"
-    );
     assert!(
         !cache.read_file_by_path.contains_key("crates/A/foo.rs"),
         "overlapping read entry must be dropped"

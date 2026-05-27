@@ -113,7 +113,7 @@ impl SpecGenAutomaton {
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(None, e))?;
 
         ctx.emit(AutomatonEvent::Progress {
             task_id: None,
@@ -175,13 +175,13 @@ impl SpecGenAutomaton {
             .messages(vec![aura_reasoner::Message::user(requirements)])
             .max_tokens(MAX_TOKENS)
             .try_build()
-            .map_err(|e| AutomatonError::AgentExecution(format!("invalid model request: {e}")))?;
+            .map_err(|e| {
+                AutomatonError::agent_execution(None, aura_agent::AgentError::Reason(e))
+            })?;
 
-        let response = self
-            .provider
-            .complete(request)
-            .await
-            .map_err(|e| AutomatonError::AgentExecution(format!("LLM call failed: {e}")))?;
+        let response = self.provider.complete(request).await.map_err(|e| {
+            AutomatonError::agent_execution(None, aura_agent::AgentError::Reason(e))
+        })?;
 
         ctx.emit(AutomatonEvent::TokenUsage {
             task_id: None,
@@ -238,7 +238,7 @@ impl SpecGenAutomaton {
                     None,
                 )
                 .await
-                .map_err(|e| AutomatonError::DomainApi(format!("save spec: {e}")))?;
+                .map_err(|e| AutomatonError::domain_api(None, e.context("save spec")))?;
 
             ctx.emit(AutomatonEvent::SpecSaved {
                 spec_id: saved.id,
@@ -299,12 +299,17 @@ fn parse_spec_response(text: &str) -> Result<Vec<ParsedSpec>, AutomatonError> {
         trimmed.to_string()
     };
 
-    let raw: Vec<RawSpec> = serde_json::from_str(&json_str)
-        .map_err(|e| AutomatonError::AgentExecution(format!("failed to parse spec JSON: {e}")))?;
+    let raw: Vec<RawSpec> = serde_json::from_str(&json_str).map_err(|e| {
+        AutomatonError::agent_execution(
+            None,
+            aura_agent::AgentError::Internal(format!("failed to parse spec JSON: {e}")),
+        )
+    })?;
 
     if raw.is_empty() {
-        return Err(AutomatonError::AgentExecution(
-            "LLM returned empty spec array".into(),
+        return Err(AutomatonError::agent_execution(
+            None,
+            aura_agent::AgentError::Internal("LLM returned empty spec array".into()),
         ));
     }
 

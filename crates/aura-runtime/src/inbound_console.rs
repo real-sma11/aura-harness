@@ -384,7 +384,11 @@ mod tests {
     #[test]
     fn ws_rejection_line_renders_each_scope() {
         ws_rejection_line("upgrade", "slot_full", Some("cap=128"));
-        ws_rejection_line("upgrade.automaton", "unauthorized", Some("automaton_id=foo"));
+        ws_rejection_line(
+            "upgrade.automaton",
+            "unauthorized",
+            Some("automaton_id=foo"),
+        );
         ws_rejection_line(
             "framing",
             "parse_error",

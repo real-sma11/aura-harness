@@ -51,7 +51,8 @@ pub(crate) const REFINED_MARKER: &str = "<!-- aura-refined:v1 -->";
 /// the user message carries the spec / task body and a single
 /// formatting instruction, so the system prompt only needs to set the
 /// role.
-const REFINEMENT_SYSTEM_PROMPT: &str = "You refine software engineering task descriptions before implementation. \
+const REFINEMENT_SYSTEM_PROMPT: &str =
+    "You refine software engineering task descriptions before implementation. \
 Rewrite the task description so it precisely matches the spec's intent and acceptance criteria. \
 Keep it concise and actionable.";
 
@@ -112,10 +113,7 @@ pub(crate) async fn refine_task_description(
             emit_best_effort(
                 event_tx,
                 AutomatonEvent::LogLine {
-                    message: format!(
-                        "task description refinement failed for {}: {e}",
-                        task.id
-                    ),
+                    message: format!("task description refinement failed for {}: {e}", task.id),
                 },
             );
             return Ok(task.clone());
@@ -129,10 +127,7 @@ pub(crate) async fn refine_task_description(
             emit_best_effort(
                 event_tx,
                 AutomatonEvent::LogLine {
-                    message: format!(
-                        "task description refinement failed for {}: {e}",
-                        task.id
-                    ),
+                    message: format!("task description refinement failed for {}: {e}", task.id),
                 },
             );
             return Ok(task.clone());
@@ -177,10 +172,7 @@ pub(crate) async fn refine_task_description(
             emit_best_effort(
                 event_tx,
                 AutomatonEvent::LogLine {
-                    message: format!(
-                        "task description refinement failed for {}: {e}",
-                        task.id
-                    ),
+                    message: format!("task description refinement failed for {}: {e}", task.id),
                 },
             );
             return Ok(task.clone());
@@ -319,10 +311,7 @@ mod tests {
             "test-counting-provider"
         }
 
-        async fn complete(
-            &self,
-            _request: ModelRequest,
-        ) -> Result<ModelResponse, ReasonerError> {
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ReasonerError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let next = {
                 let mut q = self.outcome.lock().unwrap();
@@ -474,11 +463,7 @@ mod tests {
         ) -> anyhow::Result<Option<TaskDescriptor>> {
             unimplemented!("RecordingDomain")
         }
-        async fn get_task(
-            &self,
-            _id: &str,
-            _j: Option<&str>,
-        ) -> anyhow::Result<TaskDescriptor> {
+        async fn get_task(&self, _id: &str, _j: Option<&str>) -> anyhow::Result<TaskDescriptor> {
             unimplemented!("RecordingDomain")
         }
         async fn get_project(
@@ -539,10 +524,7 @@ mod tests {
         ) -> anyhow::Result<SessionDescriptor> {
             unimplemented!("RecordingDomain")
         }
-        async fn get_active_session(
-            &self,
-            _i: &str,
-        ) -> anyhow::Result<Option<SessionDescriptor>> {
+        async fn get_active_session(&self, _i: &str) -> anyhow::Result<Option<SessionDescriptor>> {
             unimplemented!("RecordingDomain")
         }
         async fn orbit_api_call(
@@ -603,19 +585,12 @@ mod tests {
         let provider = CountingProvider::with_text("should never run");
         let (tx, mut rx) = mpsc::channel::<AutomatonEvent>(8);
         let spec = sample_spec();
-        let task =
-            sample_task("<!-- aura-refined:v1 -->\n## Refined Description\nalready done");
+        let task = sample_task("<!-- aura-refined:v1 -->\n## Refined Description\nalready done");
 
-        let out = refine_task_description(
-            &domain,
-            &provider,
-            "test-model",
-            &spec,
-            &task,
-            Some(&tx),
-        )
-        .await
-        .expect("marker short-circuit must succeed");
+        let out =
+            refine_task_description(&domain, &provider, "test-model", &spec, &task, Some(&tx))
+                .await
+                .expect("marker short-circuit must succeed");
 
         assert_eq!(
             out.description, task.description,
@@ -644,16 +619,10 @@ mod tests {
         let spec = sample_spec();
         let task = sample_task("Make the tokens rotate every 15 minutes.");
 
-        let out = refine_task_description(
-            &domain,
-            &provider,
-            "test-model",
-            &spec,
-            &task,
-            Some(&tx),
-        )
-        .await
-        .expect("provider failure must not error the caller");
+        let out =
+            refine_task_description(&domain, &provider, "test-model", &spec, &task, Some(&tx))
+                .await
+                .expect("provider failure must not error the caller");
 
         assert_eq!(
             out.description, task.description,
@@ -676,8 +645,7 @@ mod tests {
                 }
                 AutomatonEvent::LogLine { message } => {
                     assert!(
-                        message.contains("task-1")
-                            && message.contains("refinement failed"),
+                        message.contains("task-1") && message.contains("refinement failed"),
                         "LogLine must carry the failure context, got: {message}"
                     );
                     saw_log = true;
@@ -688,7 +656,10 @@ mod tests {
                 other => panic!("unexpected event on provider-failure path: {other:?}"),
             }
         }
-        assert!(saw_refining, "refining event must still fire before the call");
+        assert!(
+            saw_refining,
+            "refining event must still fire before the call"
+        );
         assert!(saw_log, "exactly one LogLine must capture the failure");
         assert!(
             !saw_refined,
@@ -699,22 +670,17 @@ mod tests {
     #[tokio::test]
     async fn persists_refined_description() {
         let domain = RecordingDomain::default();
-        let provider =
-            CountingProvider::with_text("Rotate refresh tokens every 15 minutes and revoke prior keys.");
+        let provider = CountingProvider::with_text(
+            "Rotate refresh tokens every 15 minutes and revoke prior keys.",
+        );
         let (tx, mut rx) = mpsc::channel::<AutomatonEvent>(8);
         let spec = sample_spec();
         let task = sample_task("Rotate tokens.");
 
-        let out = refine_task_description(
-            &domain,
-            &provider,
-            "test-model",
-            &spec,
-            &task,
-            Some(&tx),
-        )
-        .await
-        .expect("happy path must succeed");
+        let out =
+            refine_task_description(&domain, &provider, "test-model", &spec, &task, Some(&tx))
+                .await
+                .expect("happy path must succeed");
 
         assert!(
             out.description.starts_with(REFINED_MARKER),
@@ -730,7 +696,8 @@ mod tests {
             "original description must be quoted line-by-line"
         );
         assert!(
-            out.description.contains("Rotate refresh tokens every 15 minutes"),
+            out.description
+                .contains("Rotate refresh tokens every 15 minutes"),
             "refined model output must be embedded in the body"
         );
 
@@ -779,16 +746,10 @@ mod tests {
         let spec = sample_spec();
         let task = sample_task("Rotate tokens.");
 
-        let out = refine_task_description(
-            &domain,
-            &provider,
-            "test-model",
-            &spec,
-            &task,
-            Some(&tx),
-        )
-        .await
-        .expect("empty provider output must not error the caller");
+        let out =
+            refine_task_description(&domain, &provider, "test-model", &spec, &task, Some(&tx))
+                .await
+                .expect("empty provider output must not error the caller");
 
         assert_eq!(out.description, task.description);
         assert!(
@@ -819,16 +780,10 @@ mod tests {
         let spec = sample_spec();
         let task = sample_task("Rotate tokens.");
 
-        let out = refine_task_description(
-            &domain,
-            &provider,
-            "test-model",
-            &spec,
-            &task,
-            Some(&tx),
-        )
-        .await
-        .expect("update_task failure must not error the caller");
+        let out =
+            refine_task_description(&domain, &provider, "test-model", &spec, &task, Some(&tx))
+                .await
+                .expect("update_task failure must not error the caller");
 
         assert_eq!(out.description, task.description);
         assert_eq!(
@@ -866,10 +821,9 @@ mod tests {
         let spec = sample_spec();
         let task = sample_task("Rotate tokens.");
 
-        let out =
-            refine_task_description(&domain, &provider, "test-model", &spec, &task, None)
-                .await
-                .expect("None event_tx must work");
+        let out = refine_task_description(&domain, &provider, "test-model", &spec, &task, None)
+            .await
+            .expect("None event_tx must work");
 
         assert_eq!(provider.calls(), 1);
         assert_eq!(domain.updates().len(), 1);

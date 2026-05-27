@@ -16,7 +16,7 @@
 //! into the session-scoped cache that drives in-session read-dedup.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The net effect of a single iteration's write-tool calls on one file.
 ///
@@ -33,13 +33,19 @@ pub(crate) enum FileOp {
 /// Net file-op map for the current iteration.
 ///
 /// Reset at the top of every iteration by the agent loop.
+///
+/// The fields are `pub(crate)` so other agent-loop modules and their
+/// tests can directly inspect the per-iteration accumulator without
+/// needing accessor methods (the previous `is_empty` / `paths` /
+/// `read_paths` getters were only ever consumed by tests in the
+/// same crate and were carrying `#[allow(dead_code)]`).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TurnDiff {
-    writes: HashMap<PathBuf, FileOp>,
+    pub(crate) writes: HashMap<PathBuf, FileOp>,
     /// Exploration-tool paths touched this iteration (`read_file`,
     /// `stat_file`, …). Still consumed by `tool_pipeline` to feed
     /// the session-scoped read-dedup cache.
-    read_paths: HashSet<PathBuf>,
+    pub(crate) read_paths: HashSet<PathBuf>,
 }
 
 impl TurnDiff {
@@ -54,9 +60,9 @@ impl TurnDiff {
     /// path was previously recorded as `Created` or `Modified` within
     /// this iteration, the byte count is summed onto the existing
     /// `Modified` entry (a `Created` entry is left as `Created` —
-    /// `is_empty()` and the per-path coarse signal don't distinguish).
-    /// `Deleted` is preserved (a delete-then-modify is unusual but
-    /// the delete is the stronger signal).
+    /// the per-path coarse signal does not distinguish). `Deleted` is
+    /// preserved (a delete-then-modify is unusual but the delete is
+    /// the stronger signal).
     pub(crate) fn record_modify(&mut self, path: PathBuf, bytes: usize) {
         self.writes
             .entry(path)
@@ -81,26 +87,6 @@ impl TurnDiff {
         self.read_paths.insert(path);
     }
 
-    /// Paths read by exploration tools this iteration. Retained
-    /// because `tool_pipeline` still inspects this set under tests
-    /// (the goal-runtime continuation consumer was deleted).
-    #[allow(dead_code)]
-    pub(crate) fn read_paths(&self) -> &HashSet<PathBuf> {
-        &self.read_paths
-    }
-
-    /// Returns true when no write/edit/delete landed this iteration.
-    #[allow(dead_code)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.writes.is_empty()
-    }
-
-    /// Iterate over the paths touched this iteration.
-    #[allow(dead_code)]
-    pub(crate) fn paths(&self) -> impl Iterator<Item = &Path> {
-        self.writes.keys().map(PathBuf::as_path)
-    }
-
     /// Clear all entries. Called at the top of each iteration by the
     /// agent loop so the diff scopes to the iteration just executed.
     pub(crate) fn reset(&mut self) {
@@ -119,7 +105,7 @@ mod tests {
         let path = PathBuf::from("src/lib.rs");
         diff.record_modify(path.clone(), 100);
         diff.record_modify(path.clone(), 50);
-        assert!(!diff.is_empty());
+        assert!(!diff.writes.is_empty());
         let op = diff.writes.get(&path).expect("entry must exist");
         assert_eq!(op, &FileOp::Modified { bytes_written: 150 });
     }
@@ -150,36 +136,26 @@ mod tests {
         diff.record_modify(PathBuf::from("b.rs"), 10);
         diff.record_delete(PathBuf::from("c.rs"));
         diff.record_read(PathBuf::from("src/inbox.rs"));
-        assert!(!diff.is_empty());
+        assert!(!diff.writes.is_empty());
         diff.reset();
-        assert!(diff.is_empty());
-        assert_eq!(diff.paths().count(), 0);
-        assert!(diff.read_paths().is_empty());
+        assert!(diff.writes.is_empty());
+        assert!(diff.read_paths.is_empty());
     }
 
     #[test]
     fn turn_diff_records_read_paths() {
         let mut diff = TurnDiff::default();
         diff.record_read(PathBuf::from("crates/foo/src/inbox.rs"));
-        assert_eq!(diff.read_paths().len(), 1);
+        assert_eq!(diff.read_paths.len(), 1);
         assert!(diff
-            .read_paths()
+            .read_paths
             .contains(&PathBuf::from("crates/foo/src/inbox.rs")));
     }
 
     #[test]
     fn turn_diff_is_empty_after_default() {
         let diff = TurnDiff::default();
-        assert!(diff.is_empty());
-    }
-
-    #[test]
-    fn turn_diff_paths_iterates_all_recorded() {
-        let mut diff = TurnDiff::default();
-        diff.record_create(PathBuf::from("a.rs"));
-        diff.record_modify(PathBuf::from("b.rs"), 1);
-        let mut paths: Vec<_> = diff.paths().map(Path::to_path_buf).collect();
-        paths.sort();
-        assert_eq!(paths, vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        assert!(diff.writes.is_empty());
+        assert!(diff.read_paths.is_empty());
     }
 }

@@ -37,7 +37,7 @@ mod tests;
 #[cfg(test)]
 mod tests_advanced;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -766,17 +766,11 @@ impl AgentLoop {
 ///   re-uses the superset entry's `content_hash` so downstream
 ///   compaction dedup can fold the subset response back into the
 ///   original read.
-/// * [`Self::recent_write_paths`] records absolute(ish) paths of every
-///   successful write tool result observed by `update_cache`. The set
-///   is not consulted in Phase 1; it is the seed for future passes
-///   (e.g. path-aware invalidation of `search_code` / `find_files`
-///   entries) and exists so the write-side instrumentation is wired
-///   exactly once.
 ///
-/// Path-scoped invalidation (Phase 1B): on a successful write,
-/// `update_cache` no longer wipes both maps wholesale. It drops only
-/// the cache entries whose path equals, parents, or descends the
-/// written path; `search_code` / `find_files` entries still invalidate
+/// Path-scoped invalidation: on a successful write, `update_cache`
+/// no longer wipes both maps wholesale. It drops only the cache
+/// entries whose path equals, parents, or descends the written path;
+/// `search_code` / `find_files` entries still invalidate
 /// workspace-wide because their results are not path-scoped.
 #[derive(Default)]
 pub(crate) struct ToolResultCache {
@@ -792,38 +786,24 @@ pub(crate) struct ToolResultCache {
     /// Per-path range index over `read_file` results. Keyed by the
     /// canonical (forward-slash, no trailing slash, `./` stripped)
     /// path string. Each entry records the window the call returned
-    /// plus the rendered tool output and its `content_hash` so a
-    /// later subset request can be served without disk I/O.
+    /// plus the rendered tool output so a later subset request can be
+    /// served without disk I/O.
     pub(crate) read_file_by_path: HashMap<String, Vec<ReadRangeEntry>>,
-    /// Canonicalised paths of every successful write observed by
-    /// `update_cache`. Not consulted in Phase 1 — kept so the next
-    /// phase can teach `search_code` / `find_files` invalidation to
-    /// be path-aware without re-plumbing the write detector.
-    pub(crate) recent_write_paths: HashSet<PathBuf>,
 }
 
 /// One cached `read_file` result, indexed by path in
 /// [`ToolResultCache::read_file_by_path`].
 ///
-/// The Phase 1 trade-off: we store the rendered tool output (the
-/// exact bytes the model saw) plus the original `content_hash`
-/// stamped by [`aura_tools::fs_tools::read::fs_read`]. Slicing for a
-/// subset request lifts lines out of `rendered` by their leading
-/// `{:>6}|` line-number prefix — no `fs::read` call, no second pass
-/// through the tool. Whole-file entries (`start_line` and `end_line`
-/// both `None`) carry the raw bytes in `rendered` and are re-rendered
-/// in memory on demand. The `content_hash` is propagated verbatim so
-/// downstream dedup can recognise a subset as a re-read of the same
-/// disk contents.
+/// We store the rendered tool output (the exact bytes the model saw).
+/// Slicing for a subset request lifts lines out of `rendered` by
+/// their leading `{:>6}|` line-number prefix — no `fs::read` call, no
+/// second pass through the tool. Whole-file entries (`start_line` and
+/// `end_line` both `None`) carry the raw bytes in `rendered` and are
+/// re-rendered in memory on demand.
 #[derive(Debug, Clone)]
 pub(crate) struct ReadRangeEntry {
     pub(crate) start_line: Option<usize>,
     pub(crate) end_line: Option<usize>,
-    /// Phase 1 stores the hash but only the test suite reads it back
-    /// today; the production read-path consumers will land in Phase 2
-    /// when compaction dedup learns about it.
-    #[allow(dead_code)]
-    pub(crate) content_hash: Option<String>,
     pub(crate) rendered: String,
 }
 
@@ -877,7 +857,7 @@ pub(crate) struct ThinkingBudget {
 }
 
 /// Mutable state carried across iterations of the agent loop.
-pub struct LoopState {
+pub(crate) struct LoopState {
     pub(crate) result: AgentLoopResult,
     pub(crate) tool_cache: ToolResultCache,
     pub(crate) exploration_state: ExplorationState,

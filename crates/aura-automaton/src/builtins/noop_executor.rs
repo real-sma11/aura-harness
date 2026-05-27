@@ -1,6 +1,6 @@
 //! Shared no-op tool executor for automatons that don't execute tools.
 
-pub struct NoOpExecutor;
+pub(crate) struct NoOpExecutor;
 
 #[async_trait::async_trait]
 impl aura_agent::types::AgentToolExecutor for NoOpExecutor {

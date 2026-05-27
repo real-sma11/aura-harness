@@ -222,9 +222,7 @@ fn lifecycle_events_in_order(store: &Arc<dyn Store>, agent_id: AgentId) -> Vec<S
         .filter(|e| e.tx.tx_type == TransactionType::System)
         .filter_map(|e| {
             let value: serde_json::Value = serde_json::from_slice(&e.tx.payload).ok()?;
-            if value
-                .get("system_kind")
-                .and_then(serde_json::Value::as_str)
+            if value.get("system_kind").and_then(serde_json::Value::as_str)
                 != Some("automaton_lifecycle")
             {
                 return None;

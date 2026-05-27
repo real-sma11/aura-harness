@@ -55,8 +55,6 @@ pub enum TickOutcome {
 struct RunningAutomaton {
     info: AutomatonInfo,
     cancel: CancellationToken,
-    #[allow(dead_code)]
-    status_tx: watch::Sender<AutomatonStatus>,
     event_tx: mpsc::Sender<AutomatonEvent>,
 }
 
@@ -100,7 +98,6 @@ impl AutomatonRuntime {
         let running = RunningAutomaton {
             info,
             cancel: cancel.clone(),
-            status_tx: status_tx.clone(),
             event_tx: event_tx.clone(),
         };
 

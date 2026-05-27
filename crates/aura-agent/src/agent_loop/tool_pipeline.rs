@@ -863,10 +863,10 @@ mod track_tool_effects_tests {
         assert_eq!(exploration_state.count, CALLS);
         assert!(!had_any_write, "no writes were issued in this test");
         assert!(
-            turn_diff.is_empty(),
+            turn_diff.writes.is_empty(),
             "read_file calls must not count as writes in the turn diff"
         );
-        assert_eq!(turn_diff.read_paths().len(), CALLS);
+        assert_eq!(turn_diff.read_paths.len(), CALLS);
     }
 
     #[test]

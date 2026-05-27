@@ -107,6 +107,11 @@ struct TaskRunConfig {
     /// follow-up; today the field is parsed and stored so the
     /// downstream patch can flip the executor on without re-touching
     /// every dispatch site.
+    // TODO(phase5): wire via SteeringRegistry — the core-loop
+    // architecture refactor's Phase 5 owns the `TurnSteering` trait +
+    // `SteeringRegistry` on `LoopState`; that phase will read this
+    // flag through `AgentRunnerConfig` and register the
+    // `EarlyTestOracle` evaluator accordingly.
     #[allow(dead_code)]
     early_test_oracle: bool,
 }
@@ -208,19 +213,19 @@ impl TaskRunAutomaton {
             .domain
             .get_task(&cfg.task_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(cfg.task_id.clone()), e))?;
 
         let project = self
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(cfg.task_id.clone()), e))?;
 
         let spec = self
             .domain
             .get_spec(&task.spec_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(cfg.task_id.clone()), e))?;
 
         Ok((task, project, spec))
     }
@@ -334,7 +339,7 @@ impl TaskRunAutomaton {
                 Some(cancel),
             )
             .await
-            .map_err(|e| AutomatonError::AgentExecution(e.to_string()))
+            .map_err(|e| AutomatonError::agent_execution(Some(cfg.task_id.clone()), e))
     }
 
     async fn finalize_task(

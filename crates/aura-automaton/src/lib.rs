@@ -20,12 +20,20 @@ mod types;
 pub mod builtins;
 
 pub use context::TickContext;
-pub use error::AutomatonError;
+// `AutomatonError` is internal to the crate (no external crate names it
+// directly — `aura-runtime` only consumes it via Display in `.map_err`).
+// Kept as `pub(crate) use` so the in-crate path `crate::AutomatonError`
+// keeps working without bumping the public API surface.
+pub(crate) use error::AutomatonError;
 pub use events::AutomatonEvent;
 pub use handle::AutomatonHandle;
 pub use runtime::{Automaton, AutomatonRuntime, TickOutcome};
-pub use schedule::Schedule;
+// `Schedule`, `AutomatonStatus`, `ChatAutomaton` are internal to the
+// crate; nothing outside `aura-automaton` references them by name.
+// Their underlying `pub` definitions stay reachable through
+// `AutomatonInfo` fields / trait return types without being part of
+// the crate's named public surface.
 pub use state::AutomatonState;
-pub use types::{AutomatonId, AutomatonInfo, AutomatonStatus};
+pub use types::{AutomatonId, AutomatonInfo};
 
-pub use builtins::{ChatAutomaton, DevLoopAutomaton, SpecGenAutomaton, TaskRunAutomaton};
+pub use builtins::{DevLoopAutomaton, SpecGenAutomaton, TaskRunAutomaton};

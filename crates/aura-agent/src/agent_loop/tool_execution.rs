@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::constants::{tool_result_cache_key, CACHEABLE_TOOLS};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, ToolResultContent};
@@ -391,15 +391,11 @@ pub(super) fn update_cache(
     }
 
     if !write_paths.is_empty() {
-        // Phase 1B: drop only the path-scoped cache entries that
-        // overlap one of the written paths. `search_code` /
-        // `find_files` entries stay workspace-global because their
-        // results aggregate across the tree; the seed for the next
-        // phase's smarter invalidation is `recent_write_paths`.
+        // Drop only the path-scoped cache entries that overlap one of
+        // the written paths. `search_code` / `find_files` entries
+        // stay workspace-global because their results aggregate
+        // across the tree.
         invalidate_on_writes(cache, &write_paths);
-        for p in &write_paths {
-            cache.recent_write_paths.insert(PathBuf::from(p));
-        }
     }
 
     for r in executed {
@@ -598,7 +594,6 @@ fn insert_read_range_entry(cache: &mut ToolResultCache, input: &Value, rendered:
     let new_entry = ReadRangeEntry {
         start_line,
         end_line,
-        content_hash: Some(content_hash_hex(rendered.as_bytes())),
         rendered: rendered.to_string(),
     };
     let entries = cache.read_file_by_path.entry(path).or_default();

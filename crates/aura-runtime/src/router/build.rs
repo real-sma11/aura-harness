@@ -27,9 +27,7 @@ use axum::{
     Json, Router,
 };
 
-use crate::inbound_console::{
-    self, reason_for_status, InboundFailureView, InboundRequestView,
-};
+use crate::inbound_console::{self, reason_for_status, InboundFailureView, InboundRequestView};
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{

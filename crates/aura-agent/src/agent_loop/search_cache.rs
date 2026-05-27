@@ -24,7 +24,7 @@ use serde_json::Value;
 /// `find_files`. Returns `None` for any other tool so callers can
 /// skip non-cacheable work without a separate allow-list.
 #[must_use]
-pub fn normalized_search_key(tool: &str, input: &Value) -> Option<String> {
+pub(crate) fn normalized_search_key(tool: &str, input: &Value) -> Option<String> {
     match tool {
         "search_code" => Some(build_key(
             "search_code",

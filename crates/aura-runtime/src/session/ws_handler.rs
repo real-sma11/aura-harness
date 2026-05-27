@@ -400,10 +400,7 @@ async fn dispatch_idle_message(
                     crate::inbound_console::ws_rejection_line(
                         "framing",
                         "no_router_url",
-                        Some(&format!(
-                            "session={} mode={}",
-                            session.session_id, req.mode
-                        )),
+                        Some(&format!("session={} mode={}", session.session_id, req.mode)),
                     );
                     let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                         code: "no_router_url".into(),

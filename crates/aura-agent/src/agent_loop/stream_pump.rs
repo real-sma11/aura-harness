@@ -402,18 +402,44 @@ pub(super) async fn drive_stream(
                     // [`ToolCallResult`] inline so the FIFO drain
                     // returns it in submission order; the executor is
                     // NOT invoked (codex parity for read-only tools).
+                    //
+                    // Cache invariant (Rule 4.1 / 4.3): `split_cached`
+                    // partitions `allowed_calls` (a single-element
+                    // slice here) into `cached_results` and
+                    // `uncached_calls` such that every input call ends
+                    // up in exactly one bucket. So when either bucket
+                    // is non-empty its `into_iter().next()` MUST yield
+                    // an element; a `None` here is a true partition
+                    // invariant violation. Surface it as a fatal
+                    // `LlmCallError` via `AgentError::Internal` rather
+                    // than panicking (the `Error` outcome is folded
+                    // into `LlmCallError::Fatal` upstream in
+                    // `sampling::run_sampling_request`).
                     let (cached_results, uncached_calls) =
                         super::tool_execution::split_cached(&allowed_calls, &state.tool_cache);
                     if !cached_results.is_empty() {
-                        cached_pairs.push((
-                            submission_index,
-                            (call.clone(), cached_results.into_iter().next().unwrap()),
-                        ));
+                        let Some(first) = cached_results.into_iter().next() else {
+                            return StreamPumpOutcome::Error(AgentError::Internal(
+                                "stream pump cache invariant: cached_results \
+                                 was non-empty but yielded no element \
+                                 (split_cached partition contract broken)"
+                                    .to_string(),
+                            ));
+                        };
+                        cached_pairs.push((submission_index, (call.clone(), first)));
                     } else if !uncached_calls.is_empty() {
+                        let Some(first) = uncached_calls.into_iter().next() else {
+                            return StreamPumpOutcome::Error(AgentError::Internal(
+                                "stream pump cache invariant: uncached_calls \
+                                 was non-empty but yielded no element \
+                                 (split_cached partition contract broken)"
+                                    .to_string(),
+                            ));
+                        };
                         spawned_indices.push(submission_index);
                         in_flight.push_back(spawn_tool_with_timeout(
                             executor,
-                            uncached_calls.into_iter().next().unwrap(),
+                            first,
                             per_tool_timeout,
                         ));
                     }

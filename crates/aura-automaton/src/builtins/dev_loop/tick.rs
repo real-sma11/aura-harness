@@ -10,13 +10,16 @@
 //! - `on_stop` emits `LoopFinished` if the loop did not already finish
 //!   naturally.
 //!
-//! Codex parity (May 2026): the previous build retried `task_blocked`
-//! / no-write failures once with a decomposition-prompt splice. With
-//! the harness no longer manufacturing `task_blocked` envelopes (see
-//! commits 1 and 2 in this series) the retry path is dead. The
-//! automaton now classifies every executed task as success or failure
-//! and stops on first failure, mirroring Codex's simple per-task
-//! loop.
+//! Retry policy: each task is run once, then a project-level build
+//! check (`verify_build_after_agent`) is performed. If the build comes
+//! back red, the task is re-run **once** with the truncated build
+//! output spliced into the description via `build_retry_note` (see
+//! [`Self::execute_task_with_build_retry`]). A second red build is
+//! treated as a hard failure and the loop transitions the task to
+//! `failed` before halting on first failure — mirroring Codex's
+//! simple per-task loop semantics. The earlier `task_blocked` retry
+//! envelope (May 2026 codex-parity sweep) is gone; only the
+//! build-output retry described here remains.
 
 use std::sync::Arc;
 
@@ -97,7 +100,7 @@ impl DevLoopAutomaton {
     ) -> Result<TickOutcome, AutomatonError> {
         if self.tool_executor.is_none() {
             return Err(AutomatonError::InvalidConfig(
-                "no tool executor configured â€” the agent cannot perform file or command operations"
+                "no tool executor configured — the agent cannot perform file or command operations"
                     .into(),
             ));
         }
@@ -106,7 +109,7 @@ impl DevLoopAutomaton {
             .domain
             .list_tasks(&cfg.project_id, None, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(None, e))?;
 
         if tasks.is_empty() {
             info!("No tasks found for project, finishing");
@@ -120,10 +123,10 @@ impl DevLoopAutomaton {
         info!(remaining = queue.len(), "Task queue initialized");
 
         let pending = queue.len();
-        ctx.state.set(STATE_TASK_QUEUE, &queue);
-        ctx.state.set(STATE_INITIALIZED, &true);
-        ctx.state.set(STATE_COMPLETED_COUNT, &0u32);
-        ctx.state.set(STATE_FAILED_COUNT, &0u32);
+        ctx.state.set(STATE_TASK_QUEUE, &queue)?;
+        ctx.state.set(STATE_INITIALIZED, &true)?;
+        ctx.state.set(STATE_COMPLETED_COUNT, &0u32)?;
+        ctx.state.set(STATE_FAILED_COUNT, &0u32)?;
 
         ctx.emit(AutomatonEvent::LogLine {
             message: format!("Dev loop ready: {pending} tasks to execute"),
@@ -145,13 +148,13 @@ impl DevLoopAutomaton {
         }
 
         let task_id = queue.remove(0);
-        ctx.state.set(STATE_TASK_QUEUE, &queue);
+        ctx.state.set(STATE_TASK_QUEUE, &queue)?;
 
         let project = self
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(task_id.clone()), e))?;
 
         let task = match self.domain.get_task(&task_id, None).await {
             Ok(t) => t,
@@ -248,7 +251,7 @@ impl DevLoopAutomaton {
         }
 
         let completed: u32 = ctx.state.get(STATE_COMPLETED_COUNT).unwrap_or(0) + 1;
-        ctx.state.set(STATE_COMPLETED_COUNT, &completed);
+        ctx.state.set(STATE_COMPLETED_COUNT, &completed)?;
 
         ctx.emit(AutomatonEvent::TaskCompleted {
             task_id: task.id.clone(),
@@ -277,7 +280,7 @@ impl DevLoopAutomaton {
         }
 
         let failed: u32 = ctx.state.get(STATE_FAILED_COUNT).unwrap_or(0) + 1;
-        ctx.state.set(STATE_FAILED_COUNT, &failed);
+        ctx.state.set(STATE_FAILED_COUNT, &failed)?;
 
         ctx.emit(AutomatonEvent::TaskFailed {
             task_id: task.id.clone(),
@@ -309,9 +312,7 @@ impl DevLoopAutomaton {
             "Build still failing after agent pass; retrying once with compiler output"
         );
         let retry_note = truncate_for_retry(&build_err.to_string(), 12_000);
-        let exec = self
-            .execute_task(ctx, cfg, task, Some(retry_note))
-            .await?;
+        let exec = self.execute_task(ctx, cfg, task, Some(retry_note)).await?;
         if ctx.is_cancelled() {
             return Ok(exec);
         }
@@ -328,7 +329,7 @@ impl DevLoopAutomaton {
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(None, e))?;
         Ok(ctx
             .workspace_root
             .as_ref()
@@ -348,12 +349,12 @@ impl DevLoopAutomaton {
             .domain
             .get_project(&cfg.project_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(task.id.clone()), e))?;
         let spec = self
             .domain
             .get_spec(&task.spec_id, None)
             .await
-            .map_err(|e| AutomatonError::DomainApi(e.to_string()))?;
+            .map_err(|e| AutomatonError::domain_api(Some(task.id.clone()), e))?;
 
         // Pre-implementation refinement. Only run on the first pass
         // (`build_retry_note.is_none()`); the build-retry second
@@ -474,7 +475,7 @@ impl DevLoopAutomaton {
                 Some(cancel),
             )
             .await
-            .map_err(|e| AutomatonError::AgentExecution(e.to_string()))?;
+            .map_err(|e| AutomatonError::agent_execution(Some(task.id.clone()), e))?;
 
         Ok(exec)
     }
@@ -493,7 +494,7 @@ impl DevLoopAutomaton {
     ) -> Result<TickOutcome, AutomatonError> {
         let completed: u32 = ctx.state.get(STATE_COMPLETED_COUNT).unwrap_or(0);
         let failed: u32 = ctx.state.get(STATE_FAILED_COUNT).unwrap_or(0);
-        ctx.state.set(STATE_LOOP_FINISHED, &true);
+        ctx.state.set(STATE_LOOP_FINISHED, &true)?;
         ctx.emit(AutomatonEvent::LoopFinished {
             outcome: outcome.as_str().into(),
             completed_count: completed,
@@ -524,7 +525,9 @@ async fn verify_build_after_agent(
 ) -> Result<(), AutomatonError> {
     run_project_build_check(project_folder, build_command)
         .await
-        .map_err(AutomatonError::AgentExecution)
+        .map_err(|msg| {
+            AutomatonError::agent_execution(None, aura_agent::AgentError::BuildFailed(msg))
+        })
 }
 
 fn truncate_for_retry(message: &str, max_bytes: usize) -> String {
@@ -573,8 +576,12 @@ mod completion_tests {
     #[test]
     fn terminal_task_failure_finishes_loop_as_failed() {
         let (mut ctx, mut rx) = test_context();
-        ctx.state.set(STATE_COMPLETED_COUNT, &2u32);
-        ctx.state.set(STATE_FAILED_COUNT, &1u32);
+        ctx.state
+            .set(STATE_COMPLETED_COUNT, &2u32)
+            .expect("u32 always serializes");
+        ctx.state
+            .set(STATE_FAILED_COUNT, &1u32)
+            .expect("u32 always serializes");
 
         let outcome = DevLoopAutomaton::finish_with_outcome(&mut ctx, LoopFinishOutcome::Failed)
             .expect("failed finish should emit LoopFinished");
@@ -597,5 +604,4 @@ mod completion_tests {
             other => panic!("unexpected event: {other:?}"),
         }
     }
-
 }
