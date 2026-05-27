@@ -2,8 +2,9 @@
 //! observed during a streaming sampling request.
 //!
 //! The pump consumes `OutputItemDone(Message | Thinking | ToolUse)`
-//! events one at a time; `dispatch_streamed_response` and the
-//! downstream `accumulate_response` / `dispatch_stop_reason` helpers
+//! events one at a time; the downstream
+//! `iteration::accumulate_response` and the unified
+//! [`super::super::tool_pipeline::dispatch`] tail (Phase 4) both
 //! expect a single [`ModelResponse`]. This module performs the
 //! reassembly and is the home of the
 //! `Completed.end_turn` → [`StopReason`] mapping.
@@ -46,11 +47,12 @@ use crate::types::ToolCallInfo;
 ///   warn-and-restore-budget path would tracelog "MaxTokens with
 ///   pending tool_use blocks" even when no truncation occurred).
 /// * Both `StopReason::ToolUse` and `StopReason::MaxTokens` collapse
-///   to "break loop" through their dispatchers when the
+///   to "break loop" through the unified
+///   [`super::super::tool_pipeline::dispatch`] entry point when the
 ///   accumulated content has no tool-use / pending-tool blocks
-///   (see `dispatch_stop_reason` / `handle_max_tokens` /
-///   `handle_tool_use`), so the observable downstream behaviour is
-///   identical — only the diagnostic intent differs.
+///   (see `tool_pipeline::process_tool_results` /
+///   `iteration::handle_max_tokens`), so the observable downstream
+///   behaviour is identical — only the diagnostic intent differs.
 ///
 /// Phase 3 maps `Some(false)` with no observed tool calls to
 /// [`StopReason::ToolUse`] instead. This matches the Anthropic

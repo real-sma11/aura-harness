@@ -1,12 +1,11 @@
-//! Stop-reason dispatch and the summary-compaction tail.
+//! Summary-compaction tail.
 //!
 //! Carved out of `agent_loop/mod.rs` during the Phase 3 god-module
-//! split. Houses:
+//! split. Phase 4 removed the per-`AgentLoop` `dispatch_stop_reason`
+//! method that previously lived here — the unified
+//! [`super::tool_pipeline::dispatch`] entry point now owns
+//! stop-reason routing for both transports. What remains:
 //!
-//! - [`AgentLoop::dispatch_stop_reason`] — codex-parity exit-signal
-//!   dispatcher for the buffered sampling path. (The streaming pump
-//!   has its own analog in
-//!   [`super::stream_pump::dispatch_streamed_response`].)
 //! - [`AgentLoop::apply_summary_compaction`] — the auxiliary
 //!   model-call that turns a [`aura_compaction::SummaryInput`] into a
 //!   replacement transcript prefix.
@@ -16,14 +15,15 @@
 //!   [`aura_prompts::auxiliary::compaction`] per the Phase 2 prompts
 //!   boundary contract.
 //! - [`AgentLoop::retry_after_context_overflow`] — two-tier
-//!   compaction retry path consulted from [`super::sampling`] when a
-//!   single sampling call surfaces `PromptTooLong`.
+//!   compaction retry path consulted from
+//!   [`super::transport::BufferedTransport`] when a single sampling
+//!   call surfaces `PromptTooLong`.
 
 use aura_compaction as compaction;
 use aura_config::CHARS_PER_TOKEN;
 use aura_reasoner::{
     ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, ModelResponse,
-    StopReason, ThinkingEffort, ToolChoice, ToolDefinition,
+    ThinkingEffort, ToolChoice, ToolDefinition,
 };
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -36,41 +36,9 @@ use super::config::parse_cache_retention;
 use super::config::AgentLoopConfig;
 use super::run::is_cancelled;
 use super::state::LoopState;
-use super::{context, iteration, streaming, tool_execution, AgentLoop};
+use super::{context, iteration, streaming, AgentLoop};
 
 impl AgentLoop {
-    /// Dispatch on the model's stop reason. Returns `true` if the loop should break.
-    ///
-    /// Codex parity (`codex-rs/core/src/tasks/regular.rs:73-88`):
-    /// the model owns the exit signal. `EndTurn` / `StopSequence`
-    /// always terminate the loop; `MaxTokens` terminates unless
-    /// `handle_max_tokens` synthesised pending tool_use blocks that
-    /// the model needs to retry.
-    pub(super) async fn dispatch_stop_reason(
-        &self,
-        response: &ModelResponse,
-        executor: &dyn crate::types::AgentToolExecutor,
-        event_tx: Option<&Sender<AgentLoopEvent>>,
-        cancellation_token: Option<&CancellationToken>,
-        state: &mut LoopState,
-    ) -> bool {
-        match response.stop_reason {
-            StopReason::EndTurn | StopReason::StopSequence => true,
-            StopReason::MaxTokens => !iteration::handle_max_tokens(&self.config, response, state),
-            StopReason::ToolUse => {
-                tool_execution::handle_tool_use(
-                    self,
-                    response,
-                    executor,
-                    event_tx,
-                    cancellation_token,
-                    state,
-                )
-                .await
-            }
-        }
-    }
-
     /// Drive the auxiliary "compaction-summary" model call when the
     /// inline compactor reports that local rules alone won't fit the
     /// budget. Mutates `state` in place by rewriting the message

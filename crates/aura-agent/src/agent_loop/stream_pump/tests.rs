@@ -524,13 +524,14 @@ async fn pump_cache_hit_short_circuits_tool_spawn() {
     );
 }
 
-/// `pump_triggers_auto_build_on_write` (E.4 mandatory): a
-/// successful `write_file` flowing through the pump fires
-/// `tool_pipeline::run_auto_build_public`, mirroring the buffered
-/// path's `process_tool_results` step. The failing-build text is
-/// appended to the trailing tool_result-bearing user message via
-/// `push_tool_result_message_with_context`, so the existence of
-/// that side message in `state.messages` is the observable proof.
+/// `pump_triggers_auto_build_on_write` (Phase 4 unified): a
+/// successful `write_file` flowing through the pump fires the
+/// `run_auto_build` step inside
+/// [`super::super::tool_pipeline::process_tool_results`], mirroring
+/// the buffered path. The failing-build text is appended to the
+/// trailing tool_result-bearing user message via
+/// `push_tool_result_message`, so the existence of that side
+/// message in `state.messages` is the observable proof.
 #[tokio::test(start_paused = true)]
 async fn pump_triggers_auto_build_on_write() {
     #[derive(Default)]
@@ -608,14 +609,18 @@ async fn pump_triggers_auto_build_on_write() {
 
     // Drive only the post-stream dispatch path — the pre-stream
     // pump already has its own coverage, and the auto-build
-    // wiring lives in `handle_streamed_tool_use`.
-    let _should_break = super::dispatch_streamed_response(
+    // wiring lives inside the unified `tool_pipeline::dispatch`.
+    let ctx = super::super::tool_pipeline::ToolEffectCtx {
+        executor: &executor,
+        event_tx: None,
+        cancellation_token: None,
+    };
+    let _should_break = super::super::tool_pipeline::dispatch(
         &agent,
-        &executor,
-        &response,
-        vec![(tool_call, tool_result)],
-        None,
         &mut state,
+        &response,
+        super::super::tool_pipeline::ToolBatch::PreExecuted(vec![(tool_call, tool_result)]),
+        ctx,
     )
     .await;
 

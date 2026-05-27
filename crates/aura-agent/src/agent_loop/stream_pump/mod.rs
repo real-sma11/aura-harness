@@ -27,10 +27,9 @@
 //! - [`driver`] — `drive_stream` event loop + `FuturesOrdered` drain.
 //!   Owns the per-event timeout / per-tool timeout / FIFO ordering
 //!   invariants documented below.
-//! - [`dispatch`] — `dispatch_streamed_response` and
-//!   `handle_streamed_tool_use`: the post-pump tail that mirrors the
-//!   buffered path's `dispatch_stop_reason` + `handle_tool_use`
-//!   contract for pre-executed tool batches.
+//! - Post-pump dispatch tail collapsed into the unified
+//!   [`super::tool_pipeline::dispatch`] entry point in Phase 4 (the
+//!   previous `dispatch` submodule is gone).
 //! - [`synthesize`] — `synthesize_response`: rebuilds a
 //!   [`aura_reasoner::ModelResponse`] from the per-block chunks the
 //!   pump observed. Includes the corrected `end_turn = Some(false)`
@@ -82,7 +81,6 @@ use crate::AgentError;
 
 use super::AgentLoopConfig;
 
-mod dispatch;
 mod driver;
 mod retry;
 mod synthesize;
@@ -90,7 +88,6 @@ mod synthesize;
 #[cfg(test)]
 mod tests;
 
-pub(in crate::agent_loop) use dispatch::dispatch_streamed_response;
 pub(in crate::agent_loop) use retry::stream_retry_params;
 
 use driver::drive_stream;
@@ -279,31 +276,18 @@ pub(super) async fn run_stream_pump(
 
 /// Drop an advisory event onto the inner agent-event channel.
 ///
-/// Layer E.4 turned the pump into a per-`OutputItemDone` event source
-/// (`TextDelta` / `ThinkingDelta` / `ToolStart` / `ToolInputSnapshot`
-/// / `ToolCallCompleted` / `ToolResult`), so this helper is now the
-/// hot path on the streaming sampling driver. The downstream
-/// consumer is the
-/// `aura_automaton::builtins::dev_loop::spawn_agent_event_forwarder`
-/// task, which already applies a debounced drop policy on its outer
-/// projection — replicating a per-event `WARN!` here just doubles the
-/// noise during a normal burst, and a closed inner channel is
-/// already a downstream lifecycle signal (the forwarder dropped its
-/// receiver because the wrapping run is winding down).
-///
-/// Policy: `try_send`; drop silently on `Full` / `Closed`. Logging
-/// downgraded to `debug!` so operators can opt back into per-event
-/// visibility with `RUST_LOG=aura_agent::agent_loop::stream_pump=debug`
-/// without paying the warn-cadence cost in production logs.
+/// Phase 4: thin re-export of [`super::event_sink::emit`] so the
+/// pump's hot per-`OutputItemDone` path shares the single unified
+/// policy with [`super::streaming::emit`]. The previous local
+/// `try_send + debug!` block diverged from the buffered path's
+/// `try_send + warn!` policy; both now route through the same
+/// function so the policy cannot drift apart again. See
+/// [`super::event_sink`] module docs for the rationale.
 pub(super) fn emit_event(
     tx: Option<&Sender<crate::events::AgentLoopEvent>>,
     event: crate::events::AgentLoopEvent,
 ) {
-    if let Some(tx) = tx {
-        if let Err(e) = tx.try_send(event) {
-            tracing::debug!("agent event channel full or closed: {e}");
-        }
-    }
+    super::event_sink::emit(tx, event);
 }
 
 // `Debug` impls for the outcome enum so tests and tracing diagnostics

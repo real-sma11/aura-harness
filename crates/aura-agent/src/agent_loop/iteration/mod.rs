@@ -172,20 +172,27 @@ impl AgentLoop {
 
 /// Accumulate token counts, text, and thinking from the model response.
 ///
+/// Phase 4.6 removed the post-response compaction call that used to
+/// live at the tail of this function. Compaction now runs exactly
+/// once per sampling turn from [`super::context::compact_if_needed`]
+/// at the top of the next iteration. The previous double-call was
+/// redundant: every code path that consumed
+/// [`compaction::SummaryInput`] from this function also re-entered
+/// `compact_if_needed` the very next iteration, so dropping the
+/// post-response branch eliminates one full `Compactor::compact_messages`
+/// pass per iteration without changing the observable transcript.
+///
 /// `iteration` is the 0-based index of the model call whose response
-/// is being folded in. It is forwarded to
-/// [`super::context::effective_compaction_request_kind`] so the post-call
-/// compaction-policy reads the same request kind the next wire request
-/// will carry, instead of the stale [`AgentLoopConfig::request_kind`]
-/// (which never advances past `DevLoopBootstrap` for dev-loop runs and
-/// otherwise pins cap-pressure at 1.0 for the whole task — see the
-/// helper's doc comment for the full failure mode).
+/// is being folded in. Kept on the signature for symmetry with
+/// [`super::context::effective_compaction_request_kind`] (the next
+/// `compact_if_needed` call uses it) and so callers don't have to
+/// thread the counter through a different shape per phase.
 pub(super) fn accumulate_response(
-    config: &AgentLoopConfig,
+    _config: &AgentLoopConfig,
     state: &mut LoopState,
     response: &ModelResponse,
-    iteration: usize,
-) -> Option<compaction::SummaryInput> {
+    _iteration: usize,
+) {
     state.result.total_input_tokens += response.usage.input_tokens;
     state.result.total_output_tokens += response.usage.output_tokens;
     state.result.total_cache_creation_input_tokens += response
@@ -234,43 +241,6 @@ pub(super) fn accumulate_response(
     let estimated_context_tokens = provider_tokens.max(message_tokens);
     state.last_context_tokens_estimate = Some(estimated_context_tokens);
     state.result.estimated_context_tokens = estimated_context_tokens;
-
-    if super::context::compaction_disabled_by_env() {
-        return None;
-    }
-
-    let reserved_output_tokens = config
-        .max_context_tokens
-        .map_or(u64::from(config.max_tokens), |max_ctx| {
-            u64::from(config.max_tokens).min(max_ctx)
-        });
-    let request_kind = super::context::effective_compaction_request_kind(config, iteration);
-    let report = compaction::Compactor::new().compact_messages(compaction::CompactionInput {
-        messages: &mut state.messages,
-        policy: compaction::CompactionPolicy {
-            current_context_tokens: Some(message_tokens),
-            raw_message_bytes: Some(raw_message_bytes),
-            request_kind: Some(request_kind),
-            ..compaction::CompactionPolicy::new(
-                config.max_context_tokens,
-                estimated_context_tokens,
-                reserved_output_tokens,
-            )
-        },
-    });
-    if report.reduced() {
-        let compacted_chars = compaction::estimate_message_chars(&state.messages);
-        #[allow(clippy::cast_possible_truncation)]
-        let compacted_tokens = (compacted_chars / CHARS_PER_TOKEN) as u64;
-        let updated_estimate = provider_tokens.max(compacted_tokens);
-        state.last_context_tokens_estimate = Some(updated_estimate);
-        state.result.estimated_context_tokens = updated_estimate;
-    }
-
-    match report.action {
-        compaction::CompactionAction::NeedsSummary(input) => Some(input),
-        compaction::CompactionAction::Applied(_) | compaction::CompactionAction::None => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +255,7 @@ pub(super) fn handle_max_tokens(
     response: &ModelResponse,
     state: &mut LoopState,
 ) -> bool {
-    let pending_tools = extract_pending_tools(response);
+    let pending_tools = super::tool_pipeline::tool_calls(response);
     if pending_tools.is_empty() {
         return false;
     }
@@ -307,9 +277,9 @@ pub(super) fn handle_max_tokens(
 
     let results: Vec<(String, ToolResultContent, bool)> = pending_tools
         .iter()
-        .map(|pt| {
-            let text = synthetic_truncation_message(pt);
-            (pt.id.clone(), ToolResultContent::text(text), true)
+        .map(|tc| {
+            let text = synthetic_truncation_message(tc);
+            (tc.id.clone(), ToolResultContent::text(text), true)
         })
         .collect();
 
@@ -330,50 +300,24 @@ pub(super) fn handle_max_tokens(
 /// recovered from a `max_tokens`-truncated stream. Wording lives in
 /// [`aura_prompts::model_messages::max_tokens`]; this helper is just
 /// the per-tool dispatcher.
-fn synthetic_truncation_message(pt: &PendingTool) -> String {
+///
+/// `path` is best-effort — extracted from the (possibly partial)
+/// `tool_use` input JSON. When the truncated stream serialised the
+/// `path` field cleanly enough to survive, the wording is sharper
+/// (names the file in the synthetic error); otherwise we fall back
+/// to the path-less template.
+fn synthetic_truncation_message(tc: &crate::types::ToolCallInfo) -> String {
     use aura_prompts::model_messages::max_tokens;
-    match pt.name.as_str() {
-        "write_file" => match pt.path.as_deref() {
-            Some(path) => max_tokens::write_file_truncation_with_path(path),
+    let path = tc.input.get("path").and_then(|v| v.as_str());
+    match tc.name.as_str() {
+        "write_file" => match path {
+            Some(p) => max_tokens::write_file_truncation_with_path(p),
             None => max_tokens::WRITE_FILE_TRUNCATION_NO_PATH.to_string(),
         },
-        "edit_file" => match pt.path.as_deref() {
-            Some(path) => max_tokens::edit_file_truncation_with_path(path),
+        "edit_file" => match path {
+            Some(p) => max_tokens::edit_file_truncation_with_path(p),
             None => max_tokens::EDIT_FILE_TRUNCATION_NO_PATH.to_string(),
         },
         other => max_tokens::generic_tool_truncation(other),
     }
-}
-
-/// Subset of a pending `tool_use` block used to shape the synthetic
-/// error injected on `max_tokens`. `path` is best-effort — extracted
-/// from the partial input when it serialized cleanly enough to decode
-/// the `path` field before truncation hit.
-struct PendingTool {
-    id: String,
-    name: String,
-    path: Option<String>,
-}
-
-fn extract_pending_tools(response: &ModelResponse) -> Vec<PendingTool> {
-    response
-        .message
-        .content
-        .iter()
-        .filter_map(|block| {
-            if let ContentBlock::ToolUse { id, name, input } = block {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-                Some(PendingTool {
-                    id: id.clone(),
-                    name: name.clone(),
-                    path,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
 }

@@ -18,15 +18,23 @@
 //! - [`run`] — [`AgentLoop::new`] / `run` / `run_with_events` /
 //!   `run_with_session` / `run_inner` orchestration + the
 //!   [`run::is_cancelled`] probe.
-//! - [`stop_reason`] — [`AgentLoop::dispatch_stop_reason`],
-//!   `apply_summary_compaction`, `build_summary_request`, and the
-//!   `retry_after_context_overflow` ladder.
+//! - [`stop_reason`] — `apply_summary_compaction`,
+//!   `build_summary_request`, and the
+//!   `retry_after_context_overflow` ladder. (Phase 4 collapsed the
+//!   per-`AgentLoop` `dispatch_stop_reason` helper into
+//!   [`tool_pipeline::dispatch`] so both transports share one
+//!   stop-reason router.)
+//! - [`transport`] — `ModelTransport` trait + `BufferedTransport` /
+//!   `PumpTransport` impls (Phase 4 keystone).
+//! - [`event_sink`] — single non-blocking [`event_sink::emit`]
+//!   policy shared by [`streaming::emit`] and
+//!   [`stream_pump::emit_event`].
 //!
 //! Sibling modules (`iteration`, `sampling`, `tool_pipeline`,
 //! `tool_execution`, `stream_pump`, `streaming`, `context`, `turn`,
 //! `task`, `turn_diff`, `search_cache`, `steering`, `compaction_summary`)
-//! are unchanged in shape and still call into the split submodules
-//! through `super::*` re-exports listed below. Visibility of
+//! still call into the split submodules through `super::*`
+//! re-exports listed below. Visibility of
 //! [`LoopState`] / [`cache::ToolResultCache`] / etc. remains
 //! `pub(crate)` per the Phase 0 demotion.
 
@@ -34,6 +42,7 @@ mod cache;
 mod compaction_summary;
 mod config;
 mod context;
+mod event_sink;
 mod iteration;
 mod run;
 mod sampling;
@@ -48,6 +57,7 @@ mod tool_execution;
 #[cfg(test)]
 mod tool_execution_tests;
 mod tool_pipeline;
+mod transport;
 mod turn;
 mod turn_diff;
 

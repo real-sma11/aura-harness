@@ -17,26 +17,20 @@ use tracing::{error, warn};
 
 use crate::events::{AgentLoopEvent, DebugEvent};
 
+use super::event_sink;
 use super::iteration::LlmCallError;
 use super::AgentLoop;
 
 /// Send an event through the channel if present.
+///
+/// Phase 4: thin re-export of [`event_sink::emit`] so legacy
+/// `streaming::emit(...)` call sites keep compiling while the
+/// canonical entry point lives next to the unified sink policy.
+/// The previous local `try_send + warn` body and the blocking
+/// `emit_with_backpressure` helper were removed during the dual-path
+/// collapse (see [`event_sink`] module docs for the policy).
 pub(super) fn emit(tx: Option<&Sender<AgentLoopEvent>>, event: AgentLoopEvent) {
-    if let Some(tx) = tx {
-        if let Err(e) = tx.try_send(event) {
-            tracing::warn!("agent event channel full or closed: {e}");
-        }
-    }
-}
-
-/// Send an event from async streaming paths, preserving LLM deltas instead of
-/// dropping them when the bounded event channel is temporarily saturated.
-async fn emit_with_backpressure(tx: Option<&Sender<AgentLoopEvent>>, event: AgentLoopEvent) {
-    if let Some(tx) = tx {
-        if let Err(e) = tx.send(event).await {
-            tracing::warn!("agent event channel closed: {e}");
-        }
-    }
+    event_sink::emit(tx, event);
 }
 
 /// Emit an [`AgentLoopEvent::IterationComplete`] event along with the
@@ -115,7 +109,14 @@ fn emit_debug_llm_call(
 }
 
 /// Map a [`StreamEvent`] to the corresponding [`AgentLoopEvent`] and emit it.
-async fn emit_stream_event(
+///
+/// Phase 4: routes through the unified [`event_sink::emit`] policy
+/// (`try_send` + warn/debug) so the buffered streaming path no longer
+/// awaits on a saturated channel. The previous
+/// `emit_with_backpressure` helper that backpressured the loop on a
+/// slow forwarder is gone; per-delta drops are now logged but do not
+/// stall sampling.
+fn emit_stream_event(
     event_tx: Option<&Sender<AgentLoopEvent>>,
     stream_event: &StreamEvent,
     accumulator: &StreamAccumulator,
@@ -126,47 +127,44 @@ async fn emit_stream_event(
 
     match stream_event {
         StreamEvent::TextDelta { text } => {
-            emit_with_backpressure(event_tx, AgentLoopEvent::TextDelta(text.clone())).await;
+            emit(event_tx, AgentLoopEvent::TextDelta(text.clone()));
         }
         StreamEvent::ThinkingDelta { thinking } => {
-            emit_with_backpressure(event_tx, AgentLoopEvent::ThinkingDelta(thinking.clone())).await;
+            emit(event_tx, AgentLoopEvent::ThinkingDelta(thinking.clone()));
         }
         StreamEvent::ContentBlockStart {
             content_type: StreamContentType::ToolUse { id, name },
             ..
         } => {
-            emit_with_backpressure(
+            emit(
                 event_tx,
                 AgentLoopEvent::ToolStart {
                     id: id.clone(),
                     name: name.clone(),
                 },
-            )
-            .await;
+            );
         }
         StreamEvent::InputJsonDelta { .. } => {
             if let Some(ref tool) = accumulator.current_tool_use {
-                emit_with_backpressure(
+                emit(
                     event_tx,
                     AgentLoopEvent::ToolInputSnapshot {
                         id: tool.id.clone(),
                         name: tool.name.clone(),
                         input: tool.input_json.clone(),
                     },
-                )
-                .await;
+                );
             }
         }
         StreamEvent::Error { message, .. } => {
-            emit_with_backpressure(
+            emit(
                 event_tx,
                 AgentLoopEvent::Error {
                     code: "stream_error".to_string(),
                     message: message.clone(),
                     recoverable: true,
                 },
-            )
-            .await;
+            );
         }
         _ => {}
     }
@@ -223,7 +221,7 @@ async fn drain_remaining_stream(
         match next {
             Some(Ok(event)) => {
                 accumulator.process(&event);
-                emit_stream_event(event_tx, &event, &accumulator).await;
+                emit_stream_event(event_tx, &event, &accumulator);
             }
             Some(Err(e)) => return DrainOutcome::Transport(e),
             None => return DrainOutcome::Completed(Box::new(accumulator)),
@@ -254,11 +252,10 @@ async fn complete_and_emit_as_deltas(
     for block in &response.message.content {
         match block {
             aura_reasoner::ContentBlock::Text { text } => {
-                emit_with_backpressure(event_tx, AgentLoopEvent::TextDelta(text.clone())).await;
+                emit(event_tx, AgentLoopEvent::TextDelta(text.clone()));
             }
             aura_reasoner::ContentBlock::Thinking { thinking, .. } => {
-                emit_with_backpressure(event_tx, AgentLoopEvent::ThinkingDelta(thinking.clone()))
-                    .await;
+                emit(event_tx, AgentLoopEvent::ThinkingDelta(thinking.clone()));
             }
             _ => {}
         }

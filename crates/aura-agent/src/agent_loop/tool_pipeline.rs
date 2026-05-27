@@ -1,20 +1,31 @@
-//! Inner tool-execution pipeline.
+//! Unified tool-execution pipeline (Phase 4).
 //!
-//! `super::tool_execution::handle_tool_use` is the outer dispatch step
-//! for `StopReason::ToolUse` (cache lookup, event emission, termination
-//! checks). When that step has tool calls left to actually run, it
-//! delegates here, to [`AgentLoop::process_tool_results`], which is the
-//! pipeline that:
+//! Phase 4 collapsed the two pre-existing tool-dispatch entry points
+//! (the buffered path's `tool_execution::handle_tool_use` and the
+//! pump path's `stream_pump::dispatch::handle_streamed_tool_use`)
+//! behind one async function: [`process_tool_results`]. Both paths
+//! now run the same chain — circling-read gate, chunk guard,
+//! optional executor call (Live batches only), `track_tool_effects`,
+//! auto-build, console/event emission, and the trailing
+//! `tool_result`-bearing user message push — regardless of which
+//! transport produced the batch.
 //!
-//! 1. Pre-dispatch chunk guard for oversized `write_file` calls.
-//! 2. Hands the tool calls to the [`AgentToolExecutor`].
-//! 3. Tracks write outcomes (`any_write_success` latch + file-change journal).
-//! 4. Optional auto-build after a successful write.
+//! The batch is wrapped in [`ToolBatch`]:
 //!
-//! Renamed from `tool_processing` in Phase 4: the old name was
-//! confusingly close to `tool_execution`, even though this module sits
-//! inside that one. "Pipeline" makes the multi-stage flow explicit and
-//! preserves the outer/inner split between the two files.
+//! - [`ToolBatch::Live`] is a fresh `Vec<ToolCallInfo>` that still
+//!   needs to be executed. The buffered transport routes here after
+//!   `tool_calls(response)`.
+//! - [`ToolBatch::PreExecuted`] is `Vec<(ToolCallInfo, ToolCallResult)>`
+//!   the pump driver already executed against its
+//!   [`futures_util::stream::FuturesOrdered`] drain. The unified
+//!   pipeline takes the pre-executed pairs as a pass-through —
+//!   `track_tool_effects` / auto-build / message push still run so
+//!   the pump path participates in the same telemetry contract.
+//!
+//! Each call site builds a [`ToolEffectCtx`] (executor, event_tx,
+//! cancellation_token) for the small set of per-dispatch parameters
+//! the pipeline needs. The larger sampling context lives in
+//! [`super::transport::SamplingCtx`] one layer up.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -22,18 +33,22 @@ use std::time::{Duration, Instant};
 
 use crate::budget::ExplorationState;
 use crate::build;
+use crate::console;
+use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::types::{
     AgentLoopResult, AgentToolExecutor, BuildBaseline, ToolCallInfo, ToolCallResult,
 };
-use aura_config::{READS_AFTER_WRITE_ALLOWANCE, WRITE_FILE_CHUNK_BYTES};
+use aura_config::{READS_AFTER_WRITE_ALLOWANCE, TOOL_ERROR_PREVIEW_LIMIT, WRITE_FILE_CHUNK_BYTES};
+use aura_reasoner::{ContentBlock, Message, ModelResponse, Role, ToolResultContent};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
-use super::streaming::emit as emit_event;
+use super::event_sink::emit as emit_event;
+use super::tool_execution::truncate_preview;
 use super::{AgentLoop, AgentLoopConfig, LoopState};
 
 /// Resolved heartbeat cadence. Reads
@@ -127,88 +142,517 @@ impl Drop for HeartbeatGuard {
     }
 }
 
-impl AgentLoop {
-    /// Process tool call results from one iteration.
-    ///
-    /// Returns `(results, side_messages, blocked_ids)` where
-    /// `side_messages` are warning/build texts that should be embedded into
-    /// the `tool_result` user message rather than pushed as separate messages
-    /// (which would violate Anthropic's `tool_use/tool_result` adjacency
-    /// requirement), and `blocked_ids` tracks which tool calls were
-    /// short-circuited by the pre-dispatch chunk guard (for accurate source
-    /// labelling in logs).
-    pub(crate) async fn process_tool_results(
-        &self,
-        tool_calls: &[ToolCallInfo],
-        executor: &dyn AgentToolExecutor,
-        state: &mut LoopState,
-        event_tx: Option<&Sender<AgentLoopEvent>>,
-        cancellation_token: Option<&CancellationToken>,
-    ) -> (Vec<ToolCallResult>, Vec<String>, HashSet<String>) {
-        let mut side_messages: Vec<String> = Vec::new();
+/// One batch of tool calls handed to [`process_tool_results`].
+///
+/// The variant tracks whether the batch still needs to be executed
+/// against the [`AgentToolExecutor`] (buffered transport) or whether
+/// the streaming pump already executed it inside its
+/// [`futures_util::stream::FuturesOrdered`] drain (pump transport).
+/// The downstream pipeline runs the same chain regardless — the
+/// only branch is "spawn the executor + heartbeat" vs "pass results
+/// straight through to tracking".
+pub(crate) enum ToolBatch {
+    /// Buffered transport: fresh tool calls extracted from
+    /// [`tool_calls`] that still need execution.
+    Live(Vec<ToolCallInfo>),
+    /// Pump transport: tool calls already executed inside the
+    /// pump driver, paired with their [`ToolCallResult`] in
+    /// submission order.
+    PreExecuted(Vec<(ToolCallInfo, ToolCallResult)>),
+}
 
-        // Pre-dispatch chunk guard: short-circuit oversized `write_file`
-        // calls before the real executor runs, so the turn never pays
-        // for the huge content re-echo. These synthetic errors flow
-        // through the `blocked_ids` channel so the source label
-        // becomes `blocked` and cache invalidation skips them.
-        let (oversized_writes, after_oversized) =
-            partition_oversized_writes(tool_calls, &mut side_messages, event_tx);
-
-        let (circling_reads, to_execute) =
-            partition_circling_duplicate_reads(&after_oversized, state);
-
-        let blocked_ids: HashSet<String> = oversized_writes
-            .iter()
-            .chain(circling_reads.iter())
-            .map(|r| r.tool_use_id.clone())
-            .collect();
-
-        let executed = if to_execute.is_empty() {
-            Vec::new()
-        } else {
-            // Phase 6 of agent-stuck-and-reset: spawn a periodic
-            // `progress: tool_running` heartbeat so aura-os's
-            // sliding-idle watchdog (and the client-side stuck-stream
-            // watchdog) see forward motion during a long tool call
-            // and don't trip `turn_timeout` on a turn that is
-            // actively working. The guard's `Drop` aborts the
-            // heartbeat task as soon as `executor.execute` returns
-            // (success, error, or panic — the surrounding `await`
-            // still drops the guard before unwinding propagates).
-            let _heartbeat = spawn_tool_heartbeat(event_tx, &to_execute, tool_heartbeat_interval());
-            execute_with_cancellation(executor, &to_execute, cancellation_token).await
-        };
-
-        let any_write_success = track_tool_effects(
-            &to_execute,
-            &executed,
-            &mut state.result,
-            &mut state.exploration_state,
-            &mut state.had_any_write,
-            &mut state.turn_diff,
-            Some(&mut state.repeated_read_tracker),
-            Some(&mut state.session_read_paths),
-            Some(&mut state.read_after_write_allowances),
-        );
-
-        if any_write_success && state.build_cooldown == 0 {
-            if let Some(build_text) = run_auto_build(
-                &self.config,
-                executor,
-                &mut state.build_cooldown,
-                state.build_baseline.as_ref(),
-            )
-            .await
-            {
-                side_messages.push(build_text);
-            }
+impl ToolBatch {
+    /// `true` when the batch carries no tool calls.
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Live(v) => v.is_empty(),
+            Self::PreExecuted(v) => v.is_empty(),
         }
+    }
+}
 
-        let mut all_results = oversized_writes;
-        all_results.extend(circling_reads);
-        all_results.extend(executed);
-        (all_results, side_messages, blocked_ids)
+/// Per-dispatch context handed to [`process_tool_results`].
+///
+/// Kept small and borrowed — the bigger sampling-time bundle lives
+/// in [`super::transport::SamplingCtx`]. `ToolEffectCtx` carries only
+/// the per-batch arguments that the tool pipeline actually needs:
+///
+/// - `executor`: target for [`AgentToolExecutor::execute`] on
+///   [`ToolBatch::Live`] batches and for the post-write
+///   [`AgentToolExecutor::auto_build_check`] on either batch kind.
+/// - `event_tx`: optional [`AgentLoopEvent`] sink for warnings,
+///   per-tool start/completed/result events, and the post-write
+///   build console block.
+/// - `cancellation_token`: optional [`CancellationToken`] honored by
+///   the [`execute_with_cancellation`] wrapper so a mid-batch Stop
+///   resolves to [`cancelled_results_for`] synthetics with
+///   `stop_loop = true`.
+pub(crate) struct ToolEffectCtx<'a> {
+    pub(crate) executor: &'a dyn AgentToolExecutor,
+    pub(crate) event_tx: Option<&'a Sender<AgentLoopEvent>>,
+    pub(crate) cancellation_token: Option<&'a CancellationToken>,
+}
+
+/// Result of running [`process_tool_results`].
+///
+/// Phase 4 collapsed the previously-distinct buffered/pump
+/// "should_stop" plumbing into one bool that captures every
+/// terminate-loop signal:
+///
+/// - a non-error `task_done` returning `stop_loop = true`,
+/// - any synthesised `[CANCELLED]` tool_result (mid-tool cancel
+///   path),
+/// - any tool that explicitly signals `stop_loop = true` from the
+///   executor side.
+///
+/// The struct is intentionally one-field so callers can grow it
+/// (e.g. Phase 8 may add a `task_completed` flag) without churning
+/// every dispatcher.
+pub(crate) struct ProcessedToolResults {
+    pub(crate) should_stop: bool,
+}
+
+/// Pull every [`ContentBlock::ToolUse`] block out of `response`'s
+/// assistant message, preserving submission order.
+///
+/// Phase 4: merged from the previously-duplicated
+/// `tool_execution::extract_tool_calls` and
+/// `iteration::extract_pending_tools` helpers. Callers that need
+/// the `path` argument (e.g. the `max_tokens` synthetic-truncation
+/// builder) extract it from each [`ToolCallInfo::input`] directly
+/// instead of carrying a parallel `PendingTool` struct.
+#[must_use]
+pub(crate) fn tool_calls(response: &ModelResponse) -> Vec<ToolCallInfo> {
+    response
+        .message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input } => Some(ToolCallInfo {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Run the unified post-`ToolUse` pipeline against `batch` and
+/// finalise the per-iteration tool effects on `state`.
+///
+/// Phase 4 keystone: replaces the previously-divergent
+/// `tool_execution::handle_tool_use` (buffered) and
+/// `stream_pump::dispatch::handle_streamed_tool_use` (pump) dispatch
+/// tails. Both call sites now produce a [`ToolBatch`] and route
+/// through this function so `track_tool_effects` / auto-build /
+/// `dup_audit` / message-push run uniformly regardless of transport.
+///
+/// The function:
+///
+/// 1. Builds the unified "tool_calls + all_results" view, executing
+///    [`ToolBatch::Live`] batches through the chunk-guard /
+///    circling-read / cache / heartbeat / executor chain. For
+///    [`ToolBatch::PreExecuted`] batches the pump driver already ran
+///    the tools so the pipeline takes the pre-executed pairs as a
+///    pass-through.
+/// 2. Runs `track_tool_effects` so the cumulative `had_any_write`
+///    latch, file-change journal, repeated-read tracker, and
+///    session-read cache all light up the same way on both paths.
+/// 3. Triggers auto-build when any successful write landed (with
+///    `build_cooldown == 0`) so the dev-loop build feedback loop
+///    fires regardless of transport.
+/// 4. Emits the per-batch console block and per-tool
+///    `ToolCallCompleted` / `ToolResult` events.
+/// 5. Pushes a single `Role::User` message carrying the
+///    `tool_result` blocks (and any side-message context texts) so
+///    the Anthropic `tool_use ↔ tool_result` adjacency contract
+///    stays intact.
+/// 6. Returns whether the sampling loop should break (the union of
+///    every `stop_loop = true` signal in the batch plus the
+///    `task_done` success handshake).
+pub(crate) async fn process_tool_results(
+    state: &mut LoopState,
+    agent: &AgentLoop,
+    batch: ToolBatch,
+    ctx: ToolEffectCtx<'_>,
+) -> ProcessedToolResults {
+    // Stop-reason parity: when the model signals `ToolUse` but emits
+    // no actual tool_use blocks (Phase 3 made this reachable for the
+    // pump's MaxTokens-without-pending-tools synthesis path too, see
+    // `synthesize.rs::derive_stop_reason`), the loop has nothing to
+    // dispatch and must break. Pre-Phase-4 the buffered path's
+    // `handle_tool_use` returned early in this case via
+    // `execute_and_cache_tools` and the pump's `handle_streamed_tool_use`
+    // mirrored it with an explicit `if tool_results.is_empty()`
+    // bailout. The unified pipeline preserves that contract here so
+    // a no-op `ToolUse` does not spin the sampling loop on a
+    // never-executing tool batch.
+    if batch.is_empty() {
+        return ProcessedToolResults { should_stop: true };
+    }
+
+    let prepared = match batch {
+        ToolBatch::Live(calls) => prepare_live_batch(state, &calls, &ctx).await,
+        ToolBatch::PreExecuted(pairs) => prepare_pre_executed_batch(pairs),
+    };
+
+    let PreparedBatch {
+        tool_calls,
+        mut all_results,
+        mut side_messages,
+        blocked_ids,
+        cached_ids,
+    } = prepared;
+
+    // Cumulative tracking (steering trackers, file-change journal,
+    // session-read cache, read-after-write allowances). The Live
+    // path's cached-results subset is included here because
+    // `prepare_live_batch` folded cached pairs into `all_results`
+    // before tracking ran. The pump driver does the same merge
+    // before calling into the pipeline so PreExecuted batches reach
+    // tracking with the full set.
+    let any_write_success = track_tool_effects(
+        &tool_calls,
+        &all_results,
+        &mut state.result,
+        &mut state.exploration_state,
+        &mut state.had_any_write,
+        &mut state.turn_diff,
+        Some(&mut state.repeated_read_tracker),
+        Some(&mut state.session_read_paths),
+        Some(&mut state.read_after_write_allowances),
+    );
+
+    if any_write_success && state.build_cooldown == 0 {
+        if let Some(build_text) = run_auto_build(
+            &agent.config,
+            ctx.executor,
+            &mut state.build_cooldown,
+            state.build_baseline.as_ref(),
+        )
+        .await
+        {
+            side_messages.push(build_text);
+        }
+    }
+
+    // Phase B latch: any successful write flips both `had_any_write`
+    // (per-batch) and `had_any_file_write` (cumulative). The pump
+    // path historically duplicated this assignment inside
+    // `handle_streamed_tool_use`; the unified pipeline runs it once
+    // here regardless of transport.
+    if state.had_any_write {
+        state.had_any_file_write = true;
+    }
+
+    emit_and_log_results(
+        ctx.event_tx,
+        &tool_calls,
+        &all_results,
+        &cached_ids,
+        &blocked_ids,
+    );
+
+    let task_done_success = tool_calls.iter().any(|tc| tc.name == "task_done")
+        && all_results.iter().any(|r| !r.is_error && r.stop_loop);
+    if task_done_success {
+        state.task_done_completed = true;
+    }
+
+    for result in all_results
+        .iter()
+        .filter(|r| r.kind == aura_core::ToolResultKind::CompactionStructural)
+    {
+        warn!(
+            target: "compaction",
+            tool_use_id = %result.tool_use_id,
+            result_len = result.content.len(),
+            "Rejected compacted/redacted tool input without incrementing consecutive errors"
+        );
+    }
+
+    let should_stop = all_results.iter().any(|r| r.stop_loop);
+
+    // Drain `all_results` into the trailing user message; carry side
+    // messages (chunk-guard warnings + auto-build output) as
+    // post-tool_result text blocks. Single dup_audit pre/post pair
+    // covers both transports now that the message-push lives here.
+    let pushed_results = std::mem::take(&mut all_results);
+    push_tool_result_message(&mut state.messages, pushed_results, side_messages);
+
+    ProcessedToolResults { should_stop }
+}
+
+/// Intermediate view assembled per batch before the common
+/// tracking / auto-build / emit / push steps fire. Held by value
+/// inside [`process_tool_results`] so the per-batch-kind logic stays
+/// in a single struct and the post-prepare chain is identical.
+struct PreparedBatch {
+    tool_calls: Vec<ToolCallInfo>,
+    all_results: Vec<ToolCallResult>,
+    side_messages: Vec<String>,
+    blocked_ids: HashSet<String>,
+    cached_ids: HashSet<String>,
+}
+
+async fn prepare_live_batch(
+    state: &mut LoopState,
+    tool_calls: &[ToolCallInfo],
+    ctx: &ToolEffectCtx<'_>,
+) -> PreparedBatch {
+    if tool_calls.is_empty() {
+        return PreparedBatch {
+            tool_calls: Vec::new(),
+            all_results: Vec::new(),
+            side_messages: Vec::new(),
+            blocked_ids: HashSet::new(),
+            cached_ids: HashSet::new(),
+        };
+    }
+
+    debug!(
+        tool_count = tool_calls.len(),
+        "Processing tool_use stop reason"
+    );
+    for tc in tool_calls {
+        debug!(
+            tool_use_id = %tc.id,
+            tool_name = %tc.name,
+            is_write = helpers::is_write_tool(&tc.name),
+            "Tool requested by model"
+        );
+    }
+
+    let mut side_messages: Vec<String> = Vec::new();
+    let (circling_reads, cacheable_calls) = partition_circling_duplicate_reads(tool_calls, state);
+    let circling_blocked_ids: HashSet<String> = circling_reads
+        .iter()
+        .map(|r| r.tool_use_id.clone())
+        .collect();
+
+    let (cached_results, uncached_calls) =
+        super::tool_execution::split_cached(&cacheable_calls, &state.tool_cache);
+    let cached_ids: HashSet<String> = cached_results
+        .iter()
+        .map(|r| r.tool_use_id.clone())
+        .collect();
+
+    debug!(
+        cached_count = cached_results.len(),
+        execute_count = uncached_calls.len(),
+        "Resolved cached vs executable tool calls"
+    );
+
+    // Chunk guard runs only on the uncached subset — cached entries
+    // were vetted on the original execution turn, and circling-blocked
+    // entries never reach a write path.
+    let (oversized_writes, after_oversized) =
+        partition_oversized_writes(&uncached_calls, &mut side_messages, ctx.event_tx);
+
+    let executed = if after_oversized.is_empty() {
+        Vec::new()
+    } else {
+        // Phase 6 of agent-stuck-and-reset: spawn a periodic
+        // `progress: tool_running` heartbeat so aura-os's
+        // sliding-idle watchdog (and the client-side stuck-stream
+        // watchdog) see forward motion during a long tool call
+        // and don't trip `turn_timeout` on a turn that is actively
+        // working. The guard's `Drop` aborts the heartbeat task as
+        // soon as `executor.execute` returns.
+        let _heartbeat =
+            spawn_tool_heartbeat(ctx.event_tx, &after_oversized, tool_heartbeat_interval());
+        execute_with_cancellation(ctx.executor, &after_oversized, ctx.cancellation_token).await
+    };
+
+    super::tool_execution::update_cache(&mut state.tool_cache, &after_oversized, &executed);
+
+    let blocked_ids: HashSet<String> = oversized_writes
+        .iter()
+        .map(|r| r.tool_use_id.clone())
+        .chain(circling_blocked_ids)
+        .collect();
+
+    // Ordering: circling-blocked first (the model emitted these
+    // first conceptually), then cached, then oversized synthetic
+    // errors, then live executed. The codex-parity adjacency
+    // contract only requires that EVERY `tool_use` has a paired
+    // `tool_result`, not that the order matches submission, so this
+    // grouping is purely cosmetic for the trailing user message.
+    let mut all_results: Vec<ToolCallResult> = circling_reads;
+    all_results.extend(cached_results);
+    all_results.extend(oversized_writes);
+    all_results.extend(executed);
+
+    PreparedBatch {
+        tool_calls: tool_calls.to_vec(),
+        all_results,
+        side_messages,
+        blocked_ids,
+        cached_ids,
+    }
+}
+
+fn prepare_pre_executed_batch(pairs: Vec<(ToolCallInfo, ToolCallResult)>) -> PreparedBatch {
+    let mut tool_calls: Vec<ToolCallInfo> = Vec::with_capacity(pairs.len());
+    let mut all_results: Vec<ToolCallResult> = Vec::with_capacity(pairs.len());
+    for (call, result) in pairs {
+        tool_calls.push(call);
+        all_results.push(result);
+    }
+    PreparedBatch {
+        tool_calls,
+        all_results,
+        side_messages: Vec::new(),
+        // The pump driver knows which entries were cached or
+        // circling-blocked but does not currently surface that
+        // metadata into the dispatch tail; both sets stay empty so
+        // the console block labels everything as `executor`. Phase 7
+        // (legacy buffered deletion) can refine this once the
+        // buffered path is gone.
+        blocked_ids: HashSet::new(),
+        cached_ids: HashSet::new(),
+    }
+}
+
+/// Console + tracing + event emission for a finished tool batch.
+///
+/// Phase 4: merged from `tool_execution::emit_and_log_results` so
+/// both Live and PreExecuted batches go through one log policy. The
+/// pump path previously emitted ToolCallCompleted/ToolResult inline
+/// in `handle_streamed_tool_use` without the surrounding
+/// `console::tools_block` summary; the unified pipeline restores
+/// that summary on both transports.
+fn emit_and_log_results(
+    event_tx: Option<&Sender<AgentLoopEvent>>,
+    tool_calls: &[ToolCallInfo],
+    all_results: &[ToolCallResult],
+    cached_ids: &HashSet<String>,
+    blocked_ids: &HashSet<String>,
+) {
+    console::tools_block(tool_calls, all_results, cached_ids, blocked_ids);
+
+    for r in all_results {
+        let tool_name = tool_calls
+            .iter()
+            .find(|t| t.id == r.tool_use_id)
+            .map_or("unknown", |t| t.name.as_str());
+        let source = if cached_ids.contains(&r.tool_use_id) {
+            "cache"
+        } else if blocked_ids.contains(&r.tool_use_id) {
+            "blocked"
+        } else {
+            "executor"
+        };
+        if r.is_error {
+            let preview = truncate_preview(&r.content, TOOL_ERROR_PREVIEW_LIMIT);
+            debug!(
+                tool_use_id = %r.tool_use_id,
+                tool_name = tool_name,
+                is_write = helpers::is_write_tool(tool_name),
+                is_error = r.is_error,
+                stop_loop = r.stop_loop,
+                source = source,
+                result_len = r.content.len(),
+                result_preview = preview.as_str(),
+                "Tool call completed"
+            );
+        } else {
+            debug!(
+                tool_use_id = %r.tool_use_id,
+                tool_name = tool_name,
+                is_write = helpers::is_write_tool(tool_name),
+                is_error = r.is_error,
+                stop_loop = r.stop_loop,
+                source = source,
+                result_len = r.content.len(),
+                "Tool call completed"
+            );
+        }
+    }
+
+    for r in all_results {
+        let info = tool_calls.iter().find(|t| t.id == r.tool_use_id);
+        let tool_name = info.map_or_else(String::new, |t| t.name.clone());
+        emit_event(
+            event_tx,
+            AgentLoopEvent::ToolCallCompleted {
+                tool_use_id: r.tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                input: info.map_or(serde_json::Value::Null, |t| t.input.clone()),
+                is_error: r.is_error,
+            },
+        );
+        emit_event(
+            event_tx,
+            AgentLoopEvent::ToolResult {
+                tool_use_id: r.tool_use_id.clone(),
+                tool_name,
+                content: r.content.clone(),
+                is_error: r.is_error,
+            },
+        );
+    }
+}
+
+/// Push the trailing `Role::User` message carrying every
+/// `tool_result` block (and any side-message text blocks).
+///
+/// Phase 4: absorbed from `tool_execution::push_tool_result_message_with_context`
+/// so [`process_tool_results`] owns the entire dup_audit window.
+/// Tool-result blocks are emitted before text blocks so the
+/// Anthropic `tool_use ↔ tool_result` adjacency rule stays trivially
+/// satisfied even when side messages (chunk-guard warnings,
+/// auto-build output) ride along.
+pub(super) fn push_tool_result_message(
+    messages: &mut Vec<Message>,
+    results: Vec<ToolCallResult>,
+    context_texts: Vec<String>,
+) {
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    for r in results {
+        blocks.push(ContentBlock::tool_result(
+            &r.tool_use_id,
+            ToolResultContent::text(r.content),
+            r.is_error,
+        ));
+    }
+    for text in context_texts {
+        blocks.push(ContentBlock::Text { text });
+    }
+
+    if !blocks.is_empty() {
+        dup_audit::audit_tool_result_duplicates(messages, "push_tool_result.pre");
+        messages.push(Message::new(Role::User, blocks));
+        dup_audit::audit_tool_result_duplicates(messages, "push_tool_result.post");
+    }
+}
+
+/// Unified stop-reason dispatch.
+///
+/// Phase 4: collapses the buffered-path `AgentLoop::dispatch_stop_reason`
+/// and the pump-path `stream_pump::dispatch::dispatch_streamed_response`
+/// into a single function fed by [`ToolBatch`]. Returns `true` when
+/// the sampling loop should break.
+pub(crate) async fn dispatch(
+    agent: &AgentLoop,
+    state: &mut LoopState,
+    response: &ModelResponse,
+    batch: ToolBatch,
+    ctx: ToolEffectCtx<'_>,
+) -> bool {
+    use aura_reasoner::StopReason;
+    match response.stop_reason {
+        StopReason::EndTurn | StopReason::StopSequence => true,
+        StopReason::MaxTokens => {
+            !super::iteration::handle_max_tokens(&agent.config, response, state)
+        }
+        StopReason::ToolUse => {
+            process_tool_results(state, agent, batch, ctx)
+                .await
+                .should_stop
+        }
     }
 }
 
@@ -382,38 +826,10 @@ fn partition_oversized_writes(
     (oversized, remaining)
 }
 
-/// Crate-internal wrapper around [`track_tool_effects`] used by the
-/// E.3 streaming pump (`stream_pump::handle_streamed_tool_use`). The
-/// pump's tool dispatch path lives outside this file so the
-/// detection logic for "successful write happened this batch" is
-/// exposed via `pub(super)` rather than inlined into both
-/// dispatchers. Same semantics as the private version — separated
-/// only to keep the visibility surface honest (Rule 3.1: nothing is
-/// `pub` that doesn't have to be).
-pub(super) fn track_tool_effects_public(
-    to_execute: &[ToolCallInfo],
-    executed: &[ToolCallResult],
-    result: &mut AgentLoopResult,
-    exploration_state: &mut ExplorationState,
-    had_any_write: &mut bool,
-    turn_diff: &mut super::turn_diff::TurnDiff,
-    repeated_read_tracker: Option<&mut super::steering::RepeatedReadTracker>,
-    session_read_paths: Option<&mut HashSet<PathBuf>>,
-    read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
-) -> bool {
-    track_tool_effects(
-        to_execute,
-        executed,
-        result,
-        exploration_state,
-        had_any_write,
-        turn_diff,
-        repeated_read_tracker,
-        session_read_paths,
-        read_after_write_allowances,
-    )
-}
-
+// Phase 8 will fold these per-tracker arguments into a unified
+// `TurnSteeringRegistry`; until then the function holds the existing
+// shape that the buffered + pump paths both relied on pre-Phase-4.
+#[allow(clippy::too_many_arguments)]
 fn track_tool_effects(
     to_execute: &[ToolCallInfo],
     executed: &[ToolCallResult],
@@ -554,21 +970,6 @@ async fn run_auto_build(
         }
     }
     None
-}
-
-/// Crate-internal wrapper around [`run_auto_build`] used by the
-/// E.4 streaming pump (`stream_pump::handle_streamed_tool_use`) so
-/// the pump path participates in the same dev-loop build feedback
-/// as the buffered path. Same semantics — separated only to keep
-/// the visibility surface honest (Rule 3.1: `run_auto_build` itself
-/// stays private to this module).
-pub(super) async fn run_auto_build_public(
-    config: &AgentLoopConfig,
-    executor: &dyn AgentToolExecutor,
-    build_cooldown: &mut usize,
-    build_baseline: Option<&BuildBaseline>,
-) -> Option<String> {
-    run_auto_build(config, executor, build_cooldown, build_baseline).await
 }
 
 #[cfg(test)]

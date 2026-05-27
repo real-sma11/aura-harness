@@ -5,9 +5,8 @@ use crate::types::ToolCallResult;
 use aura_config::tool_result_cache_key;
 
 use super::search_cache::normalized_search_key;
-use super::tool_execution::{
-    push_tool_result_message_with_context, split_cached, truncate_preview, update_cache,
-};
+use super::tool_execution::{split_cached, truncate_preview, update_cache};
+use super::tool_pipeline::push_tool_result_message;
 use super::ToolResultCache;
 
 #[test]
@@ -33,7 +32,7 @@ fn tool_results_are_emitted_before_context_texts() {
     ];
     let context = vec!["Build check failed".to_string()];
 
-    push_tool_result_message_with_context(&mut messages, results, context);
+    push_tool_result_message(&mut messages, results, context);
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, aura_reasoner::Role::User);

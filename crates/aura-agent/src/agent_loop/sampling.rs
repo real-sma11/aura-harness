@@ -1,30 +1,40 @@
-//! Single sampling request driver (Layer E.1).
+//! Single sampling request driver (Phase 4 unified).
 //!
-//! A *sampling request* is one round-trip with the model provider: one
-//! pre-call compaction pass, one [`ModelProvider::complete`] (streaming
-//! or buffered), one response-accumulation pass, one
-//! `dispatch_stop_reason` step that may execute tool calls in a single
-//! batch (Phase 3 parallel-tools stays batched in E.1), and one
-//! `iteration_complete` event.
+//! A *sampling request* is one round-trip with the model provider:
+//! one pre-call compaction pass, one
+//! [`super::transport::ModelTransport::sample`] call (buffered or
+//! pump, chosen by [`super::transport::select_transport`]), one
+//! response-accumulation pass, one `iteration_complete` event, and
+//! one unified [`super::tool_pipeline::dispatch`] step that may
+//! execute (or pass through) one batch of tool calls.
 //!
-//! Sampling is the innermost loop level in the codex topology
-//! ([codex-rs/core/src/session/turn.rs:1747 analog](
-//! https://github.com/.../codex-rs/core/src/session/turn.rs)). The
-//! [`turn::run_turn`] driver calls [`run_sampling_request`] repeatedly
-//! until the model signals `EndTurn` *and* no [`turn::run_turn_stop_hooks`]
-//! injection requests another follow-up.
+//! Phase 4 collapsed the previously-duplicated
+//! `run_sampling_request` / `run_sampling_request_streaming` pair
+//! behind a single function. Both transports run the same tail:
+//! cancellation check → `accumulate_response` →
+//! `emit_iteration_complete` → `tool_pipeline::dispatch`.
 //!
 //! Invariants:
 //!
-//! - Cancellation observed before `call_model` short-circuits to a
-//!   `needs_follow_up = false`, `broke_for_error = true` outcome so the
-//!   turn loop unwinds without paying for one more model call.
-//! - On `LlmCallError`, the error is applied to [`AgentLoopResult`] via
-//!   [`iteration::LlmCallError::apply`] and `broke_for_error = true`
-//!   instructs the turn loop to break (preserves the pre-E.1 behavior
-//!   where a fatal model error terminated the loop immediately).
-//! - `state.result.iterations` is incremented inside this function (the
-//!   counter is "completed sampling requests", matching pre-E.1 shape).
+//! - Cancellation observed before the transport call short-circuits
+//!   to a `needs_follow_up = false`, `broke_for_error = true`
+//!   outcome so the turn loop unwinds without paying for one more
+//!   model call.
+//! - On [`super::iteration::LlmCallError`], the error is applied to
+//!   [`crate::types::AgentLoopResult`] via
+//!   [`super::iteration::LlmCallError::apply`] and
+//!   `broke_for_error = true` instructs the turn loop to break
+//!   (preserves the pre-Phase-4 behavior where a fatal model error
+//!   terminated the loop immediately).
+//! - `state.result.iterations` is incremented inside this function
+//!   (the counter is "completed sampling requests", matching the
+//!   pre-Phase-4 shape).
+//! - Mid-tool cancellation inside the pump folds `[CANCELLED]`
+//!   tool_results into a `Streamed` outcome with `stop_loop = true`
+//!   markers so the Anthropic `tool_use ↔ tool_result` adjacency
+//!   contract stays intact through `dispatch`. The post-sample
+//!   cancellation probe therefore bails ONLY when the batch is
+//!   empty (no in-flight tools to repair).
 
 use std::time::Instant;
 
@@ -36,7 +46,8 @@ use tracing::{debug, instrument};
 use crate::events::AgentLoopEvent;
 use crate::types::AgentToolExecutor;
 
-use super::stream_pump::{run_stream_pump, StreamPumpOutcome};
+use super::tool_pipeline::{self, ToolBatch, ToolEffectCtx};
+use super::transport::{self, SamplingCtx, TransportOutcome};
 use super::{context, is_cancelled, iteration, streaming, AgentLoop, LoopState};
 
 /// Outcome of a single sampling request inside a turn.
@@ -58,24 +69,23 @@ pub(crate) struct SamplingRequestResult {
     pub(crate) broke_for_error: bool,
 }
 
-/// Drive one sampling request to completion.
+/// Drive one sampling request to completion (Phase 4 unified body).
 ///
-/// Mirrors the per-iteration body of the pre-E.1 `AgentLoop::run_inner`
-/// loop: compaction, request build, model call (with overflow retry),
-/// response accumulation, iteration-complete event, and
-/// stop-reason dispatch (which may execute tool calls in a single
-/// batch). Returns a [`SamplingRequestResult`] that lets the enclosing
-/// turn loop decide whether to continue with another sampling request.
+/// Mirrors the per-iteration body of the pre-Phase-3 `run_inner`
+/// loop with the dual buffered/pump split collapsed behind
+/// [`super::transport::ModelTransport`]. Returns a
+/// [`SamplingRequestResult`] that lets the enclosing turn loop decide
+/// whether to continue with another sampling request.
 ///
 /// The argument list intentionally holds every dependency the body
-/// touches (provider, executor, tools, event sink, cancellation token,
-/// mutable `LoopState`, iteration counter) so the function stays
-/// free-standing and trivially callable from `turn::run_turn`. E.3 (the
-/// stream-driver phase) collapses these into a `SamplingContext`
-/// struct; until then we suppress `clippy::too_many_arguments` rather
-/// than introduce a one-shot builder type that would be thrown away
-/// almost immediately.
-#[allow(clippy::too_many_arguments)] // E.3 collapses into SamplingContext.
+/// touches (provider, executor, tools, event sink, cancellation
+/// token, mutable `LoopState`, iteration counter) so the function
+/// stays free-standing and trivially callable from
+/// [`super::turn::run_turn`]. Phase 8 will collapse these into a
+/// `TurnCtx` struct; until then we suppress
+/// `clippy::too_many_arguments` rather than introduce a one-shot
+/// builder type that would be thrown away almost immediately.
+#[allow(clippy::too_many_arguments)] // Phase 8 collapses into TurnCtx.
 #[instrument(
     name = "sampling",
     skip_all,
@@ -132,55 +142,26 @@ pub(crate) async fn run_sampling_request(
         }
     };
 
-    // Layer E.3: the streaming pump path consumes
-    // `provider.complete_response_stream(…)` incrementally and overlaps
-    // tool execution at `OutputItemDone` boundaries. Gated behind
-    // `use_stream_pump` so chat callers that need per-delta event
-    // emission stay on the legacy `call_model` + `dispatch_stop_reason`
-    // path until E.4 wires per-delta emission into the pump.
-    if agent.config.use_stream_pump {
-        return run_sampling_request_streaming(
-            agent,
-            provider,
-            executor,
-            request,
-            event_tx,
-            cancellation_token,
-            state,
-            iteration,
-            iteration_started_at,
-        )
-        .await;
-    }
-
-    let response = match agent
-        .call_model(provider, request, event_tx, cancellation_token)
-        .await
-    {
-        Ok(r) => r,
-        Err(iteration::LlmCallError::PromptTooLong(msg)) => {
-            match agent
-                .retry_after_context_overflow(
-                    provider,
-                    tools,
-                    iteration,
-                    event_tx,
-                    cancellation_token,
-                    state,
-                    msg,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    e.apply(&mut state.result, event_tx);
-                    return SamplingRequestResult {
-                        needs_follow_up: false,
-                        broke_for_error: true,
-                    };
-                }
-            }
-        }
+    // Phase 4: pick the active transport once per sample and route
+    // the model call through `ModelTransport::sample`. Both impls
+    // produce a [`TransportOutcome`] that flattens to a
+    // `(ModelResponse, ToolBatch)` pair so the post-sample tail
+    // runs identically.
+    let transport_impl = transport::select_transport(&agent.config);
+    let sampling_ctx = SamplingCtx {
+        agent,
+        provider,
+        executor,
+        tools,
+        event_tx,
+        cancellation_token,
+        input_queue: None,
+        state,
+        request,
+        iteration,
+    };
+    let outcome = match transport_impl.sample(sampling_ctx).await {
+        Ok(o) => o,
         Err(e) => {
             e.apply(&mut state.result, event_tx);
             return SamplingRequestResult {
@@ -190,128 +171,17 @@ pub(crate) async fn run_sampling_request(
         }
     };
 
-    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response, iteration)
-    {
-        agent
-            .apply_summary_compaction(provider, tools, event_tx, cancellation_token, state, input)
-            .await;
-    }
-    state.result.iterations = iteration + 1;
-    streaming::emit_iteration_complete(event_tx, iteration, &response, iteration_started_at);
-
-    // Stop fired during or right after streaming finished — don't
-    // dispatch a fresh tool batch (which would race for minutes against
-    // the cancellation observed at the top of the next sampling).
-    // Cheap "cancelled before any tool dispatch" bail-out so the loop
-    // terminates immediately instead of paying for one more
-    // (potentially long) tool round-trip.
-    if is_cancelled(cancellation_token) {
-        debug!("Cancellation observed after model call; skipping tool dispatch");
-        return SamplingRequestResult {
-            needs_follow_up: false,
-            broke_for_error: true,
-        };
-    }
-
-    // `dispatch_stop_reason` returns `true` when the loop should break.
-    // The codex topology inverts this into `needs_follow_up` so the
-    // outer turn loop can fold the model's signal together with stop
-    // hooks / queued input (E.2/E.4) into a single termination
-    // predicate.
-    let dispatch_says_break = agent
-        .dispatch_stop_reason(&response, executor, event_tx, cancellation_token, state)
-        .await;
-
-    SamplingRequestResult {
-        needs_follow_up: !dispatch_says_break,
-        broke_for_error: false,
-    }
-}
-
-/// Streaming pump entry point for [`run_sampling_request`] (Layer E.3).
-///
-/// Replaces the buffered `call_model` + `dispatch_stop_reason` block
-/// with the [`stream_pump`] pipeline: opens a
-/// [`aura_reasoner::ResponseEventStream`], spawns tool futures into a
-/// [`futures_util::stream::FuturesOrdered`] as `OutputItemDone(tool_use)`
-/// events arrive, and drains the FIFO after the model signals
-/// `Completed`. Tool results from the pump are then folded back into
-/// the existing per-sampling accumulation / iteration-complete /
-/// stop-reason dispatch helpers so the rest of the loop sees the same
-/// shape it does in the legacy path.
-///
-/// The split with [`run_sampling_request`] keeps the legacy buffered
-/// callers untouched while this commit lands; once E.4 wires per-delta
-/// event emission through the pump, the legacy branch can collapse.
-#[allow(clippy::too_many_arguments)] // Mirrors run_sampling_request shape.
-async fn run_sampling_request_streaming(
-    agent: &AgentLoop,
-    provider: &dyn ModelProvider,
-    executor: &dyn AgentToolExecutor,
-    request: aura_reasoner::ModelRequest,
-    event_tx: Option<&Sender<AgentLoopEvent>>,
-    cancellation_token: Option<&CancellationToken>,
-    state: &mut LoopState,
-    iteration: usize,
-    iteration_started_at: Instant,
-) -> SamplingRequestResult {
-    let outcome = run_stream_pump(
-        &agent.config,
-        provider,
-        executor,
-        request,
-        cancellation_token,
-        // The streaming pump opts to drain the input queue once per
-        // `OutputItemDone(tool_use)` so user steering inserted
-        // mid-batch becomes visible to the very next sampling
-        // request without losing the in-flight tool drain. The
-        // sampling driver itself does not own the input queue
-        // (that's the `task::run_task` scope), so we pass `None`
-        // here and let the task shell drive per-turn drains as
-        // before — the pump's per-event drain stays no-op for
-        // sampling callers that don't plumb a queue through.
-        None,
-        // Layer E.4: forward the event channel through to the pump
-        // so per-`OutputItemDone` block emits the same
-        // `TextDelta` / `ThinkingDelta` / `ToolStart` /
-        // `ToolInputSnapshot` events the buffered streaming path
-        // already produced. This is the parity gap that kept the
-        // pump opt-in pre-E.4.
-        event_tx,
-        state,
-    )
-    .await;
-
-    let (response, tool_results) = match outcome {
-        StreamPumpOutcome::Completed {
+    let (response, batch) = match outcome {
+        TransportOutcome::Buffered(response) => {
+            let calls = tool_pipeline::tool_calls(&response);
+            (response, ToolBatch::Live(calls))
+        }
+        TransportOutcome::Streamed {
             response,
-            tool_results,
-        } => (response, tool_results),
-        StreamPumpOutcome::Cancelled => {
-            debug!("stream pump observed cancellation; bailing the sampling request");
-            return SamplingRequestResult {
-                needs_follow_up: false,
-                broke_for_error: true,
-            };
-        }
-        StreamPumpOutcome::Error(err) => {
-            let llm_err = match err {
-                crate::AgentError::Reason(inner) => {
-                    iteration::LlmCallError::from_reasoner_error(&inner)
-                }
-                other => iteration::LlmCallError::Fatal(other.to_string()),
-            };
-            llm_err.apply(&mut state.result, event_tx);
-            return SamplingRequestResult {
-                needs_follow_up: false,
-                broke_for_error: true,
-            };
-        }
-        StreamPumpOutcome::AbortedWithPartial { .. } => {
-            iteration::LlmCallError::Fatal(
-                "stream pump returned an unretried partial tool-use abort".to_string(),
-            )
-            .apply(&mut state.result, event_tx);
+            pre_executed,
+        } => (response, ToolBatch::PreExecuted(pre_executed)),
+        TransportOutcome::Cancelled => {
+            debug!("transport observed cancellation; bailing the sampling request");
             return SamplingRequestResult {
                 needs_follow_up: false,
                 broke_for_error: true,
@@ -319,44 +189,33 @@ async fn run_sampling_request_streaming(
         }
     };
 
-    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response, iteration)
-    {
-        agent
-            .apply_summary_compaction(provider, &[], event_tx, cancellation_token, state, input)
-            .await;
-    }
+    iteration::accumulate_response(&agent.config, state, &response, iteration);
     state.result.iterations = iteration + 1;
     streaming::emit_iteration_complete(event_tx, iteration, &response, iteration_started_at);
 
-    // Mid-tool cancellation contract: when the pump observed the
-    // cancellation it synthesised `[CANCELLED]` tool_results with
-    // `stop_loop = true` and folded them into `tool_results` so the
-    // Anthropic `tool_use ↔ tool_result` adjacency stays intact. We
-    // MUST still call `dispatch_streamed_response` in that case so the
-    // trailing tool_result-bearing user message is appended; otherwise
-    // the transcript ends on an orphaned assistant `tool_use` and the
-    // next sampling call is structurally invalid. When there are no
-    // tool_results to dispatch (e.g. cancellation arrived before any
-    // `OutputItemDone(tool_use)`) we keep the fast bail-out path —
-    // there is no adjacency to repair and the cancellation propagates
-    // unchanged to the outer turn loop.
-    if is_cancelled(cancellation_token) && tool_results.is_empty() {
-        debug!("Cancellation observed after stream pump; skipping tool dispatch");
+    // Stop fired during or right after sampling: bail before
+    // dispatching a fresh batch UNLESS the pump pre-executed a
+    // batch carrying `[CANCELLED]` synthetic tool_results — those
+    // must still flow through `dispatch` so the Anthropic
+    // `tool_use ↔ tool_result` adjacency contract stays intact.
+    // When the batch is empty (no in-flight tools, e.g.
+    // cancellation arrived before any `OutputItemDone(tool_use)`),
+    // we keep the fast bail-out path.
+    if is_cancelled(cancellation_token) && batch.is_empty() {
+        debug!("Cancellation observed after model call; skipping tool dispatch");
         return SamplingRequestResult {
             needs_follow_up: false,
             broke_for_error: true,
         };
     }
 
-    let dispatch_says_break = super::stream_pump::dispatch_streamed_response(
-        agent,
+    let tool_ctx = ToolEffectCtx {
         executor,
-        &response,
-        tool_results,
         event_tx,
-        state,
-    )
-    .await;
+        cancellation_token,
+    };
+    let dispatch_says_break =
+        tool_pipeline::dispatch(agent, state, &response, batch, tool_ctx).await;
 
     SamplingRequestResult {
         needs_follow_up: !dispatch_says_break,
