@@ -70,7 +70,7 @@ Output your response as a JSON array where each element has:
 
 Output ONLY the JSON array, no other text."#;
 
-const MAX_TOKENS: u32 = 32_768;
+use aura_config::SPEC_GEN_MAX_TOKENS as MAX_TOKENS;
 
 #[async_trait::async_trait]
 impl Automaton for SpecGenAutomaton {

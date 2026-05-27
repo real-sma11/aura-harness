@@ -265,23 +265,13 @@ fn update_partial_retry_state(
 }
 
 /// Retry budget / backoff envelope shared with the legacy buffered
-/// streaming retry path. Reads the same env vars as
-/// `aura_reasoner::AnthropicConfig` so operators tune both paths
-/// together.
+/// streaming retry path and `aura_reasoner::AnthropicConfig`. Both
+/// paths now read the same `aura_config::reasoner().llm_retry` value
+/// (sourced once from `AURA_LLM_MAX_RETRIES` /
+/// `AURA_LLM_BACKOFF_INITIAL_MS` / `AURA_LLM_BACKOFF_CAP_MS` at
+/// startup) so operators tune both paths together.
 fn stream_retry_params() -> (u32, u64, u64) {
-    let max_retries: u32 = std::env::var("AURA_LLM_MAX_RETRIES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    let backoff_initial_ms: u64 = std::env::var("AURA_LLM_BACKOFF_INITIAL_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(250);
-    let backoff_cap_ms: u64 = std::env::var("AURA_LLM_BACKOFF_CAP_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30_000);
-    (max_retries, backoff_initial_ms, backoff_cap_ms)
+    aura_config::reasoner().llm_retry.as_legacy_triple()
 }
 
 /// Inner driver — separated so the unit tests can hand it a
@@ -1341,7 +1331,7 @@ mod tests {
         let executor = CountingExecutor::default();
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let cached_input = serde_json::json!({});
-        let cache_key = crate::constants::tool_result_cache_key("read_file", &cached_input);
+        let cache_key = aura_config::tool_result_cache_key("read_file", &cached_input);
         let mut state = super::super::LoopState::new(&config, Vec::new());
         state
             .tool_cache

@@ -11,8 +11,6 @@ use crate::file_ops::{self, FileOp};
 use super::error_types::parse_error_references;
 use super::signatures::parse_individual_error_signatures;
 
-pub const BUILD_FIX_SNAPSHOT_BUDGET: usize = 30_000;
-
 /// Pre-fix file content captured for rollback on stagnation.
 pub struct FileSnapshot {
     pub path: String,

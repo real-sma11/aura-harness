@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
-use crate::constants::{tool_result_cache_key, CACHEABLE_TOOLS};
+use aura_config::{tool_result_cache_key, CACHEABLE_TOOLS};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, ToolResultContent};
 use serde_json::Value;
 use tokio::sync::mpsc::Sender;
@@ -143,7 +143,7 @@ async fn execute_and_cache_tools(
 /// full output into `harness.log`. Sized to comfortably hold the
 /// `task_done` rejection text (~298B) and most validation errors from
 /// `aura-tools` while staying under any tracing field truncation limits.
-const TOOL_ERROR_PREVIEW_LIMIT: usize = 1024;
+use aura_config::TOOL_ERROR_PREVIEW_LIMIT;
 
 fn emit_and_log_results(event_tx: Option<&Sender<AgentLoopEvent>>, tools: &ExecutedTools) {
     // Single visual block summarising the whole batch — replaces the

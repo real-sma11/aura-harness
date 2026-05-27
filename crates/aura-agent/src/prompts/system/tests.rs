@@ -150,22 +150,16 @@ fn agentic_prompt_emits_tool_discipline_envelope_for_live_runtime_gates() {
 
 #[test]
 fn agentic_prompt_uses_test_command_env_override_when_set() {
-    use crate::task_executor::TEST_COMMAND_OVERRIDE_ENV;
-    let prev = std::env::var(TEST_COMMAND_OVERRIDE_ENV).ok();
-
-    std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "pytest -q -k smoke");
+    let mut cfg = aura_config::current();
+    cfg.agent.verify.test_command_override = Some("pytest -q -k smoke".to_string());
+    let _guard = aura_config::install_for_test(cfg);
 
     let project = test_project("/nonexistent");
     let prompt = agentic_execution_system_prompt(&project, None);
     assert!(
         prompt.contains("pytest -q -k smoke"),
-        "env override must surface in the prompt"
+        "config override must surface in the prompt"
     );
-
-    match prev {
-        Some(v) => std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, v),
-        None => std::env::remove_var(TEST_COMMAND_OVERRIDE_ENV),
-    }
 }
 
 #[test]
@@ -525,14 +519,10 @@ fn demo_project(folder: &str) -> ProjectInfo<'_> {
 }
 
 fn with_test_command_override_unset<F: FnOnce()>(f: F) {
-    let key = crate::task_executor::TEST_COMMAND_OVERRIDE_ENV;
-    let prev = std::env::var(key).ok();
-    std::env::remove_var(key);
+    let mut cfg = aura_config::current();
+    cfg.agent.verify.test_command_override = None;
+    let _guard = aura_config::install_for_test(cfg);
     f();
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
 }
 
 #[test]

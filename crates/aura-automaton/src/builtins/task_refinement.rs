@@ -56,10 +56,7 @@ const REFINEMENT_SYSTEM_PROMPT: &str =
 Rewrite the task description so it precisely matches the spec's intent and acceptance criteria. \
 Keep it concise and actionable.";
 
-/// Token cap for the refined description. Generous enough for a
-/// detailed multi-paragraph rewrite without inviting the model to
-/// produce a novella.
-const REFINEMENT_MAX_TOKENS: u32 = 4_096;
+use aura_config::REFINEMENT_MAX_TOKENS;
 
 /// Refine the description of `task` against `spec` via `provider`,
 /// persist it through `domain`, and return the updated descriptor.

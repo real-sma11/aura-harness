@@ -41,9 +41,10 @@ pub struct RepeatedReadTracker {
 }
 
 /// Threshold at which a single `content_hash` triggers the nudge.
-/// Public so the agent-loop wiring tests can reference the same
-/// constant the production code uses.
-pub const REPEATED_READ_THRESHOLD: usize = 3;
+/// Re-exports `aura_config::REPEATED_READ_THRESHOLD` so the agent-loop
+/// wiring tests can reference the same constant the production code
+/// uses, without paying the env-lookup overhead on the hot read path.
+pub const REPEATED_READ_THRESHOLD: usize = aura_config::REPEATED_READ_THRESHOLD;
 
 impl RepeatedReadTracker {
     /// Construct an empty tracker. The first turn is implicitly

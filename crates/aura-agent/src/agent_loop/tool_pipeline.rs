@@ -18,17 +18,16 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::budget::ExplorationState;
 use crate::build;
-use crate::constants::WRITE_FILE_CHUNK_BYTES;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::types::{
     AgentLoopResult, AgentToolExecutor, BuildBaseline, ToolCallInfo, ToolCallResult,
 };
+use aura_config::{READS_AFTER_WRITE_ALLOWANCE, WRITE_FILE_CHUNK_BYTES};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -36,51 +35,14 @@ use tracing::warn;
 use super::streaming::emit as emit_event;
 use super::{AgentLoop, AgentLoopConfig, LoopState};
 
-/// Env var that overrides the tool-running heartbeat cadence. Mirrors
-/// the same name aura-os Phase 3 already published in
-/// `apps/aura-os-server/src/handlers/agents/chat/turn_slot.rs` so the
-/// two sides stay aligned without per-process drift.
-const TOOL_HEARTBEAT_INTERVAL_ENV: &str = "AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS";
-
-/// Default cadence (10s) when the env var is unset or unparseable.
-/// Matches `DEFAULT_TOOL_HEARTBEAT_INTERVAL_SECS` on the aura-os side
-/// so the harness emits a heartbeat well inside the server's
+/// Resolved heartbeat cadence. Reads
+/// `aura_config::agent().tools.heartbeat_interval` (which is
+/// `AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS`, clamped at
+/// `aura_config` boundaries). Same value the aura-os side reads, so
+/// the harness emits a heartbeat well inside the server's
 /// sliding-idle window (`AURA_TURN_MAX_TIMEOUT_SECS`, default 180s).
-const DEFAULT_TOOL_HEARTBEAT_INTERVAL_SECS: u64 = 10;
-
-/// Minimum cadence: zero would degenerate into a hot loop and
-/// sub-second cadences would drown the broadcast in heartbeats.
-const MIN_TOOL_HEARTBEAT_INTERVAL_SECS: u64 = 1;
-
-/// Maximum cadence: ten minutes already exceeds the documented server
-/// idle ceiling, so values past this would defeat the heartbeat's
-/// purpose. Clamping protects against typos that would silently
-/// disable forward-progress signalling.
-const MAX_TOOL_HEARTBEAT_INTERVAL_SECS: u64 = 600;
-const READS_AFTER_WRITE_ALLOWANCE: u8 = 3;
-
-pub(super) fn read_tool_heartbeat_interval_from_env() -> Duration {
-    let secs = match std::env::var(TOOL_HEARTBEAT_INTERVAL_ENV) {
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(parsed) => parsed.clamp(
-                MIN_TOOL_HEARTBEAT_INTERVAL_SECS,
-                MAX_TOOL_HEARTBEAT_INTERVAL_SECS,
-            ),
-            Err(_) => DEFAULT_TOOL_HEARTBEAT_INTERVAL_SECS,
-        },
-        Err(_) => DEFAULT_TOOL_HEARTBEAT_INTERVAL_SECS,
-    };
-    Duration::from_secs(secs)
-}
-
-/// Cached resolved cadence so the env lookup happens once per process.
-/// Matches the `OnceLock` pattern used elsewhere in the codebase
-/// (`tool_heartbeat_interval` on the aura-os side, `max_pending_turns`,
-/// `read_broadcast_capacity_from_env`) so tooling that scrapes
-/// configuration knobs sees a consistent shape.
 pub(crate) fn tool_heartbeat_interval() -> Duration {
-    static CACHED: OnceLock<Duration> = OnceLock::new();
-    *CACHED.get_or_init(read_tool_heartbeat_interval_from_env)
+    aura_config::agent().tools.heartbeat_interval
 }
 
 /// Spawn a background task that emits an
@@ -248,24 +210,10 @@ impl AgentLoop {
     }
 }
 
-/// Operator opt-out for the post-`implement_now` hard exploration block.
-///
-/// The soft `<harness_steering kind="implement_now">` prompt always fires when
-/// the gate's preconditions are met (see `prompts::steering::implement_now_gate`).
-/// The pre-dispatch tool-result rejection in
-/// [`partition_circling_duplicate_reads`] is the stronger guard: on by default
-/// once `implement_now` has injected. Set `AURA_AGENT_IMPLEMENT_NOW_BLOCK` to
-/// `0` / `false` / `no` / `off` for soft-nudge-only behaviour.
-fn implement_now_block_enabled() -> bool {
-    !matches!(
-        std::env::var("AURA_AGENT_IMPLEMENT_NOW_BLOCK").as_deref(),
-        Ok("0") | Ok("false") | Ok("no") | Ok("off")
-    )
-}
-
 /// Pre-dispatch exploration block (on by default).
 ///
-/// When [`implement_now_block_enabled`] is true and the loop has injected the
+/// When `aura_config::agent().steering.implement_now_hard_block` is `true`
+/// (set by `AURA_AGENT_IMPLEMENT_NOW_BLOCK`) and the loop has injected the
 /// one-shot `implement_now` steering without any cumulative file writes,
 /// further read/search tool calls are short-circuited with a synthetic error
 /// result.
@@ -273,7 +221,8 @@ pub(super) fn partition_circling_duplicate_reads(
     tool_calls: &[ToolCallInfo],
     state: &super::LoopState,
 ) -> (Vec<ToolCallResult>, Vec<ToolCallInfo>) {
-    if !implement_now_block_enabled() || !state.implement_now_injected || state.had_any_file_write {
+    let block_enabled = aura_config::agent().steering.implement_now_hard_block;
+    if !block_enabled || !state.implement_now_injected || state.had_any_file_write {
         return (Vec::new(), tool_calls.to_vec());
     }
 
@@ -668,37 +617,18 @@ mod track_tool_effects_tests {
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
 
-    /// Serialize tests that read or mutate `AURA_AGENT_IMPLEMENT_NOW_BLOCK`.
-    /// `partition_circling_duplicate_reads` reads the same env var, so any
-    /// test exercising it needs to coordinate to keep parallel-test runs
-    /// deterministic.
+    /// Serialize tests that swap the installed `aura_config` via
+    /// `install_for_test` so they cannot race each other on the
+    /// `implement_now_hard_block` toggle.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    /// Set `AURA_AGENT_IMPLEMENT_NOW_BLOCK` to `value` for the duration of a
-    /// scope and restore the previous value on drop.
-    struct EnvVarOverride {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvVarOverride {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarOverride {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
+    fn install_block(enabled: bool) -> aura_config::ConfigGuard {
+        let mut cfg = aura_config::current();
+        cfg.agent.steering.implement_now_hard_block = enabled;
+        aura_config::install_for_test(cfg)
     }
 
     fn mk_read_tool(id: &str, path: &str) -> ToolCallInfo {
@@ -745,9 +675,9 @@ mod track_tool_effects_tests {
     }
 
     #[test]
-    fn implement_now_block_is_disabled_when_env_opt_out() {
+    fn implement_now_block_is_disabled_when_config_opt_out() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "off");
+        let _cfg = install_block(false);
 
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new_for_tests(&config, vec![]);
@@ -766,7 +696,7 @@ mod track_tool_effects_tests {
 
         assert!(
             blocked.is_empty(),
-            "opt-out: hard block must not fire when AURA_AGENT_IMPLEMENT_NOW_BLOCK=off"
+            "opt-out: hard block must not fire when implement_now_hard_block=false"
         );
         assert_eq!(remaining.len(), 2);
     }
@@ -774,7 +704,7 @@ mod track_tool_effects_tests {
     #[test]
     fn implement_now_blocks_exploration_until_a_write_lands() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "");
+        let _cfg = install_block(true);
 
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new_for_tests(&config, vec![]);
@@ -814,7 +744,7 @@ mod track_tool_effects_tests {
     #[test]
     fn implement_now_block_stops_after_first_successful_file_write() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "");
+        let _cfg = install_block(true);
 
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new_for_tests(&config, vec![]);

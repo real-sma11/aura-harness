@@ -7,26 +7,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use tracing::debug;
 
 /// Read-only tools whose results are safe to fold by `content_hash`.
-///
-/// Must stay in sync with `aura_agent::constants::CACHEABLE_TOOLS`.
-/// Duplicated here (rather than imported) because `aura-agent` already
-/// depends on `aura-compaction` and the reverse direction would
-/// introduce a cycle. The set is small and stable enough that drift is
-/// easy to spot in review.
-const READ_ONLY_DEDUP_TOOLS: &[&str] = &[
-    "read_file",
-    "list_files",
-    "stat_file",
-    "find_files",
-    "search_code",
-];
+/// Single source of truth lives in `aura_config::CACHEABLE_TOOLS`.
+use aura_config::CACHEABLE_TOOLS as READ_ONLY_DEDUP_TOOLS;
 
-const CHARS_PER_TOKEN: usize = 4;
-const COMPACTION_TIER_HISTORY: f64 = 0.85;
-const COMPACTION_TIER_AGGRESSIVE: f64 = 0.70;
-const COMPACTION_TIER_60: f64 = 0.60;
-const COMPACTION_TIER_30: f64 = 0.30;
-const COMPACTION_TIER_MICRO: f64 = 0.15;
+use aura_config::{
+    CHARS_PER_TOKEN, COMPACTION_TIER_30, COMPACTION_TIER_60, COMPACTION_TIER_AGGRESSIVE,
+    COMPACTION_TIER_HISTORY, COMPACTION_TIER_MICRO,
+};
 const DEFAULT_SUMMARY_AT: f64 = 0.85;
 const DEV_LOOP_BOOTSTRAP_TOTAL_TEXT_MAX_BYTES: usize = 24 * 1024;
 const PROJECT_TOOL_TOTAL_TEXT_MAX_BYTES: usize = 48 * 1024;

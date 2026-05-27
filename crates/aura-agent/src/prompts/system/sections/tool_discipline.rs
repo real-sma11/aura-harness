@@ -21,7 +21,7 @@
 //!   own success / failure contract.
 //! - The 32_000-byte `write_file` chunk guard in
 //!   [`crate::agent_loop::tool_pipeline::partition_oversized_writes`]
-//!   (constant: [`crate::constants::WRITE_FILE_CHUNK_BYTES`]). Oversized
+//!   (constant: [`aura_config::WRITE_FILE_CHUNK_BYTES`]). Oversized
 //!   calls are short-circuited with `is_error = true` and never touch
 //!   disk.
 //! - The compaction-redaction guards in `aura-tools`

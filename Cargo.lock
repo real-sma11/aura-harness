@@ -175,6 +175,7 @@ dependencies = [
  "async-trait",
  "aura-auth",
  "aura-compaction",
+ "aura-config",
  "aura-core",
  "aura-kernel",
  "aura-reasoner",
@@ -226,6 +227,7 @@ dependencies = [
  "async-trait",
  "aura-agent",
  "aura-compaction",
+ "aura-config",
  "aura-core",
  "aura-reasoner",
  "aura-tools",
@@ -245,8 +247,20 @@ dependencies = [
 name = "aura-compaction"
 version = "0.1.0"
 dependencies = [
+ "aura-config",
  "aura-reasoner",
  "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "aura-config"
+version = "0.1.0"
+dependencies = [
+ "aura-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tracing",
 ]
 
@@ -323,6 +337,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aura-config",
  "aura-core",
  "bytes",
  "colored",

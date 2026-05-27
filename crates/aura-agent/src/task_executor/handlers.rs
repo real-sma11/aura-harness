@@ -198,8 +198,8 @@ impl TaskToolExecutor {
                     .to_string(),
             );
         }
-        let min_calls = 6;
-        let error_threshold = 0.7;
+        let min_calls = aura_config::PERVASIVE_ERROR_MIN_CALLS;
+        let error_threshold = aura_config::PERVASIVE_ERROR_THRESHOLD;
         let total = outcomes.total();
         let real_errors = outcomes.real_errors();
         if total >= min_calls {
@@ -259,7 +259,9 @@ impl TaskToolExecutor {
     ///
     /// The command is resolved at call time, in priority order:
     ///   1. [`Self::test_command_override`] — operator-supplied via
-    ///      [`super::TEST_COMMAND_OVERRIDE_ENV`] at executor construction.
+    ///      `aura_config::agent().verify.test_command_override`
+    ///      (sourced once from `AURA_DOD_TEST_COMMAND` at startup)
+    ///      and captured at executor construction.
     ///   2. [`Self::test_command`] — per-project configuration.
     ///   3. [`infer_default_test_command`] — manifest-driven auto-detect
     ///      (cargo, npm/pnpm/yarn/bun, deno, pytest, go, rspec/rake,

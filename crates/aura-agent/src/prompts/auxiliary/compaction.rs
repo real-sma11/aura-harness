@@ -112,11 +112,11 @@ fn render_summary_message(idx: usize, message: &Message) -> String {
 }
 
 fn truncate_for_summary_prompt(text: &str) -> String {
-    const MAX_BLOCK_CHARS: usize = 4_000;
-    if text.len() <= MAX_BLOCK_CHARS {
+    let max_block_chars = aura_config::PROMPT_COMPACTION_MAX_BLOCK_CHARS;
+    if text.len() <= max_block_chars {
         text.to_string()
     } else {
-        aura_compaction::truncate_content(text, MAX_BLOCK_CHARS, Some(2_000), Some(1_000))
+        aura_compaction::truncate_content(text, max_block_chars, Some(2_000), Some(1_000))
     }
 }
 

@@ -734,36 +734,33 @@ async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
 }
 
 #[test]
-fn read_test_command_override_env_treats_blank_as_unset() {
+fn read_test_command_override_env_reflects_aura_config() {
     // Same defence-in-depth idea as for the disable flag: an operator
     // exporting `AURA_DOD_TEST_COMMAND=` to "clear" the override must
-    // not get an empty string handed back as if it were a real command.
-    let prev = std::env::var(TEST_COMMAND_OVERRIDE_ENV).ok();
+    // not get an empty string handed back as if it were a real
+    // command. `aura_config` does that trimming once at startup; this
+    // test pins the contract by overriding the installed value.
+    fn install_override(value: Option<&str>) -> aura_config::ConfigGuard {
+        let mut cfg = aura_config::current();
+        cfg.agent.verify.test_command_override = value.map(str::to_string);
+        aura_config::install_for_test(cfg)
+    }
 
-    std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "  cargo test --workspace  ");
-    assert_eq!(
-        super::read_test_command_override_env(),
-        Some("cargo test --workspace".to_string()),
-        "non-empty value with surrounding whitespace must be trimmed"
-    );
-
-    std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "");
-    assert_eq!(
-        super::read_test_command_override_env(),
-        None,
-        "empty string must read as unset"
-    );
-
-    std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, "   ");
-    assert_eq!(
-        super::read_test_command_override_env(),
-        None,
-        "whitespace-only must read as unset"
-    );
-
-    match prev {
-        Some(v) => std::env::set_var(TEST_COMMAND_OVERRIDE_ENV, v),
-        None => std::env::remove_var(TEST_COMMAND_OVERRIDE_ENV),
+    {
+        let _g = install_override(Some("cargo test --workspace"));
+        assert_eq!(
+            super::read_test_command_override_env(),
+            Some("cargo test --workspace".to_string()),
+            "non-empty override must round-trip"
+        );
+    }
+    {
+        let _g = install_override(None);
+        assert_eq!(
+            super::read_test_command_override_env(),
+            None,
+            "unset override must read as None"
+        );
     }
 }
 

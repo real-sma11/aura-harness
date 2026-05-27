@@ -5,26 +5,12 @@ use std::path::PathBuf;
 use super::SteeringKind;
 use crate::agent_loop::{AgentLoopConfig, LoopState};
 
-const DEFAULT_IMPLEMENT_NOW_EXPLORATION_THRESHOLD: usize = 10;
-const MAX_PATHS_IN_MESSAGE: usize = 5;
-
-/// Default exploration-tool count before the harness steers toward writes.
-pub const IMPLEMENT_NOW_DEFAULT_THRESHOLD: usize = DEFAULT_IMPLEMENT_NOW_EXPLORATION_THRESHOLD;
-
-fn implement_now_enabled() -> bool {
-    !matches!(
-        std::env::var("AURA_AGENT_IMPLEMENT_NOW").as_deref(),
-        Ok("0") | Ok("false") | Ok("no") | Ok("off")
-    )
-}
-
-fn implement_now_threshold() -> usize {
-    std::env::var("AURA_AGENT_IMPLEMENT_NOW_THRESHOLD")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_IMPLEMENT_NOW_EXPLORATION_THRESHOLD)
-}
+/// Re-exported default exploration-tool count threshold. Lives in
+/// `aura_config::IMPLEMENT_NOW_DEFAULT_THRESHOLD`; the alias is kept
+/// here so existing tests / docs that reference
+/// `IMPLEMENT_NOW_DEFAULT_THRESHOLD` continue to compile against the
+/// authoritative value.
+pub const IMPLEMENT_NOW_DEFAULT_THRESHOLD: usize = aura_config::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
 
 fn sample_read_paths(session_read_paths: &std::collections::HashSet<PathBuf>) -> Vec<String> {
     let mut paths: Vec<String> = session_read_paths
@@ -32,7 +18,7 @@ fn sample_read_paths(session_read_paths: &std::collections::HashSet<PathBuf>) ->
         .map(|p| p.display().to_string())
         .collect();
     paths.sort();
-    paths.truncate(MAX_PATHS_IN_MESSAGE);
+    paths.truncate(aura_config::IMPLEMENT_NOW_MAX_PATHS_IN_MESSAGE);
     paths
 }
 
@@ -44,7 +30,8 @@ pub(crate) fn evaluate_implement_now(
     config: &AgentLoopConfig,
     state: &LoopState,
 ) -> Option<SteeringKind> {
-    if !implement_now_enabled() {
+    let steering = &aura_config::agent().steering;
+    if !steering.implement_now_enabled {
         return None;
     }
     // Tracked tasks wire `phase_reset_signal`; chat and generic callers do not.
@@ -57,8 +44,7 @@ pub(crate) fn evaluate_implement_now(
     if state.had_any_file_write {
         return None;
     }
-    let threshold = implement_now_threshold();
-    if state.exploration_state.count < threshold {
+    if state.exploration_state.count < steering.implement_now_threshold {
         return None;
     }
 

@@ -133,18 +133,8 @@ impl AnthropicConfig {
             Some("1" | "true" | "TRUE" | "yes" | "YES")
         );
 
-        let max_retries: u32 = std::env::var("AURA_LLM_MAX_RETRIES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
-        let backoff_initial_ms: u64 = std::env::var("AURA_LLM_BACKOFF_INITIAL_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(250);
-        let backoff_cap_ms: u64 = std::env::var("AURA_LLM_BACKOFF_CAP_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30_000);
+        let (max_retries, backoff_initial_ms, backoff_cap_ms) =
+            aura_config::reasoner().llm_retry.as_legacy_triple();
         let min_request_interval_ms: u64 = std::env::var("AURA_LLM_MIN_REQUEST_INTERVAL_MS")
             .ok()
             .and_then(|s| s.trim().parse().ok())
@@ -243,9 +233,9 @@ mod env_backoff_tests {
     #[test]
     fn backoff_fields_default_when_env_unset() {
         let cfg = with_env(|| {
-            let _g1 = EnvGuard::unset("AURA_LLM_MAX_RETRIES");
-            let _g2 = EnvGuard::unset("AURA_LLM_BACKOFF_INITIAL_MS");
-            let _g3 = EnvGuard::unset("AURA_LLM_BACKOFF_CAP_MS");
+            let mut overrides = aura_config::current();
+            overrides.reasoner.llm_retry = aura_config::LlmRetryConfig::defaults();
+            let _config_guard = aura_config::install_for_test(overrides);
             let _g4 = EnvGuard::unset("AURA_LLM_MIN_REQUEST_INTERVAL_MS");
             AnthropicConfig::from_env()
         });
@@ -258,9 +248,13 @@ mod env_backoff_tests {
     #[test]
     fn backoff_fields_read_env_overrides() {
         let cfg = with_env(|| {
-            let _g1 = EnvGuard::set("AURA_LLM_MAX_RETRIES", "12");
-            let _g2 = EnvGuard::set("AURA_LLM_BACKOFF_INITIAL_MS", "500");
-            let _g3 = EnvGuard::set("AURA_LLM_BACKOFF_CAP_MS", "60000");
+            let mut overrides = aura_config::current();
+            overrides.reasoner.llm_retry = aura_config::LlmRetryConfig {
+                max_retries: 12,
+                backoff_initial: std::time::Duration::from_millis(500),
+                backoff_cap: std::time::Duration::from_millis(60_000),
+            };
+            let _config_guard = aura_config::install_for_test(overrides);
             let _g4 = EnvGuard::set("AURA_LLM_MIN_REQUEST_INTERVAL_MS", "2500");
             AnthropicConfig::from_env()
         });

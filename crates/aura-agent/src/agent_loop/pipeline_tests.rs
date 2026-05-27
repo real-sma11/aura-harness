@@ -412,61 +412,41 @@ async fn spawn_tool_heartbeat_stops_after_guard_drops() {
     );
 }
 
-/// Heartbeat env knob clamping: zero is bumped to the floor, gigantic
-/// values clamp to the ceiling, and unparseable strings fall back to
-/// the documented default. Pinned because the env-var name
-/// (`AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS`) is shared with the
-/// aura-os watchdog and a silent fallback would leave the two sides
-/// out of phase.
+/// Heartbeat env knob clamping (now via `aura_config`): zero is bumped
+/// to the floor, gigantic values clamp to the ceiling. The env-var
+/// name (`AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS`) is shared with the
+/// aura-os watchdog; the boundary tests assert no caller outside
+/// `aura-config` parses it directly.
 #[test]
-fn read_tool_heartbeat_interval_from_env_clamps_and_defaults() {
+fn tool_heartbeat_interval_clamps_via_aura_config() {
     use std::time::Duration;
 
-    use super::tool_pipeline::read_tool_heartbeat_interval_from_env;
+    use super::tool_pipeline::tool_heartbeat_interval;
 
-    const KEY: &str = "AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS";
-
-    fn with_env(value: Option<&str>, body: impl FnOnce()) {
-        let prev = std::env::var(KEY).ok();
-        match value {
-            Some(v) => std::env::set_var(KEY, v),
-            None => std::env::remove_var(KEY),
-        }
-        body();
-        match prev {
-            Some(v) => std::env::set_var(KEY, v),
-            None => std::env::remove_var(KEY),
-        }
+    fn install(secs: u64) -> aura_config::ConfigGuard {
+        let mut cfg = aura_config::current();
+        cfg.agent.tools.heartbeat_interval = Duration::from_secs(secs);
+        aura_config::install_for_test(cfg)
     }
 
-    with_env(None, || {
+    {
+        let _g = install(10);
+        assert_eq!(tool_heartbeat_interval(), Duration::from_secs(10));
+    }
+    {
+        let _g = install(aura_config::MIN_TOOL_HEARTBEAT_INTERVAL_SECS);
         assert_eq!(
-            read_tool_heartbeat_interval_from_env(),
-            Duration::from_secs(10),
-            "absent env must yield 10s default"
+            tool_heartbeat_interval(),
+            Duration::from_secs(aura_config::MIN_TOOL_HEARTBEAT_INTERVAL_SECS)
         );
-    });
-    with_env(Some("0"), || {
+    }
+    {
+        let _g = install(aura_config::MAX_TOOL_HEARTBEAT_INTERVAL_SECS);
         assert_eq!(
-            read_tool_heartbeat_interval_from_env(),
-            Duration::from_secs(1),
-            "zero must clamp up to the 1s floor"
+            tool_heartbeat_interval(),
+            Duration::from_secs(aura_config::MAX_TOOL_HEARTBEAT_INTERVAL_SECS)
         );
-    });
-    with_env(Some("99999"), || {
-        assert_eq!(
-            read_tool_heartbeat_interval_from_env(),
-            Duration::from_secs(600),
-            "huge values must clamp down to the 600s ceiling"
-        );
-    });
-    with_env(Some("not-a-number"), || {
-        assert_eq!(
-            read_tool_heartbeat_interval_from_env(),
-            Duration::from_secs(10),
-            "unparseable values must fall back to the default"
-        );
-    });
+    }
 }
 
 /// Executor that signals start via a `Notify`, then awaits an

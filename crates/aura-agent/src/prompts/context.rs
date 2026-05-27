@@ -1,40 +1,11 @@
 use super::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
 
-/// Default max bytes the spec.markdown_contents section may contribute to
-/// the dev-loop bootstrap user message. The full spec is duplicative of
-/// the task description for the case where one spec has one task, and
-/// it inflates the request body with the same code patterns twice. The
-/// upstream Cloudflare WAF in front of `aura-router.onrender.com` blocks
-/// dev-loop bootstrap bodies whose user message contains a high density
-/// of code-like content (Python slicing, `&` operators, file paths,
-/// repeated escaped-amp `\u0026` sequences). Capping the spec section to
-/// ~1.5KB plus a short "(truncated)" marker keeps the body well below
-/// the empirically observed WAF cliff while preserving the spec title
-/// and the high-level intent of the spec for context.
-///
-/// Tunable at runtime via `AURA_AGENT_BOOTSTRAP_SPEC_BYTES` to allow
-/// experimentation without a rebuild. Set to `0` to skip the spec
-/// markdown entirely (only the title is included).
-const BOOTSTRAP_SPEC_DEFAULT_BYTES: usize = 1500;
-
 fn bootstrap_spec_byte_budget() -> usize {
-    std::env::var("AURA_AGENT_BOOTSTRAP_SPEC_BYTES")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(BOOTSTRAP_SPEC_DEFAULT_BYTES)
+    aura_config::agent().prompts.bootstrap_spec_bytes
 }
 
-/// Returns true if the bootstrap should strip fenced code blocks from
-/// spec markdown and task descriptions. Default: disabled, so task agents
-/// see full spec/task code in turn 0 instead of being told to `read_file`.
-/// Set `AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES=1` (or `true`/`yes`/`on`) to
-/// re-enable WAF-safe stripping when routing through `aura-router.onrender.com`'s
-/// Cloudflare zone (e.g. Python slicing, `&` operators in fenced blocks).
 fn bootstrap_should_strip_code_fences() -> bool {
-    matches!(
-        std::env::var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-    )
+    aura_config::agent().prompts.bootstrap_strip_code_fences
 }
 
 /// Strip fenced code blocks (```...```) from a markdown string, replacing
@@ -238,28 +209,14 @@ mod tests {
     use super::*;
     use crate::prompts::FileChangeEntry;
 
-    /// Serializes env-mutating bootstrap fence tests (process-global env).
+    /// Serializes config-mutating bootstrap fence tests (process-wide
+    /// `aura_config` slot).
     static BOOTSTRAP_FENCE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct BootstrapFenceEnvGuard {
-        prior: Option<String>,
-    }
-
-    impl BootstrapFenceEnvGuard {
-        fn capture() -> Self {
-            Self {
-                prior: std::env::var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES").ok(),
-            }
-        }
-    }
-
-    impl Drop for BootstrapFenceEnvGuard {
-        fn drop(&mut self) {
-            match &self.prior {
-                Some(v) => std::env::set_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES", v),
-                None => std::env::remove_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES"),
-            }
-        }
+    fn install_strip_fences(enabled: bool) -> aura_config::ConfigGuard {
+        let mut cfg = aura_config::current();
+        cfg.agent.prompts.bootstrap_strip_code_fences = enabled;
+        aura_config::install_for_test(cfg)
     }
 
     #[test]
@@ -365,8 +322,7 @@ mod tests {
         let _lock = BOOTSTRAP_FENCE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _guard = BootstrapFenceEnvGuard::capture();
-        std::env::remove_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES");
+        let _cfg = install_strip_fences(false);
 
         let project = ProjectInfo {
             project_id: None,
@@ -401,8 +357,7 @@ mod tests {
         let _lock = BOOTSTRAP_FENCE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _guard = BootstrapFenceEnvGuard::capture();
-        std::env::set_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES", "1");
+        let _cfg = install_strip_fences(true);
 
         let project = ProjectInfo {
             project_id: None,

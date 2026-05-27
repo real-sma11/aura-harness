@@ -311,7 +311,10 @@ impl DevLoopAutomaton {
             task_id = %task.id,
             "Build still failing after agent pass; retrying once with compiler output"
         );
-        let retry_note = truncate_for_retry(&build_err.to_string(), 12_000);
+        let retry_note = truncate_for_retry(
+            &build_err.to_string(),
+            aura_config::DEV_LOOP_RETRY_NOTE_MAX_BYTES,
+        );
         let exec = self.execute_task(ctx, cfg, task, Some(retry_note)).await?;
         if ctx.is_cancelled() {
             return Ok(exec);

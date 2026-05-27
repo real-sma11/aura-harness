@@ -31,8 +31,8 @@ pub struct IndividualTestResult {
     pub message: Option<String>,
 }
 
-const MAX_OUTPUT_BYTES: usize = 12_000;
-const BUILD_TIMEOUT: Duration = Duration::from_secs(120);
+use aura_config::MAX_OUTPUT_BYTES;
+const BUILD_TIMEOUT: Duration = Duration::from_secs(aura_config::BUILD_TIMEOUT_SECS);
 
 fn truncate_output(s: &str, max: usize) -> String {
     if s.len() <= max {

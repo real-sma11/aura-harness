@@ -486,27 +486,16 @@ fn looks_like_transient_stream_error(message: &str) -> bool {
 
 impl super::AgentLoop {
     /// Retry budget / backoff envelope used by the per-tool-call
-    /// retry loop. Reads `AURA_LLM_MAX_RETRIES`,
-    /// `AURA_LLM_BACKOFF_INITIAL_MS`, and `AURA_LLM_BACKOFF_CAP_MS`
-    /// (same variables `aura_reasoner::AnthropicConfig` honours) so
-    /// operators can widen the window via env without rebuilding.
+    /// retry loop. Reads `aura_config::reasoner().llm_retry` (sourced
+    /// from `AURA_LLM_MAX_RETRIES` / `AURA_LLM_BACKOFF_INITIAL_MS` /
+    /// `AURA_LLM_BACKOFF_CAP_MS` at startup) — the same value
+    /// `aura_reasoner::AnthropicConfig` and `stream_pump` honour, so
+    /// every retry path stays in lockstep.
     ///
-    /// Defaults match [`aura_reasoner::AnthropicConfig::new`]: 8
-    /// retries with initial 250ms, cap 30s, doubling each attempt.
+    /// Defaults: 8 retries with initial 250ms, cap 30s, doubling each
+    /// attempt.
     fn stream_retry_params() -> (u32, u64, u64) {
-        let max_retries: u32 = std::env::var("AURA_LLM_MAX_RETRIES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
-        let backoff_initial_ms: u64 = std::env::var("AURA_LLM_BACKOFF_INITIAL_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(250);
-        let backoff_cap_ms: u64 = std::env::var("AURA_LLM_BACKOFF_CAP_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30_000);
-        (max_retries, backoff_initial_ms, backoff_cap_ms)
+        aura_config::reasoner().llm_retry.as_legacy_triple()
     }
 
     /// Re-drive `provider.complete_streaming` after a mid-stream abort

@@ -88,12 +88,14 @@ pub fn compute_thinking_budget(base: u32, member_count: usize) -> u32 {
     }
 }
 
-/// Returns the model to use for simple tasks. Checks the `AURA_SIMPLE_MODEL`
-/// env var first, falling back to `default_model`.
+/// Returns the model to use for simple tasks. Checks the
+/// `aura_config::agent().simple_model_override` (sourced from
+/// `AURA_SIMPLE_MODEL` once at startup), falling back to
+/// `default_model`.
 pub fn resolve_simple_model(default_model: &str) -> String {
-    std::env::var("AURA_SIMPLE_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
+    aura_config::agent()
+        .simple_model_override
+        .clone()
         .unwrap_or_else(|| default_model.to_string())
 }
 
@@ -174,17 +176,32 @@ mod tests {
         assert_eq!(compute_thinking_budget(8000, 20), 16_000);
     }
 
+    /// Shared lock so the two `resolve_simple_model_*` tests don't race
+    /// each other on the process-wide `aura_config` singleton.
+    fn simple_model_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
-    fn resolve_simple_model_uses_default_when_no_env() {
-        // Clear the env var in case it's set
-        std::env::remove_var("AURA_SIMPLE_MODEL");
+    fn resolve_simple_model_uses_default_when_unset() {
+        let _guard = simple_model_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut cfg = aura_config::current();
+        cfg.agent.simple_model_override = None;
+        let _scope = aura_config::install_for_test(cfg);
         assert_eq!(resolve_simple_model("test-model"), "test-model");
     }
 
     #[test]
-    fn resolve_simple_model_uses_env_when_set() {
-        std::env::set_var("AURA_SIMPLE_MODEL", "custom-model");
+    fn resolve_simple_model_uses_override_when_set() {
+        let _guard = simple_model_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut cfg = aura_config::current();
+        cfg.agent.simple_model_override = Some("custom-model".to_string());
+        let _scope = aura_config::install_for_test(cfg);
         assert_eq!(resolve_simple_model("test-model"), "custom-model");
-        std::env::remove_var("AURA_SIMPLE_MODEL");
     }
 }

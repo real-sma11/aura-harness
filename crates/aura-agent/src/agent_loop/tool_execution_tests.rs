@@ -1,8 +1,8 @@
 use aura_reasoner::ContentBlock;
 
-use crate::constants::tool_result_cache_key;
 use crate::types::ToolCallInfo;
 use crate::types::ToolCallResult;
+use aura_config::tool_result_cache_key;
 
 use super::search_cache::normalized_search_key;
 use super::tool_execution::{

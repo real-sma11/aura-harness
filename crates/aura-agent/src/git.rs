@@ -22,7 +22,7 @@ use tracing::debug;
 
 /// Timeout used for the read-only helpers below. Mutating operations
 /// have their own timeout managed by the git tools in `aura-tools`.
-const GIT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(aura_config::GIT_READ_TIMEOUT_SECS);
 
 /// Lightweight record of a single commit surfaced by
 /// [`list_unpushed_commits`]. Kept stable so aura-os / dev-loop events

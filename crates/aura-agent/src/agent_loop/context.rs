@@ -8,12 +8,12 @@ use aura_reasoner::{ModelRequestKind, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 
 use crate::budget;
-use crate::constants::CHARS_PER_TOKEN;
 use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::helpers;
 use crate::sanitize;
 use crate::types::AgentContextBreakdown;
+use aura_config::CHARS_PER_TOKEN;
 
 use super::streaming;
 use super::{AgentLoopConfig, LoopState};
@@ -25,16 +25,15 @@ pub(super) enum CompactionOutcome {
     NeedsSummary(SummaryInput),
 }
 
-/// Operator kill switch: when `AURA_AGENT_DISABLE_COMPACTION` is set to a
-/// truthy value, every compaction entry point in the agent loop becomes a
-/// no-op. Used to test whether read-spiral behavior is being driven by older
-/// `read_file` results getting truncated out of context.
+/// Operator kill switch: when
+/// `aura_config::agent().compaction.disabled` is `true` (sourced from
+/// `AURA_AGENT_DISABLE_COMPACTION` once at startup), every compaction
+/// entry point in the agent loop becomes a no-op. Used to test
+/// whether read-spiral behavior is being driven by older `read_file`
+/// results getting truncated out of context.
 #[must_use]
 pub(super) fn compaction_disabled_by_env() -> bool {
-    matches!(
-        std::env::var("AURA_AGENT_DISABLE_COMPACTION").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
-    )
+    aura_config::agent().compaction.disabled
 }
 
 /// Return the [`ModelRequestKind`] the compaction policy should reason
@@ -344,13 +343,19 @@ mod tests {
     use aura_reasoner::{Message, ModelRequestKind, ToolDefinition};
     use std::sync::{Mutex, OnceLock};
 
-    /// Serialize tests that read or mutate `AURA_AGENT_DISABLE_COMPACTION`.
-    /// The env-mutating kill-switch test would otherwise race with
-    /// sibling tests that call `compact_if_needed` / `compact_for_overflow`,
-    /// which read the same env var transitively.
+    /// Serialize tests that swap `aura_config` to flip the compaction
+    /// kill switch. Sibling tests that call `compact_if_needed` /
+    /// `compact_for_overflow` read the same config, so any toggle has
+    /// to be coordinated to keep parallel-test runs deterministic.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn install_compaction_disabled(disabled: bool) -> aura_config::ConfigGuard {
+        let mut cfg = aura_config::current();
+        cfg.agent.compaction.disabled = disabled;
+        aura_config::install_for_test(cfg)
     }
 
     fn dummy_tool(name: &str, description: &str) -> ToolDefinition {
@@ -498,18 +503,17 @@ mod tests {
         assert_eq!(b.mcp_tokens, 0);
     }
 
-    /// `AURA_AGENT_DISABLE_COMPACTION=1` must short-circuit
-    /// `compact_if_needed` so older `read_file` results never get
-    /// truncated, even on a config that would normally hit the
-    /// aggressive tier. This is the operator escape hatch used to test
-    /// whether read-spiral behavior is being driven by mid-run
+    /// Setting `aura_config::agent().compaction.disabled = true`
+    /// (sourced from `AURA_AGENT_DISABLE_COMPACTION`) must
+    /// short-circuit `compact_if_needed` so older `read_file` results
+    /// never get truncated, even on a config that would normally hit
+    /// the aggressive tier. This is the operator escape hatch used to
+    /// test whether read-spiral behavior is being driven by mid-run
     /// truncation.
     #[test]
-    fn env_kill_switch_disables_compact_if_needed() {
+    fn kill_switch_disables_compact_if_needed() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let env_key = "AURA_AGENT_DISABLE_COMPACTION";
-        let prev = std::env::var(env_key).ok();
-        std::env::set_var(env_key, "1");
+        let _cfg = install_compaction_disabled(true);
 
         let huge = "X".repeat(200_000);
         let mut messages = vec![
@@ -528,11 +532,6 @@ mod tests {
         let outcome = compact_if_needed(&config, &mut state, &[], 0);
 
         let after_chars: usize = state.messages.iter().map(|m| m.text_content().len()).sum();
-
-        match prev {
-            Some(v) => std::env::set_var(env_key, v),
-            None => std::env::remove_var(env_key),
-        }
 
         assert!(
             matches!(outcome, super::CompactionOutcome::None),

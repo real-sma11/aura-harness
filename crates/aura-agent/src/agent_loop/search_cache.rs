@@ -1,7 +1,7 @@
 //! Secondary, fuzzy cache index for `search_code` / `find_files`.
 //!
 //! The exact-match cache (`LoopState::tool_cache`, keyed by
-//! [`crate::constants::tool_result_cache_key`]) stays primary and
+//! [`aura_config::tool_result_cache_key`]) stays primary and
 //! unchanged. This module provides a second key function that collapses
 //! order-of-alternation and trivial whitespace differences, so near-
 //! duplicate exploration calls hit the cache instead of re-executing:

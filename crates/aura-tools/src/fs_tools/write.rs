@@ -9,7 +9,7 @@ use std::path::Path;
 use tracing::{debug, instrument};
 
 /// Soft cap on `write_file` content size mirrored from
-/// `aura_agent::constants::WRITE_FILE_CHUNK_BYTES`. Kept local to avoid a
+/// `aura_config::WRITE_FILE_CHUNK_BYTES`. Kept local to avoid a
 /// circular dep between `aura-tools` and `aura-agent`; tests guard against
 /// drift by asserting on the numeric threshold directly.
 const WRITE_FILE_CHUNK_BYTES: usize = 12_000;

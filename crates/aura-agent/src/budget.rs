@@ -1,6 +1,6 @@
 //! Budget tracking — exploration, token, and credit budget management.
 
-use crate::constants::{BUDGET_WARNING_30, BUDGET_WARNING_40_NO_WRITE, BUDGET_WARNING_60};
+use aura_config::{BUDGET_WARNING_30, BUDGET_WARNING_40_NO_WRITE, BUDGET_WARNING_60};
 
 /// Budget tracking state.
 #[derive(Debug, Default)]
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn test_unlimited_max_iterations_never_stops_for_iterations() {
         // `usize::MAX` is the sentinel for "unlimited iterations" set
-        // by `aura_agent::constants::MAX_ITERATIONS` (default) and by
+        // by `aura_config::MAX_ITERATIONS` (default) and by
         // `aura_runtime` when the wire-protocol `max_turns == u32::MAX`.
         // The function must never report a stop based on the iteration
         // counter alone — even at very high iteration values.

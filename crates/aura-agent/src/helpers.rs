@@ -27,13 +27,13 @@ pub fn append_warning(messages: &mut Vec<Message>, warning: &str) {
 /// Check if a tool name is a write tool (mutation).
 #[must_use]
 pub fn is_write_tool(name: &str) -> bool {
-    crate::constants::WRITE_TOOLS.contains(&name)
+    aura_config::WRITE_TOOLS.contains(&name)
 }
 
 /// Check if a tool name is an exploration tool (read-only).
 #[must_use]
 pub fn is_exploration_tool(name: &str) -> bool {
-    crate::constants::EXPLORATION_TOOLS.contains(&name)
+    aura_config::EXPLORATION_TOOLS.contains(&name)
 }
 
 /// Infer file mutations for a successful write tool call.

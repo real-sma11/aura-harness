@@ -93,10 +93,7 @@ pub fn agentic_execution_system_prompt(
     // mental model in sync with the gate when an operator has redirected
     // it (e.g. `AURA_DOD_TEST_COMMAND="pytest -q -k smoke"`). When no
     // override is set, fall back to the project config or the placeholder.
-    let resolved_test_cmd = std::env::var(crate::task_executor::TEST_COMMAND_OVERRIDE_ENV)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
+    let resolved_test_cmd = aura_config::agent().verify.test_command_override.clone();
     let test_cmd = resolved_test_cmd
         .as_deref()
         .or(project.test_command)

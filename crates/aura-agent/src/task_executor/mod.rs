@@ -23,34 +23,23 @@ use crate::types::{
 };
 use crate::verify::{infer_default_build_command, infer_default_test_command, TestSuiteOutcome};
 
-const MAX_STUB_FIX_ATTEMPTS: u32 = 2;
+pub(crate) use aura_config::MAX_STUB_FIX_ATTEMPTS;
 
-/// Environment variable that overrides the project-configured test command
-/// used by the post-`task_done` best-effort test run.
+/// Read the operator override for the project test command from
+/// `aura_config::agent().verify.test_command_override` (sourced from
+/// `AURA_DOD_TEST_COMMAND` at startup).
 ///
-/// This remains an operator override, not a fallback. Empty or whitespace-only
-/// values are treated as unset so a shell can clear the override without
-/// accidentally suppressing the test run.
+/// This remains an operator override, not a fallback. Empty or
+/// whitespace-only values are treated as unset by the config layer.
 ///
 /// Resolution order at call time, highest precedence first:
-///   1. `AURA_DOD_TEST_COMMAND` (this env var, captured at executor construction)
+///   1. `aura_config::agent().verify.test_command_override`
+///      (captured from `AURA_DOD_TEST_COMMAND` at startup)
 ///   2. `Project.test_command` (per-project config)
 ///   3. `infer_default_test_command(project_root)` (manifest auto-detect)
-pub(crate) const TEST_COMMAND_OVERRIDE_ENV: &str = "AURA_DOD_TEST_COMMAND";
-
-/// Read the [`TEST_COMMAND_OVERRIDE_ENV`] env var at construction time.
-/// Returns the override string when present and non-empty, otherwise `None`.
-/// Captured once per executor so concurrent tests that mutate the global env
-/// cannot race the executor.
 #[must_use]
 pub(crate) fn read_test_command_override_env() -> Option<String> {
-    let raw = std::env::var(TEST_COMMAND_OVERRIDE_ENV).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    aura_config::agent().verify.test_command_override.clone()
 }
 
 /// Pluggable test runner used by the `task_done` hard gate.
@@ -108,10 +97,11 @@ pub(crate) struct TaskToolExecutor {
     /// not a gate.
     pub test_command: Option<String>,
     /// Operator override for the project test command, captured at executor
-    /// construction from [`TEST_COMMAND_OVERRIDE_ENV`]. When `Some`, this
-    /// wins over [`Self::test_command`] and any inferred default. Captured
-    /// once so concurrent tests that mutate the global env don't race the
-    /// executor.
+    /// construction from `aura_config::agent().verify.test_command_override`
+    /// (sourced once from `AURA_DOD_TEST_COMMAND` at startup). When `Some`,
+    /// this wins over [`Self::test_command`] and any inferred default.
+    /// Captured at construction so concurrent tests that install a custom
+    /// `aura_config` don't race the executor.
     pub test_command_override: Option<String>,
     /// Pre-built task context for `get_task_context` handler.
     pub task_context: String,
@@ -159,7 +149,7 @@ pub(crate) struct TaskToolExecutor {
 /// single implementation burst (submit_plan + ~10-15 file/search ops +
 /// a handful of retries) without letting errors from earlier in the
 /// turn veto a `task_done` that the agent has clearly recovered from.
-pub(crate) const RECENT_OUTCOMES_WINDOW: usize = 16;
+pub(crate) use aura_config::RECENT_OUTCOMES_WINDOW;
 
 /// One slot in the [`RecentToolOutcomes`] ring buffer.
 #[derive(Debug, Clone, Copy)]

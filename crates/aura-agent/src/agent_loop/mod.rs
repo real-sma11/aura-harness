@@ -54,19 +54,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::budget::{BudgetState, ExplorationState};
-use crate::constants::{
+use crate::events::{AgentLoopEvent, DebugEvent};
+use crate::types::{AgentLoopResult, AgentToolExecutor, BuildBaseline, TurnObserver};
+use aura_config::{
     AUTO_BUILD_COOLDOWN, CHARS_PER_TOKEN, MAX_ITERATIONS, THINKING_AUTO_ENABLE_THRESHOLD,
     THINKING_MIN_BUDGET, THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
-use crate::events::{AgentLoopEvent, DebugEvent};
-use crate::types::{AgentLoopResult, AgentToolExecutor, BuildBaseline, TurnObserver};
 
 /// Configuration for the agent loop.
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     /// Maximum iterations (model calls) per turn.
     ///
-    /// Defaults to [`crate::constants::MAX_ITERATIONS`], which is
+    /// Defaults to [`aura_config::MAX_ITERATIONS`], which is
     /// itself derived from [`aura_core::MAX_TURNS`] — the single
     /// source of truth for every "max turns / max iterations" knob.
     /// Termination is also driven by `EndTurn` from the model,

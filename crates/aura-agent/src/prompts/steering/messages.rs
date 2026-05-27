@@ -43,16 +43,10 @@ fn stub_detected(reports: &[StubReport]) -> String {
     build_stub_fix_prompt(reports)
 }
 
-/// Number of leading hex chars from a `content_hash` we surface in the
-/// repeated-read nudge. Short enough to keep the message readable, long
-/// enough to be unique inside one turn (the read tool stamps a 16-hex
-/// `u64` digest).
-const REPEATED_READ_HASH_DISPLAY_CHARS: usize = 8;
-
 fn repeated_read(content_hash: &str) -> String {
     let short: String = content_hash
         .chars()
-        .take(REPEATED_READ_HASH_DISPLAY_CHARS)
+        .take(aura_config::REPEATED_READ_HASH_DISPLAY_CHARS)
         .collect();
     format!(
         "You've already read these exact bytes (content_hash={short}) 3 times this turn. \

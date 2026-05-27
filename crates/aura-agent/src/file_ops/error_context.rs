@@ -3,9 +3,7 @@ use std::path::Path;
 
 use super::source_parser::{extract_pub_signatures, extract_struct_fields};
 use super::{validate_path, ErrorReferences, SKIP_DIRS};
-
-const RESOLVE_BUDGET: usize = 10_240;
-const MAX_TYPE_FILES: usize = 5;
+use aura_config::{MAX_TYPE_FILES, RESOLVE_BUDGET};
 
 /// Look up actual source files for types referenced in compiler errors and
 /// extract their public API signatures. Returns a formatted string suitable
@@ -68,7 +66,7 @@ pub fn resolve_error_context(base_path: &Path, refs: &ErrorReferences) -> String
     output
 }
 
-pub const ERROR_SOURCE_BUDGET: usize = 15_360;
+pub use aura_config::ERROR_SOURCE_BUDGET;
 
 /// Read the actual source files where compiler errors occur (from
 /// `ErrorReferences.source_locations`), deduplicated by file path.

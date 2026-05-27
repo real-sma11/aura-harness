@@ -100,9 +100,7 @@ pub async fn fetch_codebase_context(
 // Context assembly
 // ---------------------------------------------------------------------------
 
-pub const MAX_TASK_CONTEXT_CHARS: usize = 160_000; // ~40K tokens
-const DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS: usize = 12_000;
-const MAX_WORK_LOG_TASK_CONTEXT: usize = 4_000;
+pub use aura_config::{MAX_TASK_CONTEXT_CHARS, MAX_WORK_LOG_TASK_CONTEXT};
 
 /// Compose the full task context from the base context and codebase sections.
 ///
@@ -140,10 +138,7 @@ pub fn build_full_task_context(
 }
 
 pub fn cap_bootstrap_task_context(task_context: &mut String) {
-    let budget = std::env::var("AURA_AGENT_BOOTSTRAP_CONTEXT_CHARS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS);
+    let budget = aura_config::agent().prompts.bootstrap_context_chars;
     if budget == 0 || task_context.len() <= budget {
         return;
     }
@@ -421,9 +416,9 @@ mod tests {
         cap_bootstrap_task_context(&mut ctx);
 
         assert!(
-            ctx.len() <= DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS,
+            ctx.len() <= aura_config::DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS,
             "expected bootstrap context <= {}, got {}",
-            DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS,
+            aura_config::DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS,
             ctx.len()
         );
         assert!(ctx.contains("# Task"));

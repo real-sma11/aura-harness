@@ -383,31 +383,17 @@ impl ModelProvider for FlakyPartialProvider {
     }
 }
 
-/// Shared env-var guard so the retry-budget tests can pin
-/// `AURA_LLM_MAX_RETRIES` / backoff settings without racing each
-/// other or the config tests in aura-reasoner.
+/// Shared lock so the retry-budget tests can swap
+/// `aura_config::reasoner().llm_retry` without racing each other or
+/// the config tests in `aura-reasoner`.
 static STREAM_RETRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
-        }
-    }
+fn install_retry(max_retries: u32, initial_ms: u64, cap_ms: u64) -> aura_config::ConfigGuard {
+    let mut cfg = aura_config::current();
+    cfg.reasoner.llm_retry.max_retries = max_retries;
+    cfg.reasoner.llm_retry.backoff_initial = std::time::Duration::from_millis(initial_ms);
+    cfg.reasoner.llm_retry.backoff_cap = std::time::Duration::from_millis(cap_ms);
+    aura_config::install_for_test(cfg)
 }
 
 #[tokio::test]
@@ -420,9 +406,7 @@ async fn stream_aborted_with_partial_retries_then_succeeds() {
     let _lock = STREAM_RETRY_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _g1 = EnvGuard::set("AURA_LLM_MAX_RETRIES", "5");
-    let _g2 = EnvGuard::set("AURA_LLM_BACKOFF_INITIAL_MS", "1");
-    let _g3 = EnvGuard::set("AURA_LLM_BACKOFF_CAP_MS", "2");
+    let _cfg = install_retry(5, 1, 2);
 
     let provider = FlakyPartialProvider::new(2, "recovered");
     let executor = NoOpExecutor;
@@ -471,9 +455,7 @@ async fn stream_aborted_with_partial_exhausts_and_fails() {
     let _lock = STREAM_RETRY_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _g1 = EnvGuard::set("AURA_LLM_MAX_RETRIES", "2");
-    let _g2 = EnvGuard::set("AURA_LLM_BACKOFF_INITIAL_MS", "1");
-    let _g3 = EnvGuard::set("AURA_LLM_BACKOFF_CAP_MS", "2");
+    let _cfg = install_retry(2, 1, 2);
 
     let provider = FlakyPartialProvider::new(1_000, "never-used");
     let executor = NoOpExecutor;
