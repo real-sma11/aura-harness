@@ -101,7 +101,7 @@ pub async fn fetch_codebase_context(
 // ---------------------------------------------------------------------------
 
 pub const MAX_TASK_CONTEXT_CHARS: usize = 160_000; // ~40K tokens
-const DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS: usize = 3_000;
+const DEFAULT_BOOTSTRAP_TASK_CONTEXT_CHARS: usize = 12_000;
 const MAX_WORK_LOG_TASK_CONTEXT: usize = 4_000;
 
 /// Compose the full task context from the base context and codebase sections.

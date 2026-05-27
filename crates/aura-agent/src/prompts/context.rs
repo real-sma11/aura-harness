@@ -25,16 +25,15 @@ fn bootstrap_spec_byte_budget() -> usize {
 }
 
 /// Returns true if the bootstrap should strip fenced code blocks from
-/// spec markdown and task descriptions. Default: enabled, because
-/// triple-backtick blocks containing Python/shell snippets are the
-/// densest WAF triggers we see on `aura-router.onrender.com`'s
-/// Cloudflare zone (e.g. `from X import Y`, slicing, `&` operators).
-/// Set `AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES=0` to disable for a run
-/// (e.g. when targeting a different proxy).
+/// spec markdown and task descriptions. Default: disabled, so task agents
+/// see full spec/task code in turn 0 instead of being told to `read_file`.
+/// Set `AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES=1` (or `true`/`yes`/`on`) to
+/// re-enable WAF-safe stripping when routing through `aura-router.onrender.com`'s
+/// Cloudflare zone (e.g. Python slicing, `&` operators in fenced blocks).
 fn bootstrap_should_strip_code_fences() -> bool {
-    !matches!(
+    matches!(
         std::env::var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES").as_deref(),
-        Ok("0") | Ok("false") | Ok("no") | Ok("off")
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
     )
 }
 
@@ -239,6 +238,30 @@ mod tests {
     use super::*;
     use crate::prompts::FileChangeEntry;
 
+    /// Serializes env-mutating bootstrap fence tests (process-global env).
+    static BOOTSTRAP_FENCE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct BootstrapFenceEnvGuard {
+        prior: Option<String>,
+    }
+
+    impl BootstrapFenceEnvGuard {
+        fn capture() -> Self {
+            Self {
+                prior: std::env::var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES").ok(),
+            }
+        }
+    }
+
+    impl Drop for BootstrapFenceEnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES", v),
+                None => std::env::remove_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES"),
+            }
+        }
+    }
+
     #[test]
     fn basic_context_contains_project_and_task() {
         let project = ProjectInfo {
@@ -338,7 +361,49 @@ mod tests {
     }
 
     #[test]
-    fn task_description_strips_fences_for_bootstrap() {
+    fn task_description_keeps_fences_for_bootstrap_by_default() {
+        let _lock = BOOTSTRAP_FENCE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = BootstrapFenceEnvGuard::capture();
+        std::env::remove_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES");
+
+        let project = ProjectInfo {
+            project_id: None,
+            name: "p",
+            description: "",
+            folder_path: "/tmp",
+            build_command: None,
+            test_command: None,
+        };
+        let spec = SpecInfo {
+            title: "s",
+            markdown_contents: "",
+        };
+        let task = TaskInfo {
+            title: "T",
+            description: "Do this:\n\n```python\nm.Linear1D(10) & m.Linear1D(5)\n```\n\nDone.",
+            execution_notes: "",
+            files_changed: &[],
+        };
+        let session = SessionInfo {
+            summary_of_previous_context: "",
+        };
+        let ctx = build_agentic_task_context(&project, &spec, &task, &session, &[], "", 0, None);
+        assert!(ctx.contains("Do this:"));
+        assert!(ctx.contains("Done."));
+        assert!(ctx.contains("Linear1D"));
+        assert!(!ctx.contains("[code example:"));
+    }
+
+    #[test]
+    fn task_description_strips_fences_when_env_enabled() {
+        let _lock = BOOTSTRAP_FENCE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = BootstrapFenceEnvGuard::capture();
+        std::env::set_var("AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES", "1");
+
         let project = ProjectInfo {
             project_id: None,
             name: "p",
