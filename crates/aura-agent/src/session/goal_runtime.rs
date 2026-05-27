@@ -87,10 +87,7 @@ impl GoalRuntime {
     }
 
     /// Accept a lifecycle event. Always succeeds in the placeholder.
-    pub(crate) async fn handle_event(
-        &self,
-        _event: GoalRuntimeEvent,
-    ) -> Result<(), AgentError> {
+    pub(crate) async fn handle_event(&self, _event: GoalRuntimeEvent) -> Result<(), AgentError> {
         Ok(())
     }
 }

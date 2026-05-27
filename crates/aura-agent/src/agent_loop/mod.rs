@@ -190,15 +190,22 @@ pub struct AgentLoopConfig {
     /// resets the exploration counter so the implementation phase has
     /// a fresh budget. `None` for non-task callers (e.g. chat).
     pub phase_reset_signal: Option<Arc<AtomicBool>>,
-    /// Disable Anthropic extended thinking on iteration 0.
+    /// Dev-loop signal: pin reasoning effort to
+    /// [`ThinkingEffort::Medium`] across every iteration of the run
+    /// (see [`LoopState::compute_thinking_effort`]).
     ///
-    /// When `true` (the policy used by [`crate::agent_runner`] for
-    /// dev-loop tasks), [`LoopState::begin_iteration`] arms the
-    /// [`ThinkingBudget::disable_thinking_this_iteration`] flag for
-    /// the very first turn so the explore phase emits fast tool
-    /// calls instead of "Thought for 2m"-bursting before the first
-    /// `read_file`. Default `false` for chat / generic callers
-    /// where deliberation on the first turn is desirable.
+    /// `configure_loop_config` sets this `true` exclusively for
+    /// dev-loop tasks; chat / generic callers leave it `false` and
+    /// keep the codex-style `Off → Medium → Low` taper. The field name
+    /// is a historical artifact: it used to also arm an iteration-0
+    /// `max_tokens` clamp (capping the explore turn below the
+    /// Anthropic auto-thinking threshold so the first turn emitted
+    /// fast tool calls instead of "Thought for 2m"-bursting). That
+    /// clamp was removed in 2026-05 because it contradicted the
+    /// pin-to-Medium policy — Medium effort with a 2048-token cap
+    /// either rejects the request outright (Claude 3.7 `enabled`
+    /// mode) or starves Adaptive thinking of meaningful budget. The
+    /// flag now only feeds [`LoopState::compute_thinking_effort`].
     pub disable_thinking_iteration_0: bool,
     /// Layer E.1: hard cap on the number of *turns* one task may run.
     /// A turn is the unit of work between "model starts talking" and
@@ -639,6 +646,21 @@ impl AgentLoop {
         .tools(Vec::new())
         .tool_choice(ToolChoice::None)
         .max_tokens(max_tokens)
+        // Force extended thinking *off* on the compaction-summary
+        // call. The earlier `Medium` pin (added so the console row
+        // didn't render `thinking off` for parity with the dev-loop
+        // policy) interacts badly with the tight `max_tokens` clamp
+        // above (256..=4_096): on Claude 4.x with `adaptive` thinking,
+        // the model consumes the entire budget on a thinking block
+        // and returns an empty text body. `apply_summary_compaction`
+        // then hits its empty-text early-return, the messages are
+        // never reduced, and `compact_if_needed` re-fires `NeedsSummary`
+        // on the next iteration — doubling the outbound API call rate
+        // for the rest of the task while doing no actual compaction.
+        // The summary call is mechanical (rewrite N kB of transcript
+        // into ~M chars); thinking-off is the right policy and the
+        // console renders it as such.
+        .thinking_effort(Some(ThinkingEffort::Off))
         .auth_token(self.config.auth_token.clone())
         .upstream_provider_family(self.config.upstream_provider_family.clone())
         .aura_project_id(self.config.aura_project_id.clone())
@@ -1019,18 +1041,20 @@ impl LoopState {
             }
         }
 
-        // Iteration 0 is the explore turn — fast tool calls, not
-        // multi-minute deliberation. When the caller opts in via
-        // `disable_thinking_iteration_0` (the runner sets this for
-        // dev-loop tasks), disable extended thinking for this one
-        // iteration so the model emits a tool call quickly instead
-        // of "Thought for 2m"-bursting before its first read. The
-        // taper logic (and on-truncation restore) continue to work
-        // from iteration 1 onward. Chat callers leave the flag off
-        // because deliberation on the first turn is often the point.
-        if iteration == 0 && config.disable_thinking_iteration_0 {
-            self.thinking.disable_thinking_this_iteration = true;
-        }
+        // Temporary (2026-05): the dev-loop policy now pins
+        // reasoning effort to `Medium` across every iteration (see
+        // `compute_thinking_effort`). The previous iteration-0
+        // `max_tokens` clamp — armed here when
+        // `disable_thinking_iteration_0` was set — has been removed
+        // because it contradicted that pin: a 2048-token cap on the
+        // explore turn either rejects the Anthropic request outright
+        // (Claude 3.7 `enabled` mode wants `budget_tokens=4096` for
+        // Medium) or leaves Adaptive thinking with no real budget to
+        // deliberate inside. The cross-iteration recovery latch
+        // [`ThinkingBudget::pending_disable_thinking_next_iteration`]
+        // is currently never armed; keeping the consume-and-clear
+        // wiring above costs nothing and preserves an obvious revert
+        // path if we decide to bring the clamp back later.
 
         // If the previous iteration ended with a `MaxTokens` truncation
         // mid-`tool_use`, restore the budget to the configured maximum
@@ -1058,27 +1082,32 @@ impl LoopState {
     /// aura analog tailored to aura's `write_file`/`edit_file`/
     /// `delete_file` surface.
     ///
-    /// Resolution order (first match wins):
+    /// **Temporary (2026-05): dev-loop turns are pinned to
+    /// [`ThinkingEffort::Medium`] regardless of iteration / write /
+    /// plan state.** We're evaluating whether holding a single effort
+    /// level across the run converges faster than the codex-style
+    /// `Off → Medium → Low` taper. `disable_thinking_iteration_0` is
+    /// only set by `configure_loop_config` for dev-loop tasks, so chat
+    /// and other callers retain the original tiered policy below.
     ///
-    /// 1. Iteration 0 with `disable_thinking_iteration_0` → `Off`.
-    ///    Preserves the existing "fast tool call before first read"
-    ///    behaviour the runner opts into for dev-loop tasks.
-    /// 2. Iteration 0 otherwise → `Medium` (analysis turn).
-    /// 3. `had_any_file_write` → `Low` (forward motion has happened,
+    /// Resolution order for non-dev-loop callers (first match wins):
+    ///
+    /// 1. Iteration 0 → `Medium` (analysis turn).
+    /// 2. `had_any_file_write` → `Low` (forward motion has happened,
     ///    cap the deliberation budget).
-    /// 4. `submit_plan_called` → `Low` (the plan exists; codex drops
+    /// 3. `submit_plan_called` → `Low` (the plan exists; codex drops
     ///    to low effort once the agent is committed to an
     ///    implementation phase).
-    /// 5. Otherwise → `Medium`.
+    /// 4. Otherwise → `Medium`.
     fn compute_thinking_effort(
         &self,
         config: &AgentLoopConfig,
         iteration: usize,
     ) -> ThinkingEffort {
+        if config.disable_thinking_iteration_0 {
+            return ThinkingEffort::Medium;
+        }
         if iteration == 0 {
-            if config.disable_thinking_iteration_0 {
-                return ThinkingEffort::Off;
-            }
             return ThinkingEffort::Medium;
         }
         if self.had_any_file_write || self.submit_plan_called {
@@ -1515,5 +1544,73 @@ mod intent_classifier_tests {
             req.metadata.kind,
             Some(ModelRequestKind::ProjectToolSpecGen)
         );
+    }
+}
+
+#[cfg(test)]
+mod summary_request_tests {
+    use super::*;
+    use aura_compaction::SummaryInput;
+
+    fn sample_summary_input() -> SummaryInput {
+        SummaryInput {
+            compact_start: 0,
+            compact_end: 1,
+            compactable_messages: vec![Message::user("first")],
+            recent_tail: vec![Message::assistant("latest")],
+            original_chars: 5_000,
+            local_chars: 4_000,
+            target_total_chars: 2_000,
+            max_summary_chars: 1_000,
+        }
+    }
+
+    /// Regression: the auxiliary compaction-summary call must ship
+    /// `thinking_effort = Off`. Setting it to `Medium` (which a prior
+    /// WIP change tried, for parity with the dev-loop thinking pin)
+    /// interacts badly with the tight `max_tokens` clamp (256..=4_096):
+    /// Claude 4.x with adaptive thinking burns the entire budget on a
+    /// thinking block and returns an empty text body, which makes
+    /// `apply_summary_compaction` early-return without ever shrinking
+    /// the transcript. `compact_if_needed` then re-fires `NeedsSummary`
+    /// on every subsequent iteration, doubling the outbound API call
+    /// rate for the rest of the task while doing no actual compaction.
+    /// The companion fix in `effective_compaction_request_kind`
+    /// addresses *why* `NeedsSummary` was firing every turn, but the
+    /// summary call itself must also be able to produce real output.
+    #[test]
+    fn build_summary_request_disables_thinking() {
+        let config = AgentLoopConfig::for_agent("aura-claude-opus-4-7");
+        let agent = AgentLoop::new(config);
+        let input = sample_summary_input();
+
+        let request = agent
+            .build_summary_request(&input)
+            .expect("summary request builder must succeed for valid inputs");
+
+        assert_eq!(
+            request.thinking_effort,
+            Some(ThinkingEffort::Off),
+            "compaction-summary call must NOT enable extended thinking; the \
+             tight max_tokens clamp would otherwise starve the actual summary \
+             output (see comment on the .thinking_effort(..) line)"
+        );
+    }
+
+    /// The summary call is single-shot: one user message, zero tools.
+    /// Pins the request shape so an accidental tool-list bleed-through
+    /// or extra messages from the live transcript would fail loudly.
+    #[test]
+    fn build_summary_request_ships_clean_single_shot_payload() {
+        let config = AgentLoopConfig::for_agent("aura-claude-opus-4-7");
+        let agent = AgentLoop::new(config);
+        let input = sample_summary_input();
+
+        let request = agent.build_summary_request(&input).unwrap();
+
+        assert_eq!(request.messages.len(), 1, "exactly one user message");
+        assert_eq!(request.tools.len(), 0, "no tools attached");
+        assert!(matches!(request.tool_choice, ToolChoice::None));
+        assert_eq!(request.metadata.kind, Some(ModelRequestKind::Auxiliary));
     }
 }

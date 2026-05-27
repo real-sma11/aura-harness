@@ -700,7 +700,10 @@ async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
         "task_done must succeed even when the test suite fails: {}",
         results[0].content
     );
-    assert!(results[0].stop_loop, "successful task_done must stop the loop");
+    assert!(
+        results[0].stop_loop,
+        "successful task_done must stop the loop"
+    );
     assert_eq!(
         *runner.calls.lock().await,
         1,
@@ -709,7 +712,12 @@ async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
 
     let mut warning_events = 0;
     while let Ok(event) = rx.try_recv() {
-        if let AgentLoopEvent::TestSuiteWarning { passed, summary, failed_tests } = event {
+        if let AgentLoopEvent::TestSuiteWarning {
+            passed,
+            summary,
+            failed_tests,
+        } = event
+        {
             warning_events += 1;
             assert!(!passed, "warning must reflect the failing run");
             assert!(

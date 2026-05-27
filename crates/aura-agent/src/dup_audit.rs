@@ -51,10 +51,10 @@ pub(crate) fn audit_tool_result_duplicates(messages: &[Message], source: &'stati
 mod tests {
     use super::*;
     use aura_reasoner::{Role, ToolResultContent};
-    use tracing::subscriber::with_default;
-    use tracing_subscriber::fmt::MakeWriter;
     use std::io;
     use std::sync::{Arc, Mutex};
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt::MakeWriter;
 
     /// In-memory `MakeWriter` so tests can assert on the exact
     /// `tracing` event payload without a global subscriber.
@@ -108,8 +108,14 @@ mod tests {
             s.contains("duplicate ToolResult detected"),
             "expected duplicate event, got: {s}"
         );
-        assert!(s.contains("source=\"test_source\""), "missing source label: {s}");
-        assert!(s.contains("tool_use_id=\"toolu_dup\""), "missing id field: {s}");
+        assert!(
+            s.contains("source=\"test_source\""),
+            "missing source label: {s}"
+        );
+        assert!(
+            s.contains("tool_use_id=\"toolu_dup\""),
+            "missing id field: {s}"
+        );
         assert!(s.contains("count=2"), "missing count field: {s}");
     }
 

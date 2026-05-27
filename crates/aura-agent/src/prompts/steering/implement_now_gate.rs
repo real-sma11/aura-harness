@@ -1,8 +1,6 @@
 //! One-shot steering when dev-loop tasks accumulate exploration tools without writes.
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use super::SteeringKind;
 use crate::agent_loop::{AgentLoopConfig, LoopState};
@@ -42,10 +40,7 @@ fn sample_read_paths(session_read_paths: &std::collections::HashSet<PathBuf>) ->
 /// crossed the exploration threshold without cumulative file writes and the
 /// one-shot latch has not fired yet.
 #[must_use]
-pub fn evaluate_implement_now(
-    config: &AgentLoopConfig,
-    state: &LoopState,
-) -> Option<SteeringKind> {
+pub fn evaluate_implement_now(config: &AgentLoopConfig, state: &LoopState) -> Option<SteeringKind> {
     if !implement_now_enabled() {
         return None;
     }
@@ -73,7 +68,8 @@ pub fn evaluate_implement_now(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     fn task_config() -> AgentLoopConfig {
         AgentLoopConfig {

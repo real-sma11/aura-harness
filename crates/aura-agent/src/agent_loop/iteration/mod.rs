@@ -171,10 +171,20 @@ impl AgentLoop {
 // ---------------------------------------------------------------------------
 
 /// Accumulate token counts, text, and thinking from the model response.
+///
+/// `iteration` is the 0-based index of the model call whose response
+/// is being folded in. It is forwarded to
+/// [`super::context::effective_compaction_request_kind`] so the post-call
+/// compaction-policy reads the same request kind the next wire request
+/// will carry, instead of the stale [`AgentLoopConfig::request_kind`]
+/// (which never advances past `DevLoopBootstrap` for dev-loop runs and
+/// otherwise pins cap-pressure at 1.0 for the whole task — see the
+/// helper's doc comment for the full failure mode).
 pub(super) fn accumulate_response(
     config: &AgentLoopConfig,
     state: &mut LoopState,
     response: &ModelResponse,
+    iteration: usize,
 ) -> Option<compaction::SummaryInput> {
     state.result.total_input_tokens += response.usage.input_tokens;
     state.result.total_output_tokens += response.usage.output_tokens;
@@ -225,17 +235,22 @@ pub(super) fn accumulate_response(
     state.last_context_tokens_estimate = Some(estimated_context_tokens);
     state.result.estimated_context_tokens = estimated_context_tokens;
 
+    if super::context::compaction_disabled_by_env() {
+        return None;
+    }
+
     let reserved_output_tokens = config
         .max_context_tokens
         .map_or(u64::from(config.max_tokens), |max_ctx| {
             u64::from(config.max_tokens).min(max_ctx)
         });
+    let request_kind = super::context::effective_compaction_request_kind(config, iteration);
     let report = compaction::Compactor::new().compact_messages(compaction::CompactionInput {
         messages: &mut state.messages,
         policy: compaction::CompactionPolicy {
             current_context_tokens: Some(message_tokens),
             raw_message_bytes: Some(raw_message_bytes),
-            request_kind: Some(config.request_kind),
+            request_kind: Some(request_kind),
             ..compaction::CompactionPolicy::new(
                 config.max_context_tokens,
                 estimated_context_tokens,
@@ -302,7 +317,7 @@ pub(super) fn handle_max_tokens(
     state.messages.push(Message::tool_results(results));
     dup_audit::audit_tool_result_duplicates(&state.messages, "handle_max_tokens.post");
 
-    if config.max_context_tokens.is_some() {
+    if config.max_context_tokens.is_some() && !super::context::compaction_disabled_by_env() {
         let tier = compaction::CompactionConfig::aggressive();
         compaction::compact_older_messages(&mut state.messages, &tier);
         sanitize::validate_and_repair(&mut state.messages);

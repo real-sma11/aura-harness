@@ -136,10 +136,7 @@ impl Session {
     /// stays in place; the session-level `cancellation` parameter is
     /// the agent-loop / external observer (cloned so the caller's
     /// original token stays usable).
-    pub(crate) fn from_handle(
-        handle: &AgentRunnerHandle,
-        cancellation: CancellationToken,
-    ) -> Self {
+    pub(crate) fn from_handle(handle: &AgentRunnerHandle, cancellation: CancellationToken) -> Self {
         let input_queue = handle.queue();
         let id = input_queue.session_id();
         let goal_runtime = Arc::new(GoalRuntime::new(id));

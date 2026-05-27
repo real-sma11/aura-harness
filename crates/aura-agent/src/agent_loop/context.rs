@@ -4,7 +4,7 @@ use aura_compaction::{
     self as compaction, CompactionAction, CompactionInput, CompactionPolicy, SummaryInput,
     SummaryOutput,
 };
-use aura_reasoner::ToolDefinition;
+use aura_reasoner::{ModelRequestKind, ToolDefinition};
 use tokio::sync::mpsc::Sender;
 
 use crate::budget;
@@ -23,6 +23,55 @@ pub(super) enum CompactionOutcome {
     None,
     Applied(compaction::CompactionConfig),
     NeedsSummary(SummaryInput),
+}
+
+/// Operator kill switch: when `AURA_AGENT_DISABLE_COMPACTION` is set to a
+/// truthy value, every compaction entry point in the agent loop becomes a
+/// no-op. Used to test whether read-spiral behavior is being driven by older
+/// `read_file` results getting truncated out of context.
+#[must_use]
+pub(super) fn compaction_disabled_by_env() -> bool {
+    matches!(
+        std::env::var("AURA_AGENT_DISABLE_COMPACTION").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
+/// Return the [`ModelRequestKind`] the compaction policy should reason
+/// about for the upcoming model call at `iteration`.
+///
+/// [`AgentLoopConfig::request_kind`] is set once at task start (the
+/// dev-loop seeds it to [`ModelRequestKind::DevLoopBootstrap`] in
+/// `configure_loop_config`) and is never mutated for the life of the
+/// task. [`LoopState::build_request`] dynamically swaps the *wire*
+/// request kind to [`ModelRequestKind::DevLoopContinuation`] after
+/// iteration 0, but the compaction policy reads the stale config field
+/// directly. Bootstrap carries a 24 KiB body cap
+/// (`DEV_LOOP_BOOTSTRAP_TOTAL_TEXT_MAX_BYTES`); continuation has none.
+/// Without this helper, [`aura_compaction::effective_pressure`] keeps
+/// applying the bootstrap cap to every continuation iteration and
+/// `cap_pressure` clamps to 1.0 as soon as `state.messages` crosses
+/// ~24 KiB — which fires `NeedsSummary` on every iteration regardless
+/// of actual context utilisation, doubling the outbound API call rate
+/// for the rest of the task.
+///
+/// The match here mirrors the bootstrap → continuation transition
+/// [`LoopState::build_request`] already performs (see the
+/// `(_, _, DevLoopBootstrap, _) => DevLoopContinuation` arm) so the
+/// compaction policy sees the same kind the next wire request will
+/// carry. Non-dev-loop kinds (`Chat`, explicit `Auxiliary`, the
+/// project-tool kinds) pass through unchanged because they either
+/// have no body cap or already carry the correct kind statically.
+#[must_use]
+pub(super) fn effective_compaction_request_kind(
+    config: &AgentLoopConfig,
+    iteration: usize,
+) -> ModelRequestKind {
+    match (config.request_kind, iteration) {
+        (ModelRequestKind::DevLoopBootstrap, 0) => ModelRequestKind::DevLoopBootstrap,
+        (ModelRequestKind::DevLoopBootstrap, _) => ModelRequestKind::DevLoopContinuation,
+        (kind, _) => kind,
+    }
 }
 
 fn reserved_output_tokens(config: &AgentLoopConfig, max_ctx: u64) -> u64 {
@@ -107,13 +156,25 @@ fn recompute_breakdown(
 ///
 /// Returns the compaction outcome so the async loop can perform model-backed
 /// summary escalation outside the pure compaction crate.
+///
+/// `iteration` is the 0-based index of the upcoming model call.
+/// [`effective_compaction_request_kind`] uses it to project the stale
+/// [`AgentLoopConfig::request_kind`] forward through the bootstrap →
+/// continuation transition so the compaction policy doesn't keep
+/// applying the bootstrap body cap to every post-bootstrap turn.
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn compact_if_needed(
     config: &AgentLoopConfig,
     state: &mut LoopState,
     tools: &[ToolDefinition],
+    iteration: usize,
 ) -> CompactionOutcome {
     sanitize::validate_and_repair(&mut state.messages);
+
+    if compaction_disabled_by_env() {
+        recompute_breakdown(config, state, tools);
+        return CompactionOutcome::None;
+    }
 
     let Some(max_ctx) = config.max_context_tokens else {
         recompute_breakdown(config, state, tools);
@@ -124,12 +185,13 @@ pub(super) fn compact_if_needed(
     state.result.estimated_context_tokens = estimated_tokens;
     let reserved_tokens = reserved_output_tokens(config, max_ctx);
     let raw_message_bytes = compaction::estimate_message_chars(&state.messages);
+    let request_kind = effective_compaction_request_kind(config, iteration);
     let report = compaction::compact_messages(CompactionInput {
         messages: &mut state.messages,
         policy: CompactionPolicy {
             current_context_tokens: Some(estimated_tokens),
             raw_message_bytes: Some(raw_message_bytes),
-            request_kind: Some(config.request_kind),
+            request_kind: Some(request_kind),
             ..CompactionPolicy::new(Some(max_ctx), estimated_tokens, reserved_tokens)
         },
     });
@@ -140,10 +202,7 @@ pub(super) fn compact_if_needed(
     };
 
     if !matches!(outcome, CompactionOutcome::None) {
-        dup_audit::audit_tool_result_duplicates(
-            &state.messages,
-            "compact_if_needed.post_splice",
-        );
+        dup_audit::audit_tool_result_duplicates(&state.messages, "compact_if_needed.post_splice");
         sanitize::validate_and_repair(&mut state.messages);
         let compacted_tokens = heuristic_context_tokens(&state.messages);
         state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -160,16 +219,17 @@ pub(super) fn apply_summary_output(
     tools: &[ToolDefinition],
     summary: SummaryOutput,
 ) -> bool {
+    if compaction_disabled_by_env() {
+        recompute_breakdown(config, state, tools);
+        return false;
+    }
     let report = compaction::Compactor::new().apply_summary(&mut state.messages, summary);
     if !report.reduced() {
         recompute_breakdown(config, state, tools);
         return false;
     }
 
-    dup_audit::audit_tool_result_duplicates(
-        &state.messages,
-        "apply_summary_output.post_splice",
-    );
+    dup_audit::audit_tool_result_duplicates(&state.messages, "apply_summary_output.post_splice");
     sanitize::validate_and_repair(&mut state.messages);
     let compacted_tokens = heuristic_context_tokens(&state.messages);
     state.last_context_tokens_estimate = Some(compacted_tokens);
@@ -186,15 +246,16 @@ pub(super) fn compact_for_overflow(
     tier: compaction::CompactionConfig,
     tools: &[ToolDefinition],
 ) -> bool {
+    if compaction_disabled_by_env() {
+        recompute_breakdown(config, state, tools);
+        return false;
+    }
     sanitize::validate_and_repair(&mut state.messages);
     let before_chars = compaction::estimate_message_chars(&state.messages);
     let before_tokens = current_context_tokens(state);
 
     let report = compaction::recover_overflow(&mut state.messages, tier);
-    dup_audit::audit_tool_result_duplicates(
-        &state.messages,
-        "compact_for_overflow.post_splice",
-    );
+    dup_audit::audit_tool_result_duplicates(&state.messages, "compact_for_overflow.post_splice");
     sanitize::validate_and_repair(&mut state.messages);
 
     let after_chars = report.after_chars;
@@ -274,12 +335,23 @@ pub(super) fn should_stop_for_budget(
 mod tests {
     use super::{
         compact_for_overflow, compact_if_needed, compaction_pressure_tokens,
-        heuristic_context_tokens, reserved_output_tokens,
+        effective_compaction_request_kind, heuristic_context_tokens, reserved_output_tokens,
+        CompactionOutcome,
     };
     use crate::agent_loop::AgentLoopConfig;
     use crate::agent_loop::LoopState;
     use aura_compaction::{pick_stricter_tier, CompactionConfig};
-    use aura_reasoner::{Message, ToolDefinition};
+    use aura_reasoner::{Message, ModelRequestKind, ToolDefinition};
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialize tests that read or mutate `AURA_AGENT_DISABLE_COMPACTION`.
+    /// The env-mutating kill-switch test would otherwise race with
+    /// sibling tests that call `compact_if_needed` / `compact_for_overflow`,
+    /// which read the same env var transitively.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn dummy_tool(name: &str, description: &str) -> ToolDefinition {
         ToolDefinition::new(
@@ -322,6 +394,7 @@ mod tests {
 
     #[test]
     fn overflow_compaction_reports_progress_when_history_shrinks() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new(
             &config,
@@ -345,6 +418,7 @@ mod tests {
 
     #[test]
     fn overflow_compaction_reports_no_progress_when_nothing_can_change() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new(&config, vec![Message::user("hello")]);
         state.last_context_tokens_estimate = Some(heuristic_context_tokens(&state.messages));
@@ -363,6 +437,7 @@ mod tests {
     /// (reserved for future MCP support).
     #[test]
     fn compact_if_needed_populates_context_breakdown() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let config = AgentLoopConfig {
             // Long enough that chars/CHARS_PER_TOKEN rounds to >= 1
             // even after `recompute_breakdown` subtracts `skills_chars`.
@@ -382,7 +457,7 @@ mod tests {
             dummy_tool("write_file", "Write a file to disk."),
         ];
 
-        compact_if_needed(&config, &mut state, &tools);
+        compact_if_needed(&config, &mut state, &tools, 0);
 
         let breakdown = &state.result.context_breakdown;
         // system_prompt is reported net of `skills_chars` to avoid
@@ -409,10 +484,11 @@ mod tests {
     /// sentinel still triggers correctly.
     #[test]
     fn compact_if_needed_static_buckets_zero_when_nothing_configured() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let config = AgentLoopConfig::for_agent("claude-test-model");
         let mut state = LoopState::new(&config, vec![]);
 
-        compact_if_needed(&config, &mut state, &[]);
+        compact_if_needed(&config, &mut state, &[], 0);
 
         let b = &state.result.context_breakdown;
         assert_eq!(b.system_prompt_tokens, 0);
@@ -420,6 +496,52 @@ mod tests {
         assert_eq!(b.skills_tokens, 0);
         assert_eq!(b.subagents_tokens, 0);
         assert_eq!(b.mcp_tokens, 0);
+    }
+
+    /// `AURA_AGENT_DISABLE_COMPACTION=1` must short-circuit
+    /// `compact_if_needed` so older `read_file` results never get
+    /// truncated, even on a config that would normally hit the
+    /// aggressive tier. This is the operator escape hatch used to test
+    /// whether read-spiral behavior is being driven by mid-run
+    /// truncation.
+    #[test]
+    fn env_kill_switch_disables_compact_if_needed() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let env_key = "AURA_AGENT_DISABLE_COMPACTION";
+        let prev = std::env::var(env_key).ok();
+        std::env::set_var(env_key, "1");
+
+        let huge = "X".repeat(200_000);
+        let mut messages = vec![
+            Message::user("start"),
+            Message::assistant(huge.clone()),
+            Message::user("more"),
+            Message::assistant(huge.clone()),
+        ];
+        let config = AgentLoopConfig {
+            max_context_tokens: Some(8_000),
+            ..AgentLoopConfig::for_agent("claude-test-model")
+        };
+        let before_chars: usize = messages.iter().map(|m| m.text_content().len()).sum();
+        let mut state = LoopState::new(&config, std::mem::take(&mut messages));
+
+        let outcome = compact_if_needed(&config, &mut state, &[], 0);
+
+        let after_chars: usize = state.messages.iter().map(|m| m.text_content().len()).sum();
+
+        match prev {
+            Some(v) => std::env::set_var(env_key, v),
+            None => std::env::remove_var(env_key),
+        }
+
+        assert!(
+            matches!(outcome, super::CompactionOutcome::None),
+            "kill switch must report None outcome"
+        );
+        assert_eq!(
+            after_chars, before_chars,
+            "kill switch must leave message bytes untouched"
+        );
     }
 
     #[test]
@@ -453,4 +575,123 @@ mod tests {
         );
         assert!(pick_stricter_tier(None, None).is_none());
     }
+
+    // -----------------------------------------------------------------
+    // effective_compaction_request_kind: pins the bootstrap →
+    // continuation projection so `compact_if_needed` / `accumulate_response`
+    // see the same kind that `build_request` will actually ship on the
+    // wire. Without this projection the dev-loop bootstrap's 24 KiB body
+    // cap leaks into every continuation iteration and pins compaction
+    // cap-pressure at 1.0 for the rest of the task (which fires
+    // `NeedsSummary` on every iteration and doubles the outbound
+    // Anthropic call rate).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn effective_kind_keeps_bootstrap_on_iter_zero() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::DevLoopBootstrap,
+            ..AgentLoopConfig::for_agent("claude-test-model")
+        };
+        assert_eq!(
+            effective_compaction_request_kind(&config, 0),
+            ModelRequestKind::DevLoopBootstrap
+        );
+    }
+
+    #[test]
+    fn effective_kind_projects_bootstrap_to_continuation_after_iter_zero() {
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::DevLoopBootstrap,
+            ..AgentLoopConfig::for_agent("claude-test-model")
+        };
+        for iter in 1usize..=8 {
+            assert_eq!(
+                effective_compaction_request_kind(&config, iter),
+                ModelRequestKind::DevLoopContinuation,
+                "iteration {iter} should project bootstrap → continuation"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_kind_passes_other_kinds_through_unchanged() {
+        for kind in [
+            ModelRequestKind::Chat,
+            ModelRequestKind::DevLoopContinuation,
+            ModelRequestKind::Auxiliary,
+            ModelRequestKind::ProjectToolSpecGen,
+            ModelRequestKind::ProjectToolTaskExtract,
+        ] {
+            let config = AgentLoopConfig {
+                request_kind: kind,
+                ..AgentLoopConfig::for_agent("claude-test-model")
+            };
+            for iter in 0usize..=3 {
+                assert_eq!(
+                    effective_compaction_request_kind(&config, iter),
+                    kind,
+                    "non-dev-loop kinds must pass through unchanged ({kind:?} @ iter {iter})"
+                );
+            }
+        }
+    }
+
+    /// Regression for the doubled-Anthropic-call-rate bug: in a
+    /// dev-loop run with the bootstrap kind seeded into the config,
+    /// passing `iteration > 0` to `compact_if_needed` must NOT escalate
+    /// to `NeedsSummary` on a transcript that only crosses the 24 KiB
+    /// bootstrap body cap (and is otherwise well below
+    /// `summary_at = 0.85` on the model's real context window).
+    ///
+    /// Before the fix, the stale `config.request_kind = DevLoopBootstrap`
+    /// flowed into `CompactionPolicy::request_kind` for every iteration;
+    /// the resulting `cap_pressure = raw_message_bytes / 24576` clamped
+    /// to 1.0 the moment the transcript crossed 24 KiB and fired
+    /// `NeedsSummary` on every subsequent call.
+    #[test]
+    fn compact_if_needed_does_not_escalate_when_continuation_outgrows_bootstrap_cap() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        // Real opus-class context window so context-pressure stays well
+        // below the 0.85 summary threshold; the only signal that could
+        // possibly trigger NeedsSummary here is the bootstrap body-cap
+        // leak. ~40 KiB of transcript clears the 24 KiB bootstrap cap
+        // with margin but is < 0.01% of the 1 M-token context window.
+        let config = AgentLoopConfig {
+            request_kind: ModelRequestKind::DevLoopBootstrap,
+            max_context_tokens: Some(1_000_000),
+            max_tokens: 16_384,
+            ..AgentLoopConfig::for_agent("claude-test-model")
+        };
+        let big_payload = "X".repeat(40_000);
+        let mut state = LoopState::new(
+            &config,
+            vec![
+                Message::user("seed"),
+                Message::assistant(big_payload),
+                Message::user("next"),
+            ],
+        );
+        state.last_context_tokens_estimate = Some(heuristic_context_tokens(&state.messages));
+
+        // iteration > 0 ⇒ effective kind = DevLoopContinuation (no cap).
+        let outcome = compact_if_needed(&config, &mut state, &[], 5);
+
+        assert!(
+            matches!(outcome, CompactionOutcome::None | CompactionOutcome::Applied(_)),
+            "continuation iteration on a real-sized context window must not fire NeedsSummary; got {outcome:?}"
+        );
+    }
+
+    // (The "bootstrap iteration 0 must escalate" mirror test was
+    // dropped because the assertion was too coupled to internal
+    // compaction-tier byte budgets: a single 40 KiB assistant blob is
+    // compressible enough that the local `Aggressive` tier already
+    // brings the transcript under `target_total_chars`, so
+    // `NeedsSummary` legitimately doesn't fire even though the cap
+    // pressure was correctly observed. The bootstrap-side contract is
+    // pinned at the helper level by
+    // `effective_kind_keeps_bootstrap_on_iter_zero` above, which is
+    // the only branch this fix actually changes.)
 }

@@ -36,8 +36,8 @@ use tracing::{debug, instrument};
 use crate::events::AgentLoopEvent;
 use crate::types::AgentToolExecutor;
 
-use super::stream_pump::{StreamPumpOutcome, run_stream_pump};
-use super::{AgentLoop, LoopState, context, is_cancelled, iteration, streaming};
+use super::stream_pump::{run_stream_pump, StreamPumpOutcome};
+use super::{context, is_cancelled, iteration, streaming, AgentLoop, LoopState};
 
 /// Outcome of a single sampling request inside a turn.
 ///
@@ -113,7 +113,7 @@ pub(crate) async fn run_sampling_request(
     state.begin_iteration(&agent.config, iteration);
     let iteration_started_at = Instant::now();
 
-    match context::compact_if_needed(&agent.config, state, tools) {
+    match context::compact_if_needed(&agent.config, state, tools, iteration) {
         context::CompactionOutcome::NeedsSummary(input) => {
             agent
                 .apply_summary_compaction(
@@ -204,7 +204,8 @@ pub(crate) async fn run_sampling_request(
         }
     };
 
-    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response) {
+    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response, iteration)
+    {
         agent
             .apply_summary_compaction(provider, tools, event_tx, cancellation_token, state, input)
             .await;
@@ -337,7 +338,8 @@ async fn run_sampling_request_streaming(
         }
     };
 
-    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response) {
+    if let Some(input) = iteration::accumulate_response(&agent.config, state, &response, iteration)
+    {
         agent
             .apply_summary_compaction(provider, &[], event_tx, cancellation_token, state, input)
             .await;

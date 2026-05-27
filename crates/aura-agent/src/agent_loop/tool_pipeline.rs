@@ -248,15 +248,52 @@ impl AgentLoop {
     }
 }
 
-/// Codex parity: the harness no longer latches a "circling" state,
-/// so this gate is now a no-op. Kept as a function so the buffered
-/// and streamed dispatch paths share a single attachment point if a
-/// future iteration wants to re-introduce duplicate-read defences.
+/// Operator opt-out for the post-`implement_now` hard exploration block.
+///
+/// The soft `<harness_steering kind="implement_now">` prompt always fires when
+/// the gate's preconditions are met (see `prompts::steering::implement_now_gate`).
+/// The pre-dispatch tool-result rejection in
+/// [`partition_circling_duplicate_reads`] is the stronger guard: on by default
+/// once `implement_now` has injected. Set `AURA_AGENT_IMPLEMENT_NOW_BLOCK` to
+/// `0` / `false` / `no` / `off` for soft-nudge-only behaviour.
+fn implement_now_block_enabled() -> bool {
+    !matches!(
+        std::env::var("AURA_AGENT_IMPLEMENT_NOW_BLOCK").as_deref(),
+        Ok("0") | Ok("false") | Ok("no") | Ok("off")
+    )
+}
+
+/// Pre-dispatch exploration block (on by default).
+///
+/// When [`implement_now_block_enabled`] is true and the loop has injected the
+/// one-shot `implement_now` steering without any cumulative file writes,
+/// further read/search tool calls are short-circuited with a synthetic error
+/// result.
 pub(super) fn partition_circling_duplicate_reads(
     tool_calls: &[ToolCallInfo],
-    _state: &super::LoopState,
+    state: &super::LoopState,
 ) -> (Vec<ToolCallResult>, Vec<ToolCallInfo>) {
-    (Vec::new(), tool_calls.to_vec())
+    if !implement_now_block_enabled() || !state.implement_now_injected || state.had_any_file_write {
+        return (Vec::new(), tool_calls.to_vec());
+    }
+
+    let mut blocked = Vec::new();
+    let mut remaining = Vec::with_capacity(tool_calls.len());
+    for tool in tool_calls {
+        if helpers::is_exploration_tool(&tool.name) {
+            blocked.push(ToolCallResult {
+                tool_use_id: tool.id.clone(),
+                content: "implement_now has already fired after enough exploration. This read/search tool was blocked; the next action must be write_file, edit_file, delete_file, or task_done with no_changes_needed: true and notes explaining why no file changes are required.".to_string(),
+                is_error: true,
+                kind: aura_core::ToolResultKind::AgentError,
+                stop_loop: false,
+                file_changes: Vec::new(),
+            });
+        } else {
+            remaining.push(tool.clone());
+        }
+    }
+    (blocked, remaining)
 }
 
 /// Pre-dispatch chunk guard for `write_file`.
@@ -629,6 +666,40 @@ mod chunk_guard_tests {
 mod track_tool_effects_tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialize tests that read or mutate `AURA_AGENT_IMPLEMENT_NOW_BLOCK`.
+    /// `partition_circling_duplicate_reads` reads the same env var, so any
+    /// test exercising it needs to coordinate to keep parallel-test runs
+    /// deterministic.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Set `AURA_AGENT_IMPLEMENT_NOW_BLOCK` to `value` for the duration of a
+    /// scope and restore the previous value on drop.
+    struct EnvVarOverride {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarOverride {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarOverride {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn mk_read_tool(id: &str, path: &str) -> ToolCallInfo {
         ToolCallInfo {
@@ -671,6 +742,91 @@ mod track_tool_effects_tests {
                 lines_removed: 0,
             }],
         }
+    }
+
+    #[test]
+    fn implement_now_block_is_disabled_when_env_opt_out() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "off");
+
+        let config = AgentLoopConfig::for_agent("claude-test-model");
+        let mut state = LoopState::new_for_tests(&config, vec![]);
+        state.implement_now_injected = true;
+
+        let calls = vec![
+            mk_read_tool("toolu_read", "src/lib.rs"),
+            ToolCallInfo {
+                id: "toolu_search".to_string(),
+                name: "search_code".to_string(),
+                input: json!({"pattern": "Dedupe"}),
+            },
+        ];
+
+        let (blocked, remaining) = partition_circling_duplicate_reads(&calls, &state);
+
+        assert!(
+            blocked.is_empty(),
+            "opt-out: hard block must not fire when AURA_AGENT_IMPLEMENT_NOW_BLOCK=off"
+        );
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn implement_now_blocks_exploration_until_a_write_lands() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "");
+
+        let config = AgentLoopConfig::for_agent("claude-test-model");
+        let mut state = LoopState::new_for_tests(&config, vec![]);
+        state.implement_now_injected = true;
+
+        let calls = vec![
+            mk_read_tool("toolu_read", "src/lib.rs"),
+            ToolCallInfo {
+                id: "toolu_search".to_string(),
+                name: "search_code".to_string(),
+                input: json!({"pattern": "Dedupe"}),
+            },
+            mk_write_tool("toolu_write", "edit_file", "src/lib.rs"),
+            ToolCallInfo {
+                id: "toolu_done".to_string(),
+                name: "task_done".to_string(),
+                input: json!({"notes": "done"}),
+            },
+        ];
+
+        let (blocked, remaining) = partition_circling_duplicate_reads(&calls, &state);
+
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.iter().all(|r| r.is_error));
+        assert!(blocked
+            .iter()
+            .all(|r| r.content.contains("implement_now has already fired")));
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["edit_file", "task_done"]
+        );
+    }
+
+    #[test]
+    fn implement_now_block_stops_after_first_successful_file_write() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _override = EnvVarOverride::set("AURA_AGENT_IMPLEMENT_NOW_BLOCK", "");
+
+        let config = AgentLoopConfig::for_agent("claude-test-model");
+        let mut state = LoopState::new_for_tests(&config, vec![]);
+        state.implement_now_injected = true;
+        state.had_any_file_write = true;
+
+        let calls = vec![mk_read_tool("toolu_read", "src/lib.rs")];
+        let (blocked, remaining) = partition_circling_duplicate_reads(&calls, &state);
+
+        assert!(blocked.is_empty());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "read_file");
     }
 
     /// Pin that `track_tool_effects` increments the exploration
@@ -748,5 +904,4 @@ mod track_tool_effects_tests {
             Some(&READS_AFTER_WRITE_ALLOWANCE)
         );
     }
-
 }

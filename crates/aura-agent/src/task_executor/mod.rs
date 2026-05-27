@@ -503,14 +503,13 @@ pub async fn run_project_build_check(
     let raw = combine_build_streams(&result.stdout, &result.stderr);
     let pf = project_folder.to_string();
     let raw_for_fallback = raw.clone();
-    let enriched = tokio::task::spawn_blocking(move || {
-        handlers::enrich_compiler_output_sync(&pf, &raw)
-    })
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("spawn_blocking panicked in enrich_compiler_output: {e}");
-        raw_for_fallback
-    });
+    let enriched =
+        tokio::task::spawn_blocking(move || handlers::enrich_compiler_output_sync(&pf, &raw))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("spawn_blocking panicked in enrich_compiler_output: {e}");
+                raw_for_fallback
+            });
     Err(format!(
         "Build check failed (`{cmd}`). Fix all errors before completing the task.\n\n{enriched}"
     ))

@@ -103,7 +103,11 @@ impl EarlyTestOracle {
     /// gate itself.
     #[must_use]
     pub fn new(test_command: Option<String>, enabled: bool) -> Self {
-        let state = if enabled && test_command.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        let state = if enabled
+            && test_command
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
             OracleState::AwaitingFirstRead
         } else {
             OracleState::Done

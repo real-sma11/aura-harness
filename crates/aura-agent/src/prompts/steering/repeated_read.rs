@@ -67,10 +67,7 @@ impl RepeatedReadTracker {
         if content_hash.is_empty() {
             return false;
         }
-        let count = self
-            .counts
-            .entry(content_hash.to_string())
-            .or_insert(0);
+        let count = self.counts.entry(content_hash.to_string()).or_insert(0);
         *count += 1;
         if *count == REPEATED_READ_THRESHOLD {
             self.pending.push(content_hash.to_string());

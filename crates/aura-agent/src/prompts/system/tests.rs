@@ -625,7 +625,10 @@ fn chat_system_prompt_includes_codex_derived_sections_in_order() {
         "<frontend_design>",
         "<output_style>",
     ] {
-        assert!(prompt.contains(tag), "{tag} missing from chat prompt: {prompt}");
+        assert!(
+            prompt.contains(tag),
+            "{tag} missing from chat prompt: {prompt}"
+        );
     }
     assert!(
         !prompt.contains("<planning_guidance>"),
@@ -642,12 +645,19 @@ fn chat_system_prompt_includes_codex_derived_sections_in_order() {
     let mut last = 0usize;
     for tag in order {
         let idx = prompt.find(tag).expect("tag present above");
-        assert!(idx >= last, "expected {tag} at or after {last}, found {idx}");
+        assert!(
+            idx >= last,
+            "expected {tag} at or after {last}, found {idx}"
+        );
         last = idx;
     }
     assert!(
-        prompt.rfind("<output_style>").expect("output_style present")
-            > prompt.rfind("</frontend_design>").expect("frontend_design present"),
+        prompt
+            .rfind("<output_style>")
+            .expect("output_style present")
+            > prompt
+                .rfind("</frontend_design>")
+                .expect("frontend_design present"),
         "output_style must follow frontend_design: {prompt}"
     );
 }

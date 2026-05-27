@@ -97,4 +97,3 @@ fn finalize_loop_result_default_notes_when_empty() {
     let exec = finalize_loop_result(result);
     assert!(exec.notes.contains("agentic tool-use loop"));
 }
-

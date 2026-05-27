@@ -190,7 +190,6 @@ impl AgentRunnerConfig {
         self.simple_model = simple.into();
         self
     }
-
 }
 
 /// Parameters for running an agentic task.
@@ -623,10 +622,14 @@ pub fn configure_loop_config(
         aura_project_id: config.aura_project_id.clone(),
         prompt_cache_key: config.prompt_cache_key.clone(),
         request_kind: ModelRequestKind::DevLoopBootstrap,
-        // Phase 2 of harness-v2: disable extended thinking on the
-        // first iteration so the explore turn emits fast tool calls
-        // instead of "Thought for 2m"-bursting. Chat / non-task
-        // callers leave this off (the default).
+        // Temporary (2026-05): the dev-loop policy pins reasoning
+        // effort to `Medium` across every iteration. This flag is
+        // the "this is a dev-loop run" signal that
+        // `LoopState::compute_thinking_effort` reads to bypass the
+        // codex-style `Off → Medium → Low` taper still used by chat
+        // and other generic callers. The historical iteration-0
+        // `max_tokens` clamp that used to ride on this flag has been
+        // removed (see `AgentLoopConfig::disable_thinking_iteration_0`).
         disable_thinking_iteration_0: true,
         ..AgentLoopConfig::for_agent(model)
     }

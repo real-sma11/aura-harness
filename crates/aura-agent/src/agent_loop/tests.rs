@@ -657,6 +657,31 @@ fn begin_iteration_does_not_reset_when_signal_unset() {
     assert_eq!(state.exploration_state.count, 10);
 }
 
+#[test]
+fn begin_iteration_injects_implement_now_after_exploration_threshold() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    let signal = Arc::new(AtomicBool::new(false));
+    let config = AgentLoopConfig {
+        phase_reset_signal: Some(signal),
+        ..AgentLoopConfig::for_agent("claude-test-model")
+    };
+    let mut state = super::LoopState::new(&config, vec![Message::user("start")]);
+    state.exploration_state.count = crate::prompts::steering::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
+
+    state.begin_iteration(&config, 3);
+
+    assert!(state.implement_now_injected);
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|m| m.text_content().contains("kind=\"implement_now\"")),
+        "next model request must include the implement_now steering"
+    );
+}
+
 /// Companion: without a wired signal (the chat path), begin_iteration
 /// must not touch exploration counters at all.
 #[test]
@@ -804,22 +829,40 @@ async fn three_read_file_calls_execute_in_one_iteration() {
 // Phase 2 — `compute_thinking_effort` dev-loop policy
 // ------------------------------------------------------------------
 
-/// `disable_thinking_iteration_0: true` + iteration 0 → `Off`,
-/// regardless of any other state. Preserves the runner's
-/// fast-first-tool-call behaviour while routing through the new
-/// codex-style effort knob instead of the legacy max_tokens clamp.
+/// Temporary (2026-05): dev-loop turns (signalled by
+/// `disable_thinking_iteration_0: true`, which `configure_loop_config`
+/// sets exclusively for dev-loop tasks) are pinned to `Medium`
+/// regardless of iteration / write / plan state while we evaluate
+/// whether a single effort level converges faster than the
+/// codex-style `Off → Medium → Low` taper.
 #[test]
-fn effort_off_when_disable_thinking_iteration_0() {
+fn effort_medium_when_disable_thinking_iteration_0() {
     use aura_reasoner::ThinkingEffort;
 
     let config = AgentLoopConfig {
         disable_thinking_iteration_0: true,
         ..AgentLoopConfig::for_agent("claude-test-model")
     };
-    let state = super::LoopState::new(&config, vec![]);
+    let mut state = super::LoopState::new(&config, vec![]);
+
     assert_eq!(
         state.compute_thinking_effort(&config, 0),
-        ThinkingEffort::Off
+        ThinkingEffort::Medium,
+        "iteration 0 dev-loop turn pinned to Medium"
+    );
+
+    state.had_any_file_write = true;
+    assert_eq!(
+        state.compute_thinking_effort(&config, 3),
+        ThinkingEffort::Medium,
+        "post-write dev-loop turn still pinned to Medium"
+    );
+
+    state.submit_plan_called = true;
+    assert_eq!(
+        state.compute_thinking_effort(&config, 5),
+        ThinkingEffort::Medium,
+        "post-submit_plan dev-loop turn still pinned to Medium"
     );
 }
 
@@ -1015,7 +1058,10 @@ async fn agentloop_endturn_terminates_without_writes() {
         result.iterations, 1,
         "EndTurn must terminate the loop on the first sampling regardless of writes"
     );
-    assert!(!result.stalled, "no stall flag without an explicit budget overrun");
+    assert!(
+        !result.stalled,
+        "no stall flag without an explicit budget overrun"
+    );
     assert!(
         result.llm_error.is_none(),
         "no llm_error envelope — the model owns the exit signal"

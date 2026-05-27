@@ -117,7 +117,9 @@ fn load_transcript() -> (HashMap<String, usize>, Vec<TranscriptEntry>) {
 /// envelope (~110 bytes) and the Phase 2 assertion proves real byte
 /// savings rather than noise.
 fn line_body(path: &str, n: usize) -> String {
-    format!("// {path} line {n}: filler payload to make the replay fixture exercise dedup byte math")
+    format!(
+        "// {path} line {n}: filler payload to make the replay fixture exercise dedup byte math"
+    )
 }
 
 fn full_file_text(path: &str, line_count: usize) -> String {
@@ -153,7 +155,10 @@ fn line_numbered_slice(
 /// `start_line` nor `end_line` is supplied); bounded calls return the
 /// `{:>6}|{content}` line-numbered slice (matches the same tool's
 /// bounded branch).
-fn synthesize_result_bytes(entry: &TranscriptEntry, line_counts: &HashMap<String, usize>) -> String {
+fn synthesize_result_bytes(
+    entry: &TranscriptEntry,
+    line_counts: &HashMap<String, usize>,
+) -> String {
     let path = entry.input["path"]
         .as_str()
         .expect("read_file input must include a string `path`");
@@ -282,7 +287,11 @@ fn shamir_replay_compaction_reduces_prompt_bytes() {
 
         messages.push(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(&id, &entry.tool_name, entry.input.clone())],
+            content: vec![ContentBlock::tool_use(
+                &id,
+                &entry.tool_name,
+                entry.input.clone(),
+            )],
         });
         messages.push(Message {
             role: Role::User,

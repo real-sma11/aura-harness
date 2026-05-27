@@ -3,7 +3,7 @@ use super::request::ModelRequest;
 use super::tool::ToolChoice;
 use serde::{Deserialize, Serialize};
 
-const DEV_LOOP_BOOTSTRAP_LAST_USER_MAX_BYTES: usize = 8 * 1024;
+const DEV_LOOP_BOOTSTRAP_LAST_USER_MAX_BYTES: usize = 16 * 1024;
 const DEV_LOOP_BOOTSTRAP_TOTAL_TEXT_MAX_BYTES: usize = 24 * 1024;
 const PROJECT_TOOL_LAST_USER_MAX_BYTES: usize = 32 * 1024;
 const PROJECT_TOOL_TOTAL_TEXT_MAX_BYTES: usize = 48 * 1024;

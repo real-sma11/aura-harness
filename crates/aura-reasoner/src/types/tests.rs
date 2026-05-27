@@ -163,7 +163,7 @@ fn test_project_tool_task_extract_still_blocks_unbounded_context() {
 #[test]
 fn test_oversized_dev_loop_bootstrap_is_blocked_before_emergency_cap() {
     let request = ModelRequest::builder("claude-opus-4-6", "You are an agent")
-        .message(Message::user("x".repeat(12 * 1024)))
+        .message(Message::user("x".repeat(20 * 1024)))
         .request_kind(ModelRequestKind::DevLoopBootstrap)
         .aura_project_id(Some("project-123".to_string()))
         .aura_agent_id(Some("agent-123".to_string()))
