@@ -130,6 +130,21 @@ pub struct AgentRunnerConfig {
     /// ephemeral `cache_control` breakpoints in
     /// `aura_reasoner::anthropic::convert` handle prefix reuse.
     pub prompt_cache_key: Option<String>,
+    /// Phase 5: per-task switch for the early test-gate oracle.
+    ///
+    /// `TaskRunAutomaton` (and any future task-shaped automaton) sets
+    /// this `true` to install
+    /// [`crate::agent_loop::steering::EarlyTestOracle`] into the
+    /// per-run `SteeringRegistry` for every task this runner
+    /// executes; chat / shell / generic callers leave it `false` and
+    /// the oracle never fires.
+    ///
+    /// The wired-through path is:
+    /// `TaskRunConfig.early_test_oracle` →
+    /// `AgentRunnerConfig.early_test_oracle` →
+    /// `AgentLoopConfig.early_test_oracle: Option<EarlyTestOracleConfig>`
+    /// → `LoopState::steering`.
+    pub early_test_oracle: bool,
 }
 
 impl AgentRunnerConfig {
@@ -180,6 +195,10 @@ impl AgentRunnerConfig {
             aura_agent_id: None,
             aura_project_id: None,
             prompt_cache_key: None,
+            // Phase 5: default off so chat / generic runners do not
+            // pay for the oracle's hint generation. Task-shaped
+            // automatons flip this on per-construction.
+            early_test_oracle: false,
         }
     }
 
@@ -190,6 +209,16 @@ impl AgentRunnerConfig {
     #[must_use]
     pub fn with_simple_model(mut self, simple: impl Into<String>) -> Self {
         self.simple_model = simple.into();
+        self
+    }
+
+    /// Set the `early_test_oracle` switch. Task-shaped automatons
+    /// (`TaskRunAutomaton`, `DevLoopAutomaton`) call this from their
+    /// dispatch JSON parser; chat / shell / generic runners leave the
+    /// default (`false`) in place.
+    #[must_use]
+    pub fn with_early_test_oracle(mut self, enabled: bool) -> Self {
+        self.early_test_oracle = enabled;
         self
     }
 }
@@ -247,6 +276,14 @@ pub struct TaskTrackingConfig {
     /// Test command used by the `task_done` hard gate. Forwarded directly
     /// onto [`crate::task_executor::TaskToolExecutor::test_command`].
     pub test_command: Option<String>,
+    /// Phase 5: per-task switch for the early test-gate oracle.
+    /// `None` falls back to [`AgentRunnerConfig::early_test_oracle`];
+    /// `Some(v)` overrides it for this one task. The `TaskRunAutomaton`
+    /// populates this from `TaskRunConfig.early_test_oracle` parsed
+    /// off the dispatch JSON so per-task opt-outs (e.g. ad-hoc chat-shaped
+    /// runs) are honored without rebuilding the shared
+    /// [`AgentRunner`].
+    pub early_test_oracle: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -278,10 +315,20 @@ impl AgentRunner {
         // Non-tracked callers (e.g. chat) do not share an exploration-
         // reset signal with a `TaskToolExecutor`; pass `None` so the
         // loop simply does not perform the reset.
-        self.execute_task_inner(provider, executor, params, event_tx, cancel, None, None)
-            .await
+        self.execute_task_inner(
+            provider,
+            executor,
+            params,
+            event_tx,
+            cancel,
+            None,
+            None,
+            self.config.early_test_oracle,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_task_inner(
         &self,
         provider: &dyn ModelProvider,
@@ -291,6 +338,7 @@ impl AgentRunner {
         cancel: Option<CancellationToken>,
         phase_reset_signal: Option<Arc<AtomicBool>>,
         prebuilt_task_ctx: Option<String>,
+        early_test_oracle: bool,
     ) -> Result<TaskExecutionResult, crate::AgentError> {
         let complexity = classify_task_complexity(params.task.title, params.task.description);
 
@@ -319,6 +367,28 @@ impl AgentRunner {
         let mut loop_config =
             configure_loop_config(complexity, &self.config, params.member_count, system_prompt);
         loop_config.phase_reset_signal = phase_reset_signal;
+        // Phase 5: install the EarlyTestOracle source via the
+        // per-call `early_test_oracle` flag (the runner-level
+        // default from `AgentRunnerConfig.early_test_oracle` for
+        // `execute_task` callers, or the per-task override from
+        // `TaskTrackingConfig.early_test_oracle` for
+        // `execute_task_tracked` callers). The oracle is permanently
+        // disarmed when the project declares no `test_command`, so
+        // we only attach the config when both `enabled` AND a
+        // non-blank command are present.
+        loop_config.early_test_oracle = if early_test_oracle {
+            let test_command = params
+                .project
+                .test_command
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty());
+            test_command.map(|cmd| aura_config::EarlyTestOracleConfig {
+                enabled: true,
+                test_command: Some(cmd),
+            })
+        } else {
+            None
+        };
 
         let agent_loop = AgentLoop::new(loop_config);
         let messages = vec![Message::user(&task_ctx)];
@@ -388,6 +458,12 @@ impl AgentRunner {
         // user message inside `execute_task_inner` derive from the
         // same source, and so we never pay the resolve cost twice.
         let full_task_ctx = build_full_task_ctx(params).await;
+        // Phase 5: per-task override on top of the runner-level
+        // default. Captured before the `tracking` struct is moved
+        // into the executor below.
+        let early_test_oracle = tracking
+            .early_test_oracle
+            .unwrap_or(self.config.early_test_oracle);
         let task_executor = TaskToolExecutor {
             inner: tracking.inner_executor,
             project_folder: tracking.project_folder,
@@ -419,6 +495,7 @@ impl AgentRunner {
                 cancel,
                 Some(reset_signal),
                 Some(full_task_ctx),
+                early_test_oracle,
             )
             .await?;
 
@@ -603,6 +680,10 @@ pub fn configure_loop_config(
     // ceiling invariant in `LoopState::build_request` still holds).
     let initial_thinking_budget = thinking_budget.min(max_tokens);
 
+    // Phase 5: the `early_test_oracle` field on the returned
+    // `AgentLoopConfig` is populated later inside `execute_task_inner`
+    // because that's where `params.project.test_command` is in
+    // scope. The struct field defaults to `None` here.
     AgentLoopConfig {
         max_iterations,
         max_tokens,

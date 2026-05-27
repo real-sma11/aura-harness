@@ -27,7 +27,7 @@
 //! the pipeline needs. The larger sampling context lives in
 //! [`super::transport::SamplingCtx`] one layer up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,8 @@ use crate::helpers;
 use crate::types::{
     AgentLoopResult, AgentToolExecutor, BuildBaseline, ToolCallInfo, ToolCallResult,
 };
+
+use super::steering::SteeringRegistry;
 use aura_config::{READS_AFTER_WRITE_ALLOWANCE, TOOL_ERROR_PREVIEW_LIMIT, WRITE_FILE_CHUNK_BYTES};
 use aura_reasoner::{ContentBlock, Message, ModelResponse, Role, ToolResultContent};
 use tokio::sync::mpsc::Sender;
@@ -306,13 +308,22 @@ pub(crate) async fn process_tool_results(
         cached_ids,
     } = prepared;
 
-    // Cumulative tracking (steering trackers, file-change journal,
+    // Cumulative tracking (steering registry, file-change journal,
     // session-read cache, read-after-write allowances). The Live
     // path's cached-results subset is included here because
     // `prepare_live_batch` folded cached pairs into `all_results`
     // before tracking ran. The pump driver does the same merge
     // before calling into the pipeline so PreExecuted batches reach
     // tracking with the full set.
+    //
+    // Phase 5: the three previously-threaded `Option<&mut ...>`
+    // trackers (repeated-read, session-read-paths,
+    // read-after-write-allowances) collapsed into a single
+    // `&mut SteeringRegistry` borrow + the still-needed
+    // session-read-paths / allowances borrows. The registry handles
+    // the per-source telemetry; the path-cache + allowance maps stay
+    // on `LoopState` because the circling-read gate consults them
+    // directly.
     let any_write_success = track_tool_effects(
         &tool_calls,
         &all_results,
@@ -320,9 +331,9 @@ pub(crate) async fn process_tool_results(
         &mut state.exploration_state,
         &mut state.had_any_write,
         &mut state.turn_diff,
-        Some(&mut state.repeated_read_tracker),
-        Some(&mut state.session_read_paths),
-        Some(&mut state.read_after_write_allowances),
+        &mut state.steering,
+        &mut state.session_read_paths,
+        &mut state.read_after_write_allowances,
     );
 
     if any_write_success && state.build_cooldown == 0 {
@@ -826,9 +837,12 @@ fn partition_oversized_writes(
     (oversized, remaining)
 }
 
-// Phase 8 will fold these per-tracker arguments into a unified
-// `TurnSteeringRegistry`; until then the function holds the existing
-// shape that the buffered + pump paths both relied on pre-Phase-4.
+// Phase 5: the three previously-threaded `Option<&mut ...>` trackers
+// (repeated-read, session-read-paths, read-after-write-allowances)
+// collapsed into a single `&mut SteeringRegistry` borrow plus the
+// still-needed path-cache / allowance borrows. The registry handles
+// per-source telemetry; the path-cache + allowance maps stay on
+// `LoopState` because the circling-read gate consults them directly.
 #[allow(clippy::too_many_arguments)]
 fn track_tool_effects(
     to_execute: &[ToolCallInfo],
@@ -837,9 +851,9 @@ fn track_tool_effects(
     exploration_state: &mut ExplorationState,
     had_any_write: &mut bool,
     turn_diff: &mut super::turn_diff::TurnDiff,
-    mut repeated_read_tracker: Option<&mut super::steering::RepeatedReadTracker>,
-    mut session_read_paths: Option<&mut HashSet<PathBuf>>,
-    mut read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
+    steering: &mut SteeringRegistry,
+    session_read_paths: &mut HashSet<PathBuf>,
+    read_after_write_allowances: &mut std::collections::HashMap<PathBuf, u8>,
 ) -> bool {
     use super::turn_diff::TurnDiff;
     use crate::types::FileChangeKind;
@@ -867,32 +881,32 @@ fn track_tool_effects(
             continue;
         };
 
+        // Phase 5: fan `(tool, exec_result)` out to every installed
+        // steering source. Each source decides for itself whether
+        // the pair is interesting (`RepeatedReadTracker` only cares
+        // about successful `read_file`; `ImplementNowSteering`
+        // tracks exploration/write deltas; `EarlyTestOracle` drives
+        // its state machine on tool names). The buffered and pump
+        // transports both reach `track_tool_effects` so this single
+        // call site keeps the registry behaviour identical across
+        // transports — the contract pinned by `transport_parity`.
+        steering.observe_tool(tool, exec_result);
+
         if helpers::is_exploration_tool(&tool.name) {
             exploration_state.count += 1;
             if !exec_result.is_error {
                 if let Some(path) = tool.input.get("path").and_then(|v| v.as_str()) {
                     let path_buf = PathBuf::from(path);
                     turn_diff.record_read(path_buf.clone());
-                    if let Some(cache) = session_read_paths.as_deref_mut() {
-                        cache.insert(path_buf);
+                    session_read_paths.insert(path_buf);
+                    let key = PathBuf::from(path);
+                    let mut exhausted = false;
+                    if let Some(remaining) = read_after_write_allowances.get_mut(&key) {
+                        *remaining = remaining.saturating_sub(1);
+                        exhausted = *remaining == 0;
                     }
-                    if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
-                        let key = PathBuf::from(path);
-                        let mut exhausted = false;
-                        if let Some(remaining) = allowances.get_mut(&key) {
-                            *remaining = remaining.saturating_sub(1);
-                            exhausted = *remaining == 0;
-                        }
-                        if exhausted {
-                            allowances.remove(&key);
-                        }
-                    }
-                }
-                if tool.name == "read_file" {
-                    if let Some(tracker) = repeated_read_tracker.as_deref_mut() {
-                        let hash =
-                            super::tool_execution::content_hash_hex(exec_result.content.as_bytes());
-                        tracker.record(&hash);
+                    if exhausted {
+                        read_after_write_allowances.remove(&key);
                     }
                 }
             }
@@ -910,12 +924,8 @@ fn track_tool_effects(
             let path_arg = tool.input.get("path").and_then(|v| v.as_str());
             if let Some(path) = path_arg {
                 let path_buf = PathBuf::from(path);
-                if let Some(cache) = session_read_paths.as_deref_mut() {
-                    cache.remove(&path_buf);
-                }
-                if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
-                    allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
-                }
+                session_read_paths.remove(&path_buf);
+                read_after_write_allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
                 any_write_success = true;
                 *had_any_write = true;
                 for change in &exec_result.file_changes {
@@ -932,12 +942,8 @@ fn track_tool_effects(
                 // write tools.
                 for change in &exec_result.file_changes {
                     let path_buf = PathBuf::from(&change.path);
-                    if let Some(cache) = session_read_paths.as_deref_mut() {
-                        cache.remove(&path_buf);
-                    }
-                    if let Some(allowances) = read_after_write_allowances.as_deref_mut() {
-                        allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
-                    }
+                    session_read_paths.remove(&path_buf);
+                    read_after_write_allowances.insert(path_buf, READS_AFTER_WRITE_ALLOWANCE);
                     result.record_file_change(change.clone());
                     record_into_turn_diff(turn_diff, change);
                 }
@@ -1087,6 +1093,7 @@ mod chunk_guard_tests {
 mod track_tool_effects_tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
     /// Serialize tests that swap the installed `aura_config` via
@@ -1243,6 +1250,9 @@ mod track_tool_effects_tests {
         let mut result = AgentLoopResult::default();
         let mut had_any_write = false;
         let mut turn_diff = super::super::turn_diff::TurnDiff::default();
+        let mut steering = SteeringRegistry::new();
+        let mut session_read_paths = HashSet::new();
+        let mut read_after_write_allowances = HashMap::new();
 
         for i in 0..CALLS {
             let tool_id = format!("toolu_explore_{i}");
@@ -1256,9 +1266,9 @@ mod track_tool_effects_tests {
                 &mut exploration_state,
                 &mut had_any_write,
                 &mut turn_diff,
-                None,
-                None,
-                None,
+                &mut steering,
+                &mut session_read_paths,
+                &mut read_after_write_allowances,
             );
         }
 
@@ -1277,6 +1287,7 @@ mod track_tool_effects_tests {
         let mut result = AgentLoopResult::default();
         let mut had_any_write = false;
         let mut turn_diff = super::super::turn_diff::TurnDiff::default();
+        let mut steering = SteeringRegistry::new();
         let mut session_read_paths = HashSet::from([PathBuf::from("src/inbox.rs")]);
         let mut read_after_write_allowances = HashMap::new();
 
@@ -1290,9 +1301,9 @@ mod track_tool_effects_tests {
             &mut exploration_state,
             &mut had_any_write,
             &mut turn_diff,
-            None,
-            Some(&mut session_read_paths),
-            Some(&mut read_after_write_allowances),
+            &mut steering,
+            &mut session_read_paths,
+            &mut read_after_write_allowances,
         );
 
         assert!(any_success);

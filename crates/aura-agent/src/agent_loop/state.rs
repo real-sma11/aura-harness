@@ -19,6 +19,7 @@ use crate::types::{AgentLoopResult, BuildBaseline};
 
 use super::cache::ToolResultCache;
 use super::config::{parse_cache_retention, AgentLoopConfig};
+use super::steering::SteeringRegistry;
 use super::{steering, turn_diff};
 
 /// Per-iteration response-token budget and the one-shot "skip the
@@ -118,16 +119,26 @@ pub(crate) struct LoopState {
     /// `tool_pipeline::track_tool_effects` and tool-result caching
     /// invariants stay path-aware.
     pub(crate) turn_diff: turn_diff::TurnDiff,
-    /// Per-turn tracker for identical-byte re-reads (Phase 3b).
-    pub(crate) repeated_read_tracker: steering::RepeatedReadTracker,
     /// Paths successfully read this session; used by the duplicate-read gate.
     pub(crate) session_read_paths: std::collections::HashSet<PathBuf>,
     /// Per-path read budget granted after a successful write to that path.
     /// Lets the agent inspect changed regions while repairing malformed edits.
     pub(crate) read_after_write_allowances: std::collections::HashMap<PathBuf, u8>,
-    /// One-shot latch: [`steering::evaluate_implement_now`] fired
-    /// for this run.
+    /// One-shot latch mirrored from
+    /// [`steering::SteeringRegistry::implement_now_injected`]. Kept on
+    /// `LoopState` because the pre-dispatch
+    /// `tool_pipeline::partition_circling_duplicate_reads` gate
+    /// consults it on every batch and rebinding the borrow each call
+    /// is needlessly noisy; the field is refreshed in
+    /// [`Self::begin_iteration`] right after the registry drains.
     pub(crate) implement_now_injected: bool,
+    /// Phase 5: every per-turn steering evaluator installed for this
+    /// run. Sources implement [`steering::TurnSteering`] and are
+    /// driven by the loop via [`Self::begin_iteration`] (which calls
+    /// `begin_turn` + `drain_for_next_turn`) and by
+    /// `tool_pipeline::track_tool_effects` (which calls
+    /// `observe_tool` on every `(tool, result)` pair).
+    pub(crate) steering: SteeringRegistry,
 }
 
 impl LoopState {
@@ -158,10 +169,10 @@ impl LoopState {
             messages,
             build_baseline: None,
             turn_diff: turn_diff::TurnDiff::default(),
-            repeated_read_tracker: steering::RepeatedReadTracker::new(),
             session_read_paths: std::collections::HashSet::new(),
             read_after_write_allowances: std::collections::HashMap::new(),
             implement_now_injected: false,
+            steering: SteeringRegistry::for_config(config),
         }
     }
 
@@ -185,14 +196,23 @@ impl LoopState {
         // and the per-iteration `turn_diff` answer different questions.
         self.turn_diff.reset();
 
-        for kind in self.repeated_read_tracker.begin_turn() {
+        // Phase 5: drive every installed `TurnSteering` source
+        // through one uniform begin-turn → drain pipeline. The
+        // registry calls `begin_turn` on every source, then
+        // returns the concatenated `drain_for_next_turn` output
+        // which the loop routes through the existing `inject`
+        // helper. The pre-Phase-5 inline `begin_turn` /
+        // `evaluate_implement_now` calls are gone.
+        self.steering.begin_turn();
+        for kind in self.steering.drain_for_next_turn() {
             steering::inject(&mut self.messages, kind);
         }
-
-        if let Some(kind) = steering::evaluate_implement_now(config, self) {
-            steering::inject(&mut self.messages, kind);
-            self.implement_now_injected = true;
-        }
+        // Mirror the registry's `implement_now_injected` latch back
+        // onto `LoopState` so the pre-dispatch circling-read gate in
+        // `tool_pipeline::partition_circling_duplicate_reads`
+        // continues to be a synchronous read on `state` rather than
+        // taking a fresh borrow on `state.steering` every batch.
+        self.implement_now_injected = self.steering.implement_now_injected();
 
         // One-shot extended-thinking disable flag is re-evaluated each
         // iteration: seeded from the cross-iteration latch (armed by

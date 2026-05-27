@@ -465,6 +465,13 @@ impl DevLoopAutomaton {
             project_folder: effective_path.clone(),
             build_command: project.build_command.clone(),
             test_command: project.test_command.clone(),
+            // Phase 5: dev-loop tasks default to runner-level
+            // `early_test_oracle` (set `true` for task-shaped
+            // automaton runners via
+            // `AgentRunnerConfig.early_test_oracle`). Leaving `None`
+            // here means "use the runner default" rather than
+            // forcing the per-task override.
+            early_test_oracle: None,
         };
 
         let cancel = ctx.cancellation_token().clone();

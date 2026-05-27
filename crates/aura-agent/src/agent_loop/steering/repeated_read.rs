@@ -19,6 +19,11 @@ use std::collections::HashMap;
 
 use aura_prompts::SteeringKind;
 
+use crate::agent_loop::tool_execution::content_hash_hex;
+use crate::types::{ToolCallInfo, ToolCallResult};
+
+use super::TurnSteering;
+
 /// Per-turn occurrence tracker for read-only tool result `content_hash`
 /// values. See module-level documentation for the contract.
 ///
@@ -80,14 +85,48 @@ impl RepeatedReadTracker {
         self.pending.len()
     }
 
-    /// Begin a new model turn: drain the queued nudges, render them
-    /// as [`SteeringKind`] values, and clear the per-turn counts.
-    ///
-    /// Callers append the returned [`SteeringKind`]s to the live user
-    /// message via [`super::inject::inject`] so they ride into the
-    /// prompt prefix the next model request reads.
+    /// Begin a new model turn for tests: drain the queued nudges,
+    /// render them as [`SteeringKind`] values, and clear the
+    /// per-turn counts. Production code reaches this via the
+    /// [`TurnSteering::begin_turn`] + [`TurnSteering::drain_for_next_turn`]
+    /// pair instead — the inherent method is retained for the
+    /// pre-Phase-5 unit-test fixtures that drive the tracker
+    /// directly.
+    #[cfg(test)]
     pub fn begin_turn(&mut self) -> Vec<SteeringKind> {
         self.counts.clear();
+        std::mem::take(&mut self.pending)
+            .into_iter()
+            .map(|hash| SteeringKind::RepeatedRead { content_hash: hash })
+            .collect()
+    }
+}
+
+impl TurnSteering for RepeatedReadTracker {
+    fn observe_tool(&mut self, tool: &ToolCallInfo, result: &ToolCallResult) {
+        // Mirrors the per-tool gate that lived in
+        // `tool_pipeline::track_tool_effects` before Phase 5: only
+        // successful `read_file` calls feed the
+        // `(content_hash → count)` tracker. Other exploration tools
+        // (`list_files`, `search_code`, `stat_file`, `find_files`)
+        // do not return a single addressable content blob whose
+        // identical-byte hash would be a meaningful re-read signal.
+        if result.is_error || tool.name != "read_file" {
+            return;
+        }
+        let hash = content_hash_hex(result.content.as_bytes());
+        let _ = self.record(&hash);
+    }
+
+    fn begin_turn(&mut self) {
+        // Reset per-turn counts so the next turn's repeat detection
+        // starts clean. Pending nudges queued by the previous turn's
+        // crossings are NOT cleared here — they ride out via
+        // `drain_for_next_turn` immediately after.
+        self.counts.clear();
+    }
+
+    fn drain_for_next_turn(&mut self) -> Vec<SteeringKind> {
         std::mem::take(&mut self.pending)
             .into_iter()
             .map(|hash| SteeringKind::RepeatedRead { content_hash: hash })

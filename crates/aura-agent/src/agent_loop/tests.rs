@@ -662,13 +662,37 @@ fn begin_iteration_injects_implement_now_after_exploration_threshold() {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    use crate::types::{ToolCallInfo, ToolCallResult};
+
     let signal = Arc::new(AtomicBool::new(false));
     let config = AgentLoopConfig {
         phase_reset_signal: Some(signal),
         ..AgentLoopConfig::for_agent("claude-test-model")
     };
     let mut state = super::LoopState::new(&config, vec![Message::user("start")]);
-    state.exploration_state.count = aura_config::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
+
+    // Phase 5: drive the registry's `ImplementNowSteering` source
+    // via `observe_tool` (the call site `tool_pipeline::track_tool_effects`
+    // uses on every real run). Hand-setting
+    // `state.exploration_state.count` is no longer sufficient
+    // because the steering source tracks its own internal counter.
+    let threshold = aura_config::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
+    for i in 0..threshold {
+        let tool = ToolCallInfo {
+            id: format!("toolu_explore_{i}"),
+            name: "read_file".to_string(),
+            input: serde_json::json!({"path": format!("src/file_{i}.rs")}),
+        };
+        let result = ToolCallResult {
+            tool_use_id: tool.id.clone(),
+            content: "stub".to_string(),
+            is_error: false,
+            kind: aura_core::ToolResultKind::Ok,
+            stop_loop: false,
+            file_changes: Vec::new(),
+        };
+        state.steering.observe_tool(&tool, &result);
+    }
 
     state.begin_iteration(&config, 3);
 

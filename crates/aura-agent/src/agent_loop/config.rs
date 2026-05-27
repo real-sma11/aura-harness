@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aura_config::{
-    AUTO_BUILD_COOLDOWN, MAX_ITERATIONS, THINKING_MIN_BUDGET, THINKING_TAPER_AFTER,
-    THINKING_TAPER_FACTOR,
+    EarlyTestOracleConfig, AUTO_BUILD_COOLDOWN, MAX_ITERATIONS, THINKING_MIN_BUDGET,
+    THINKING_TAPER_AFTER, THINKING_TAPER_FACTOR,
 };
 use aura_reasoner::{ModelRequestKind, ToolDefinition};
 use aura_tools::IntentClassifier;
@@ -238,6 +238,20 @@ pub struct AgentLoopConfig {
     /// for chat UX continuity but coarser than the per-token feel of
     /// the buffered path.
     pub use_stream_pump: bool,
+    /// Per-task config for the early test-gate oracle (Phase 3a of
+    /// the reread-efficiency plan, wired in Phase 5 of the core-loop
+    /// architecture refactor).
+    ///
+    /// `None` keeps the oracle off; `Some(EarlyTestOracleConfig {
+    /// enabled: true, test_command: Some(_) })` installs the
+    /// [`crate::agent_loop::steering::EarlyTestOracle`] source into
+    /// the per-run [`crate::agent_loop::steering::SteeringRegistry`].
+    ///
+    /// `TaskRun` automatons populate this from their dispatch JSON's
+    /// `early_test_oracle: bool` field via
+    /// [`crate::agent_runner::AgentRunnerConfig::early_test_oracle`].
+    /// Chat / generic callers leave it `None`.
+    pub early_test_oracle: Option<EarlyTestOracleConfig>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -314,6 +328,11 @@ impl AgentLoopConfig {
             // Operators that need to fall back to the legacy buffered
             // path can flip this back to `false` per call site.
             use_stream_pump: true,
+            // Off by default — chat / generic callers do not declare
+            // a project test command. The dev-loop / TaskRun path
+            // populates `Some(EarlyTestOracleConfig { enabled: true,
+            // test_command: ... })` from its dispatch JSON.
+            early_test_oracle: None,
         }
     }
 }

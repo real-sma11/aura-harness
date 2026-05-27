@@ -92,7 +92,7 @@ struct TaskRunConfig {
     agent_identity: super::dev_loop::AgentIdentityEnvelope,
     /// Phase 3a (reread-efficiency plan): opt-in switch for the early
     /// "is the test gate already green?" oracle. The state machine
-    /// + steering kind live in
+    /// and steering kind live in
     /// `aura_agent::agent_loop::steering::EarlyTestOracle`; the field
     /// here lets the dispatch JSON flip the oracle on/off per task.
     ///
@@ -103,16 +103,11 @@ struct TaskRunConfig {
     /// task (e.g. ad-hoc chat-shaped runs that should not surface the
     /// hint).
     ///
-    /// Plumbing the field into the live agent loop is the documented
-    /// follow-up; today the field is parsed and stored so the
-    /// downstream patch can flip the executor on without re-touching
-    /// every dispatch site.
-    // TODO(phase5): wire via SteeringRegistry — the core-loop
-    // architecture refactor's Phase 5 owns the `TurnSteering` trait +
-    // `SteeringRegistry` on `LoopState`; that phase will read this
-    // flag through `AgentRunnerConfig` and register the
-    // `EarlyTestOracle` evaluator accordingly.
-    #[allow(dead_code)]
+    /// Phase 5 of the core-loop architecture refactor wired this
+    /// through: the value flows into
+    /// [`aura_agent::agent_runner::AgentRunnerConfig::early_test_oracle`]
+    /// at runner construction time and ultimately installs the
+    /// `EarlyTestOracle` source into the per-run `SteeringRegistry`.
     early_test_oracle: bool,
 }
 
@@ -328,6 +323,11 @@ impl TaskRunAutomaton {
             project_folder: effective_path.clone(),
             build_command: project.build_command.clone(),
             test_command: project.test_command.clone(),
+            // Phase 5: forward the per-task switch parsed off the
+            // dispatch JSON so the agent loop installs the
+            // `EarlyTestOracle` source into the per-run
+            // `SteeringRegistry`.
+            early_test_oracle: Some(cfg.early_test_oracle),
         };
 
         self.runner

@@ -118,7 +118,7 @@ pub use compaction::CompactionConfig;
 pub use env::{ConfigError, ENV_VAR_NAMES};
 pub use prompts::PromptsConfig;
 pub use reasoner::{LlmRetryConfig, ReasonerConfig, ReasonerThinkingConfig};
-pub use steering::SteeringConfig;
+pub use steering::{EarlyTestOracleConfig, SteeringConfig};
 pub use thinking::ThinkingConfig;
 pub use tools::ToolsConfig;
 pub use verify::VerifyConfig;

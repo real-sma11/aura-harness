@@ -46,6 +46,9 @@
 use aura_prompts::SteeringKind;
 
 use crate::helpers::{is_exploration_tool, is_write_tool};
+use crate::types::{ToolCallInfo, ToolCallResult};
+
+use super::TurnSteering;
 
 /// State machine tracking the "first read-only batch closed" boundary.
 ///
@@ -61,12 +64,9 @@ use crate::helpers::{is_exploration_tool, is_write_tool};
 /// returns it. Subsequent batches do not re-fire the hint; this is a
 /// once-per-task signal by design.
 //
-// `OracleState`, [`EarlyTestOracle`], and its inherent methods are
-// `#[allow(dead_code)]` because Phase 5 of the core-loop architecture
-// refactor wires the oracle into `LoopState::steering`. Until that
-// patch lands the type lives behind unit tests only; the lint
-// suppression is the documented Phase 2 → Phase 5 hand-off.
-#[allow(dead_code)]
+// `OracleState` is internal — `EarlyTestOracle` exposes its
+// armed-ness through [`Self::is_armed`] / [`Self::take_hint`] /
+// the [`TurnSteering`] impl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OracleState {
     AwaitingFirstRead,
@@ -89,14 +89,15 @@ enum OracleState {
 ///
 /// The oracle is single-shot: at most one hint per [`Self::take_hint`]
 /// caller, regardless of how many batches the task subsequently opens.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct EarlyTestOracle {
     test_command: Option<String>,
     state: OracleState,
+    /// Pending hint queued by the [`TurnSteering`] impl for drain in
+    /// the next [`TurnSteering::drain_for_next_turn`] call.
+    pending: Vec<SteeringKind>,
 }
 
-#[allow(dead_code)]
 impl EarlyTestOracle {
     /// Construct an oracle bound to the task's declared test command.
     ///
@@ -117,12 +118,14 @@ impl EarlyTestOracle {
         Self {
             test_command,
             state,
+            pending: Vec::new(),
         }
     }
 
     /// Returns `true` when the oracle is still armed (i.e. has a
     /// queued or pending hint). Tests use this as a low-noise probe
     /// alternative to inspecting the [`OracleState`] enum directly.
+    #[cfg(test)]
     #[must_use]
     pub fn is_armed(&self) -> bool {
         !matches!(self.state, OracleState::Done)
@@ -131,7 +134,11 @@ impl EarlyTestOracle {
     /// Record a tool call by name. Read-only tool names extend the
     /// open batch; any other tool name closes it (queuing a hint if
     /// the batch was non-empty).
-    pub fn observe_tool(&mut self, tool_name: &str) {
+    ///
+    /// Internal helper. The [`TurnSteering`] impl forwards every
+    /// observed `(tool, result)` through here so unit tests can
+    /// drive the state machine with just a tool name.
+    pub fn observe_tool_name(&mut self, tool_name: &str) {
         match self.state {
             OracleState::AwaitingFirstRead => {
                 if is_exploration_tool(tool_name) {
@@ -171,6 +178,29 @@ impl EarlyTestOracle {
     }
 }
 
+impl TurnSteering for EarlyTestOracle {
+    fn observe_tool(&mut self, tool: &ToolCallInfo, _result: &ToolCallResult) {
+        self.observe_tool_name(&tool.name);
+    }
+
+    fn begin_turn(&mut self) {
+        // The turn boundary itself closes the first read-only batch
+        // (mirrors the explicit `close_batch` semantics): if the
+        // agent issued at least one read in the previous batch but
+        // never followed up with a non-read tool, the boundary is a
+        // hint-firing signal too. Idempotent for `HintQueued` /
+        // `Done` states.
+        self.close_batch();
+        if let Some(hint) = self.take_hint() {
+            self.pending.push(hint);
+        }
+    }
+
+    fn drain_for_next_turn(&mut self) -> Vec<SteeringKind> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,14 +218,14 @@ mod tests {
             "no hint should be emitted before any read-only batch is observed"
         );
 
-        oracle.observe_tool("read_file");
-        oracle.observe_tool("list_files");
+        oracle.observe_tool_name("read_file");
+        oracle.observe_tool_name("list_files");
         assert!(
             oracle.take_hint().is_none(),
             "no hint should be emitted while the first read-only batch is still open"
         );
 
-        oracle.observe_tool("edit_file");
+        oracle.observe_tool_name("edit_file");
 
         let hint = oracle
             .take_hint()
@@ -220,8 +250,8 @@ mod tests {
     #[test]
     fn close_batch_explicit_boundary_fires_hint() {
         let mut oracle = EarlyTestOracle::new(Some("cargo test".into()), true);
-        oracle.observe_tool("read_file");
-        oracle.observe_tool("read_file");
+        oracle.observe_tool_name("read_file");
+        oracle.observe_tool_name("read_file");
         oracle.close_batch();
         let hint = oracle
             .take_hint()
@@ -236,8 +266,8 @@ mod tests {
     fn disabled_never_fires() {
         let mut oracle = EarlyTestOracle::new(Some("cargo test".into()), false);
         assert!(!oracle.is_armed());
-        oracle.observe_tool("read_file");
-        oracle.observe_tool("write_file");
+        oracle.observe_tool_name("read_file");
+        oracle.observe_tool_name("write_file");
         assert!(oracle.take_hint().is_none());
     }
 
@@ -245,8 +275,8 @@ mod tests {
     fn without_test_command_never_fires() {
         let mut oracle = EarlyTestOracle::new(None, true);
         assert!(!oracle.is_armed());
-        oracle.observe_tool("read_file");
-        oracle.observe_tool("write_file");
+        oracle.observe_tool_name("read_file");
+        oracle.observe_tool_name("write_file");
         assert!(oracle.take_hint().is_none());
     }
 
@@ -262,7 +292,7 @@ mod tests {
     #[test]
     fn write_first_disarms_without_firing() {
         let mut oracle = EarlyTestOracle::new(Some("cargo test".into()), true);
-        oracle.observe_tool("write_file");
+        oracle.observe_tool_name("write_file");
         assert!(oracle.take_hint().is_none());
         assert!(!oracle.is_armed());
     }

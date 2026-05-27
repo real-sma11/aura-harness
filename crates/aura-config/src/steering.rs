@@ -102,3 +102,35 @@ impl Default for SteeringConfig {
         Self::defaults()
     }
 }
+
+// ---------------------------------------------------------------------------
+// EarlyTestOracleConfig
+// ---------------------------------------------------------------------------
+
+/// Per-task configuration for the "is the test gate already green?"
+/// early oracle (Phase 3a of the reread-efficiency plan, Phase 5 of
+/// the core-loop architecture refactor).
+///
+/// Unlike [`SteeringConfig`], this struct is **per-task** rather than
+/// process-wide: it is constructed inside the automaton builtin (e.g.
+/// `aura_automaton::builtins::task_run::TaskRunConfig`) from the
+/// dispatch JSON and threaded through `aura_agent::agent_runner`'s
+/// `AgentRunnerConfig` → `AgentLoopConfig` chain into the per-run
+/// `SteeringRegistry`. The fields are not env-driven; no
+/// `lookup_*` calls live in this type.
+///
+/// Both `enabled` and a non-blank `test_command` are required for
+/// the oracle to actually fire — the agent loop's
+/// `EarlyTestOracle::new` short-circuits to the disarmed state when
+/// either is missing.
+#[derive(Debug, Clone, Default)]
+pub struct EarlyTestOracleConfig {
+    /// Master enable switch. `false` keeps the oracle off entirely;
+    /// when `true` the oracle still requires a non-blank
+    /// [`Self::test_command`] to fire.
+    pub enabled: bool,
+    /// Project test command surfaced in the
+    /// `task_already_satisfied { test_command }` hint body. `None`
+    /// or whitespace-only values disarm the oracle.
+    pub test_command: Option<String>,
+}
