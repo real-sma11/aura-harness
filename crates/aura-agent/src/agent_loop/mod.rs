@@ -4,10 +4,12 @@
 //! the model provider in a loop with intelligence: blocking detection,
 //! compaction, sanitization, budget management, etc.
 
+mod compaction_summary;
 mod context;
 mod iteration;
 mod sampling;
 mod search_cache;
+pub mod steering;
 mod stream_pump;
 mod streaming;
 mod task;
@@ -631,8 +633,7 @@ impl AgentLoop {
         &self,
         input: &aura_compaction::SummaryInput,
     ) -> Result<ModelRequest, crate::AgentError> {
-        let prompt =
-            crate::prompts::auxiliary::compaction::build_compact_summary_user_prompt(input);
+        let prompt = self::compaction_summary::render_user_prompt(input);
         let max_tokens = (input.max_summary_chars / CHARS_PER_TOKEN)
             .clamp(256, 4_096)
             .try_into()
@@ -640,7 +641,7 @@ impl AgentLoop {
 
         ModelRequest::builder(
             &self.config.model,
-            crate::prompts::auxiliary::compaction::COMPACTION_SUMMARY_SYSTEM_PROMPT,
+            aura_prompts::auxiliary::compaction::COMPACTION_SUMMARY_SYSTEM_PROMPT,
         )
         .messages(vec![Message::user(prompt)])
         .tools(Vec::new())
@@ -905,13 +906,13 @@ pub(crate) struct LoopState {
     /// invariants stay path-aware.
     pub(crate) turn_diff: turn_diff::TurnDiff,
     /// Per-turn tracker for identical-byte re-reads (Phase 3b).
-    pub(crate) repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker,
+    pub(crate) repeated_read_tracker: self::steering::RepeatedReadTracker,
     /// Paths successfully read this session; used by the duplicate-read gate.
     pub(crate) session_read_paths: std::collections::HashSet<PathBuf>,
     /// Per-path read budget granted after a successful write to that path.
     /// Lets the agent inspect changed regions while repairing malformed edits.
     pub(crate) read_after_write_allowances: std::collections::HashMap<PathBuf, u8>,
-    /// One-shot latch: [`crate::prompts::steering::evaluate_implement_now`] fired
+    /// One-shot latch: [`self::steering::evaluate_implement_now`] fired
     /// for this run.
     pub(crate) implement_now_injected: bool,
 }
@@ -944,7 +945,7 @@ impl LoopState {
             messages,
             build_baseline: None,
             turn_diff: turn_diff::TurnDiff::default(),
-            repeated_read_tracker: crate::prompts::steering::RepeatedReadTracker::new(),
+            repeated_read_tracker: self::steering::RepeatedReadTracker::new(),
             session_read_paths: std::collections::HashSet::new(),
             read_after_write_allowances: std::collections::HashMap::new(),
             implement_now_injected: false,
@@ -972,11 +973,11 @@ impl LoopState {
         self.turn_diff.reset();
 
         for kind in self.repeated_read_tracker.begin_turn() {
-            crate::prompts::steering::SteeringInjector::inject(&mut self.messages, kind);
+            self::steering::inject(&mut self.messages, kind);
         }
 
-        if let Some(kind) = crate::prompts::steering::evaluate_implement_now(config, self) {
-            crate::prompts::steering::SteeringInjector::inject(&mut self.messages, kind);
+        if let Some(kind) = self::steering::evaluate_implement_now(config, self) {
+            self::steering::inject(&mut self.messages, kind);
             self.implement_now_injected = true;
         }
 

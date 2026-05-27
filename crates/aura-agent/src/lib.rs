@@ -54,7 +54,7 @@ pub mod helpers;
 mod kernel_domain_gateway;
 mod kernel_gateway;
 pub(crate) mod planning;
-pub mod prompts;
+pub(crate) mod prompt_resolve;
 mod recording_stream;
 mod sanitize;
 pub(crate) mod self_review;

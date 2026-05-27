@@ -178,6 +178,7 @@ dependencies = [
  "aura-config",
  "aura-core",
  "aura-kernel",
+ "aura-prompts",
  "aura-reasoner",
  "aura-store",
  "aura-tools",
@@ -229,6 +230,7 @@ dependencies = [
  "aura-compaction",
  "aura-config",
  "aura-core",
+ "aura-prompts",
  "aura-reasoner",
  "aura-tools",
  "chrono",
@@ -323,6 +325,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-prompts"
+version = "0.1.0"
+dependencies = [
+ "aura-config",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "aura-protocol"
 version = "0.1.0"
 dependencies = [
@@ -364,6 +379,7 @@ dependencies = [
  "aura-core",
  "aura-kernel",
  "aura-memory",
+ "aura-prompts",
  "aura-protocol",
  "aura-reasoner",
  "aura-skills",

@@ -668,7 +668,7 @@ fn begin_iteration_injects_implement_now_after_exploration_threshold() {
         ..AgentLoopConfig::for_agent("claude-test-model")
     };
     let mut state = super::LoopState::new(&config, vec![Message::user("start")]);
-    state.exploration_state.count = crate::prompts::steering::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
+    state.exploration_state.count = aura_config::IMPLEMENT_NOW_DEFAULT_THRESHOLD;
 
     state.begin_iteration(&config, 3);
 

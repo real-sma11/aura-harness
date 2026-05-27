@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use aura_agent::agent_runner::{AgentRunner, AgentRunnerConfig};
-use aura_agent::prompts::ProjectInfo;
+use aura_prompts::ProjectInfo;
 use aura_reasoner::{Message, ModelProvider};
 use aura_tools::catalog::{ToolCatalog, ToolProfile};
 use aura_tools::domain_tools::{DomainApi, MessageDescriptor, SaveMessageParams};

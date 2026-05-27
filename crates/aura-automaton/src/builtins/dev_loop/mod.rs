@@ -47,7 +47,7 @@ const STATE_LOOP_FINISHED: &str = "loop_finished";
 /// [`aura_agent::agent_runner::AgenticTaskParams::agent`].
 ///
 /// Owns its strings so the `&str`-borrowing
-/// [`aura_agent::prompts::AgentInfo`] view handed to the runner can
+/// [`aura_prompts::AgentInfo`] view handed to the runner can
 /// be built on demand from a stable in-memory location. When aura-os
 /// leaves the wire fields absent / blank the envelope reports
 /// [`Self::is_empty`] and [`Self::as_agent_info`] returns `None`,
@@ -117,16 +117,16 @@ impl AgentIdentityEnvelope {
                 .map_or(true, |s| s.trim().is_empty())
     }
 
-    /// Borrow this envelope as an [`aura_agent::prompts::AgentInfo`].
+    /// Borrow this envelope as an [`aura_prompts::AgentInfo`].
     /// Returns `None` when [`Self::is_empty`].
-    pub(crate) fn as_agent_info(&self) -> Option<aura_agent::prompts::AgentInfo<'_>> {
+    pub(crate) fn as_agent_info(&self) -> Option<aura_prompts::AgentInfo<'_>> {
         if self.is_empty() {
             return None;
         }
         let identity_present = !(self.name.trim().is_empty()
             && self.role.trim().is_empty()
             && self.personality.trim().is_empty());
-        let identity = identity_present.then_some(aura_agent::prompts::AgentIdentity {
+        let identity = identity_present.then_some(aura_prompts::AgentIdentity {
             name: self.name.as_str(),
             role: self.role.as_str(),
             personality: self.personality.as_str(),
@@ -135,7 +135,7 @@ impl AgentIdentityEnvelope {
             .system_prompt
             .as_deref()
             .filter(|s| !s.trim().is_empty());
-        Some(aura_agent::prompts::AgentInfo {
+        Some(aura_prompts::AgentInfo {
             identity,
             skills: self.skills.as_slice(),
             system_prompt,

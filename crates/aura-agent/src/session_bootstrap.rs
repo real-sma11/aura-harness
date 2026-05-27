@@ -7,9 +7,9 @@
 //! drift on executor wiring. The TUI-side file
 //! (`src/session_helpers.rs`) is now a thin `pub use` re-export layer.
 
-use crate::prompts::default_system_prompt;
 use crate::AgentLoopConfig;
 use aura_kernel::ExecutorRouter;
+use aura_prompts::default_system_prompt;
 use aura_reasoner::ToolDefinition;
 use aura_store::RocksStore;
 use aura_tools::{ToolCatalog, ToolConfig, ToolExecutor};

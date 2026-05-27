@@ -284,7 +284,9 @@ impl AgentToolExecutor for TaskToolExecutor {
                     i,
                     ToolCallResult {
                         tool_use_id: tc.id.clone(),
-                        content: "task_done was just rejected because no file changes were produced. Your next action must be write_file / edit_file / delete_file, or task_done with no_changes_needed: true and notes explaining why the task is already satisfied.".to_string(),
+                        content:
+                            aura_prompts::model_messages::task_done::NO_WRITES_AFTER_REJECT_BODY
+                                .to_string(),
                         is_error: true,
                         kind: aura_core::ToolResultKind::AgentError,
                         stop_loop: false,
@@ -379,7 +381,7 @@ impl AgentToolExecutor for TaskToolExecutor {
             .map(String::from)
             .or_else(|| infer_default_build_command(project_root))?;
 
-        self.emit_text(format!("\n[auto-build: {cmd}]\n"));
+        self.emit_text(aura_prompts::model_messages::auto_build::auto_build_status_line(&cmd));
 
         match crate::verify::run_build_command(project_root, &cmd, None).await {
             Ok(result) => {

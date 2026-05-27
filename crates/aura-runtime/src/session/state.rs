@@ -10,12 +10,12 @@
 use crate::protocol::{self, SessionInit};
 use crate::scheduler::AgentIdentity as RuntimeAgentIdentity;
 use crate::session::ToolApprovalBroker;
-use aura_agent::prompts::{default_system_prompt, AgentIdentity, ProjectInfo, SystemPromptBuilder};
 use aura_agent::AgentLoopConfig;
 use aura_core::{
     AgentId, AgentPermissions, AgentScope, AgentToolPermissions, Capability,
     InstalledIntegrationDefinition, InstalledToolDefinition,
 };
+use aura_prompts::{default_system_prompt, AgentIdentity, ProjectInfo, SystemPromptBuilder};
 use aura_protocol::{
     AgentIdentityWire, AgentPermissionsWire, CapabilityWire, ChatProjectInfoWire,
     IntentClassifierSpec, SessionModelOverrides,
@@ -571,7 +571,7 @@ pub(crate) fn agent_loop_stream_timeout() -> std::time::Duration {
 /// callers (and the TUI / dev-loop surfaces that never populate these
 /// fields).
 ///
-/// Section selection mirrors `aura_agent::prompts::build_chat_system_prompt`:
+/// Section selection mirrors `aura_prompts::build_chat_system_prompt`:
 /// `chat_capabilities` first, then any populated identity sections,
 /// then `<project_context>` and the AGENTS.md probe.
 fn build_typed_chat_system_prompt(

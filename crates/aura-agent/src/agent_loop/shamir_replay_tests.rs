@@ -13,7 +13,7 @@
 //!    [`aura_compaction::dedup_read_results_by_content_hash`] pass —
 //!    identical read-only tool results fold to a structured marker
 //!    in older history.
-//! 3. Phase 3's [`crate::prompts::steering::RepeatedReadTracker`] —
+//! 3. Phase 3's [`super::steering::RepeatedReadTracker`] —
 //!    three identical `content_hash` observations queue a steering
 //!    nudge for the next turn.
 //!
@@ -28,8 +28,8 @@
 //!
 //! The plan's third floor — `task_already_satisfied` short-circuiting
 //! before any `edit_file` — is **not** asserted here. Phase 3
-//! ([`crate::prompts::steering::EarlyTestOracle`] and
-//! [`crate::prompts::steering::RepeatedReadTracker`]) is unit-tested
+//! ([`super::steering::EarlyTestOracle`] and
+//! [`super::steering::RepeatedReadTracker`]) is unit-tested
 //! at the type level, but [`super::LoopState::begin_iteration`] /
 //! [`super::tool_execution::handle_tool_use`] do not observe either
 //! today. The replay therefore pins only the three floors that are
@@ -45,7 +45,9 @@ use aura_reasoner::{ContentBlock, Message, Role, ToolResultContent};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::prompts::steering::{RepeatedReadTracker, SteeringKind, REPEATED_READ_THRESHOLD};
+use aura_prompts::SteeringKind;
+
+use super::steering::RepeatedReadTracker;
 use crate::types::{ToolCallInfo, ToolCallResult};
 
 use super::tool_execution::{split_cached, update_cache};
@@ -369,7 +371,7 @@ fn shamir_replay_steering_fires_on_repeated_hash() {
 
     assert!(
         nudges_fired >= 1,
-        "third identical content_hash must trigger at least one nudge (REPEATED_READ_THRESHOLD = {REPEATED_READ_THRESHOLD})"
+        "third identical content_hash must trigger at least one nudge (REPEATED_READ_THRESHOLD = {})", aura_config::REPEATED_READ_THRESHOLD
     );
     assert_eq!(
         tracker.pending_count(),

@@ -18,11 +18,13 @@ use crate::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::events::AgentLoopEvent;
 use crate::file_ops::FileOp;
 use crate::planning::{TaskPhase, TaskPlan};
-use crate::prompts::{
-    agentic_execution_system_prompt, build_agentic_task_context, build_chat_system_prompt,
-    default_caps, extract_hints, resolve_hints, AgentInfo, FsWorkspace, ProjectInfo, SessionInfo,
+use aura_prompts::bootstrap::build_agentic_task_context;
+use aura_prompts::{
+    agentic_execution_system_prompt, build_chat_system_prompt, AgentInfo, ProjectInfo, SessionInfo,
     SpecInfo, TaskInfo,
 };
+
+use crate::prompt_resolve::{default_caps, extract_hints, resolve_hints, FsWorkspace};
 use crate::task_context;
 use crate::task_executor::TaskToolExecutor;
 use crate::turn_config::{classify_task_complexity, resolve_simple_model, TaskComplexity};
@@ -292,7 +294,12 @@ impl AgentRunner {
     ) -> Result<TaskExecutionResult, crate::AgentError> {
         let complexity = classify_task_complexity(params.task.title, params.task.description);
 
-        let system_prompt = agentic_execution_system_prompt(params.project, params.agent);
+        let test_command_override = aura_config::agent().verify.test_command_override.clone();
+        let system_prompt = agentic_execution_system_prompt(
+            params.project,
+            params.agent,
+            test_command_override.as_deref(),
+        );
 
         // Reuse the caller-supplied full task context bundle when
         // present (the `execute_task_tracked` path pre-builds it so

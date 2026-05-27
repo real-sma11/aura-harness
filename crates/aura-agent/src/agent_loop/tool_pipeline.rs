@@ -232,7 +232,8 @@ pub(super) fn partition_circling_duplicate_reads(
         if helpers::is_exploration_tool(&tool.name) {
             blocked.push(ToolCallResult {
                 tool_use_id: tool.id.clone(),
-                content: "implement_now has already fired after enough exploration. This read/search tool was blocked; the next action must be write_file, edit_file, delete_file, or task_done with no_changes_needed: true and notes explaining why no file changes are required.".to_string(),
+                content: aura_prompts::model_messages::implement_now::IMPLEMENT_NOW_HARD_BLOCK_BODY
+                    .to_string(),
                 is_error: true,
                 kind: aura_core::ToolResultKind::AgentError,
                 stop_loop: false,
@@ -272,15 +273,14 @@ fn partition_oversized_writes(
                         .get("path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let msg = format!(
-                        "`write_file` content of {} bytes exceeds the {}-byte per-turn cap. \
-                         Next turn: call `write_file` with only the module-doc + imports + one stub \
-                         (≤{} bytes), then use `edit_file` appends for the rest.",
+                    let msg = aura_prompts::model_messages::chunk_guard::render_chunk_guard_body(
                         content.len(),
                         WRITE_FILE_CHUNK_BYTES,
-                        WRITE_FILE_CHUNK_BYTES,
                     );
-                    let content_msg = format!("[CHUNK_GUARD] {msg}");
+                    let content_msg = format!(
+                        "{tag}{msg}",
+                        tag = aura_prompts::model_messages::chunk_guard::CHUNK_GUARD_TAG,
+                    );
                     warn!(
                         tool_use_id = %tool.id,
                         tool_name = %tool.name,
@@ -326,7 +326,7 @@ pub(super) fn track_tool_effects_public(
     exploration_state: &mut ExplorationState,
     had_any_write: &mut bool,
     turn_diff: &mut super::turn_diff::TurnDiff,
-    repeated_read_tracker: Option<&mut crate::prompts::steering::RepeatedReadTracker>,
+    repeated_read_tracker: Option<&mut super::steering::RepeatedReadTracker>,
     session_read_paths: Option<&mut HashSet<PathBuf>>,
     read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
 ) -> bool {
@@ -350,7 +350,7 @@ fn track_tool_effects(
     exploration_state: &mut ExplorationState,
     had_any_write: &mut bool,
     turn_diff: &mut super::turn_diff::TurnDiff,
-    mut repeated_read_tracker: Option<&mut crate::prompts::steering::RepeatedReadTracker>,
+    mut repeated_read_tracker: Option<&mut super::steering::RepeatedReadTracker>,
     mut session_read_paths: Option<&mut HashSet<PathBuf>>,
     mut read_after_write_allowances: Option<&mut HashMap<PathBuf, u8>>,
 ) -> bool {

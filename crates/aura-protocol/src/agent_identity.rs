@@ -1,9 +1,9 @@
 //! Wire-compatible agent identity bundle.
 //!
-//! Mirrors `aura_agent::prompts::AgentIdentity`'s shape on the
+//! Mirrors `aura_prompts::AgentIdentity`'s shape on the
 //! `AutomatonStartRequest` path. The harness consumes this in the
 //! automaton bridge and re-borrows it as
-//! `aura_agent::prompts::AgentIdentity<'_>` when assembling
+//! `aura_prompts::AgentIdentity<'_>` when assembling
 //! [`AgenticTaskParams::agent`].
 //!
 //! Lives in `aura-protocol` so the aura-os producer side and the

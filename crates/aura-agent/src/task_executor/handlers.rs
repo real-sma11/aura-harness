@@ -4,7 +4,8 @@ use super::{
     FollowUpSuggestion, Path, TaskPhase, TaskPlan, TaskToolExecutor, ToolCallInfo, ToolCallResult,
     MAX_STUB_FIX_ATTEMPTS,
 };
-use crate::prompts::{SteeringInjector, SteeringKind};
+use aura_prompts::model_messages::{auto_build, task_done as task_done_msgs, test_warning};
+use aura_prompts::steering::{SteeringKind, SteeringRenderer, StubReportView};
 
 pub(super) fn enrich_compiler_output_sync(project_folder: &str, raw_output: &str) -> String {
     if !looks_like_compiler_errors(raw_output) {
@@ -127,7 +128,7 @@ impl TaskToolExecutor {
 
         results.push(Self::tool_result(
             tc,
-            r#"{"status":"completed"}"#,
+            task_done_msgs::TASK_DONE_COMPLETED_JSON,
             false,
             true,
         ));
@@ -190,13 +191,7 @@ impl TaskToolExecutor {
     async fn check_pervasive_errors(&self) -> Option<String> {
         let outcomes = self.recent_tool_outcomes.lock().await;
         if outcomes.last_command_failed {
-            return Some(
-                "ERROR: The last run_command exited non-zero. \
-                 Your build or test is broken. Fix the errors before completing the task. \
-                 (Policy-denied commands do not count — if run_command is blocked, rely on \
-                 the harness's auto-build step and do not keep calling run_command.)"
-                    .to_string(),
-            );
+            return Some(task_done_msgs::LAST_COMMAND_FAILED_BODY.to_string());
         }
         let min_calls = aura_config::PERVASIVE_ERROR_MIN_CALLS;
         let error_threshold = aura_config::PERVASIVE_ERROR_THRESHOLD;
@@ -206,12 +201,10 @@ impl TaskToolExecutor {
             #[allow(clippy::cast_precision_loss)]
             let error_ratio = real_errors as f64 / total as f64;
             if error_ratio >= error_threshold {
-                return Some(format!(
-                    "ERROR: {real_errors}/{total} recent tool calls returned errors \
-                     ({:.0}% failure rate, policy denials excluded). The task is likely \
-                     incomplete. Review the errors, fix the underlying issue, then try \
-                     completing again.",
-                    error_ratio * 100.0,
+                return Some(task_done_msgs::pervasive_errors_body(
+                    real_errors,
+                    total,
+                    error_ratio,
                 ));
             }
         }
@@ -220,13 +213,7 @@ impl TaskToolExecutor {
 
     async fn check_self_review(&self) -> Option<String> {
         let unreviewed = self.self_review.lock().await.check_review_needed()?;
-        Some(format!(
-            "SELF-REVIEW REQUIRED: Before completing, re-read the files you modified \
-             to verify correctness:\n{}\n\nCheck: (a) changes match task requirements, \
-             (b) no placeholder/stub code remains, (c) no debug code left behind.\n\
-             Then call task_done again.",
-            unreviewed.join("\n"),
-        ))
+        Some(task_done_msgs::self_review_required_body(&unreviewed))
     }
 
     async fn check_no_writes(&self) -> Option<String> {
@@ -242,7 +229,7 @@ impl TaskToolExecutor {
             .lock()
             .await
             .task_done_no_writes_rejected = true;
-        Some(SteeringInjector::render(&SteeringKind::TaskDoneNoWrites))
+        Some(SteeringRenderer::render(&SteeringKind::TaskDoneNoWrites))
     }
 
     async fn should_skip_test_gate_for_no_change_completion(&self) -> bool {
@@ -284,9 +271,7 @@ impl TaskToolExecutor {
             }
         };
 
-        self.emit_text(format!(
-            "\n[post-task_done test run: {cmd} (source: {source})]\n"
-        ));
+        self.emit_text(test_warning::post_task_done_starting_line(&cmd, source));
 
         let outcome = match self.test_runner.run_tests(project_root, &cmd).await {
             Ok(outcome) => outcome,
@@ -302,17 +287,12 @@ impl TaskToolExecutor {
         };
 
         if outcome.passed {
-            self.emit_text(format!(
-                "\n[post-task_done test run: PASSED in {ms}ms — {summary}]\n",
-                ms = outcome.duration_ms,
-                summary = outcome.summary,
+            self.emit_text(test_warning::post_task_done_passed_line(
+                outcome.duration_ms,
+                &outcome.summary,
             ));
         } else {
-            self.emit_text(format!(
-                "\n[post-task_done test run: FAILED — {summary}; \
-                 task_done still succeeded (suite is a warning, not a gate)]\n",
-                summary = outcome.summary,
-            ));
+            self.emit_text(test_warning::post_task_done_failed_line(&outcome.summary));
         }
 
         self.emit_event(AgentLoopEvent::TestSuiteWarning {
@@ -369,15 +349,23 @@ impl TaskToolExecutor {
         *attempts += 1;
         let attempt = *attempts;
 
-        self.emit_text(format!(
-            "\n[stub detection] found {} stub(s), requesting fix (attempt {}/{})\n",
+        self.emit_text(auto_build::stub_detection_status_line(
             stub_reports.len(),
             attempt,
             MAX_STUB_FIX_ATTEMPTS,
         ));
 
-        Some(SteeringInjector::render(&SteeringKind::StubDetected {
-            reports: stub_reports.clone(),
+        let reports: Vec<StubReportView> = stub_reports
+            .iter()
+            .map(|r| StubReportView {
+                path: r.path.clone(),
+                line: r.line,
+                pattern: r.pattern.to_string(),
+                context: r.context.clone(),
+            })
+            .collect();
+        Some(SteeringRenderer::render(&SteeringKind::StubDetected {
+            reports,
         }))
     }
 
@@ -411,14 +399,7 @@ impl TaskToolExecutor {
                     .store(true, std::sync::atomic::Ordering::Release);
                 results.push(Self::tool_result(
                     tc,
-                    format!(
-                        "Plan recorded for reference. Implementation can already \
-                         proceed — writes (write_file/edit_file/delete_file) and \
-                         task_done are accepted regardless of whether submit_plan \
-                         was called. This call reset the rolling-outcome window.\n\n\
-                         YOUR PLAN (reference during implementation):\n{context_string}\n\n\
-                         Continue with the most foundational changes first.",
-                    ),
+                    task_done_msgs::submit_plan_accepted_body(&context_string),
                     false,
                     false,
                 ));
@@ -426,7 +407,7 @@ impl TaskToolExecutor {
             Err(reason) => {
                 results.push(Self::gate_rejection(
                     tc,
-                    format!("Plan rejected: {reason}. Revise and resubmit."),
+                    task_done_msgs::submit_plan_rejected_body(&reason),
                 ));
             }
         }

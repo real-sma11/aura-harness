@@ -26,8 +26,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use aura_agent::agent_runner::{AgenticTaskParams, TaskExecutionResult, TaskTrackingConfig};
-use aura_agent::prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
 use aura_agent::run_project_build_check;
+use aura_prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
 use aura_tools::catalog::ToolProfile;
 use aura_tools::domain_tools::TaskDescriptor;
 

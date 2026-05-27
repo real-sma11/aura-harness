@@ -293,7 +293,7 @@ fn envelope_roundtrips_into_system_prompt_tags() {
     let envelope = AgentIdentityEnvelope::from_json(&cfg);
     let info = envelope.as_agent_info().expect("populated");
 
-    let project = aura_agent::prompts::ProjectInfo {
+    let project = aura_prompts::ProjectInfo {
         project_id: None,
         name: "Demo",
         description: "A demo project.",
@@ -301,7 +301,7 @@ fn envelope_roundtrips_into_system_prompt_tags() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = aura_agent::prompts::agentic_execution_system_prompt(&project, Some(&info));
+    let prompt = aura_prompts::agentic_execution_system_prompt(&project, Some(&info), None);
 
     for tag in [
         "<agent_identity>",
@@ -328,7 +328,7 @@ fn empty_envelope_keeps_identity_sections_off() {
     let info = envelope.as_agent_info();
     assert!(info.is_none());
 
-    let project = aura_agent::prompts::ProjectInfo {
+    let project = aura_prompts::ProjectInfo {
         project_id: None,
         name: "Demo",
         description: "A demo project.",
@@ -336,7 +336,7 @@ fn empty_envelope_keeps_identity_sections_off() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = aura_agent::prompts::agentic_execution_system_prompt(&project, info.as_ref());
+    let prompt = aura_prompts::agentic_execution_system_prompt(&project, info.as_ref(), None);
 
     for tag in [
         "<agent_identity>",

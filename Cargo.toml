@@ -44,6 +44,7 @@ resolver = "2"
 members = [
     "crates/aura-core",
     "crates/aura-config",
+    "crates/aura-prompts",
     "crates/aura-store",
     "crates/aura-tools",
     "crates/aura-compaction",

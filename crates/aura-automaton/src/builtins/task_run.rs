@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use aura_agent::agent_runner::{
     AgentRunner, AgentRunnerConfig, AgenticTaskParams, TaskTrackingConfig,
 };
-use aura_agent::prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
+use aura_prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
 use aura_reasoner::ModelProvider;
 use aura_tools::catalog::{ToolCatalog, ToolProfile};
 use aura_tools::domain_tools::DomainApi;
@@ -93,7 +93,7 @@ struct TaskRunConfig {
     /// Phase 3a (reread-efficiency plan): opt-in switch for the early
     /// "is the test gate already green?" oracle. The state machine
     /// + steering kind live in
-    /// `aura_agent::prompts::steering::EarlyTestOracle`; the field
+    /// `aura_agent::agent_loop::steering::EarlyTestOracle`; the field
     /// here lets the dispatch JSON flip the oracle on/off per task.
     ///
     /// Defaults to `true` for `TaskRun` automatons because every

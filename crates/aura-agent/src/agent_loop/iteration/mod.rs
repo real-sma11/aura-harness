@@ -327,45 +327,21 @@ pub(super) fn handle_max_tokens(
 }
 
 /// Build the synthetic `tool_result` body injected when a tool call is
-/// recovered from a `max_tokens`-truncated stream. Kept as a free
-/// function so tests can pin the exact wording the model sees, and so
-/// the per-tool branches stay readable.
+/// recovered from a `max_tokens`-truncated stream. Wording lives in
+/// [`aura_prompts::model_messages::max_tokens`]; this helper is just
+/// the per-tool dispatcher.
 fn synthetic_truncation_message(pt: &PendingTool) -> String {
+    use aura_prompts::model_messages::max_tokens;
     match pt.name.as_str() {
         "write_file" => match pt.path.as_deref() {
-            Some(path) => format!(
-                "Error: Response was truncated (max_tokens) mid-`write_file`. \
-                 Target path: `{path}`. Partial content (if any) is NOT on disk. \
-                 Next turn: call `edit_file` on `{path}` with `append_after_eof` to add \
-                 remaining content incrementally, or call `write_file` with only the \
-                 skeleton (module-doc + imports + one stub) and switch to `edit_file` \
-                 appends for the rest."
-            ),
-            None => "Error: Response was truncated (max_tokens) mid-`write_file` \
-                 (no target path recovered). Next turn: retry with the skeleton \
-                 (module-doc + imports + one stub) and use `edit_file` \
-                 `append_after_eof` for the rest."
-                .to_string(),
+            Some(path) => max_tokens::write_file_truncation_with_path(path),
+            None => max_tokens::WRITE_FILE_TRUNCATION_NO_PATH.to_string(),
         },
         "edit_file" => match pt.path.as_deref() {
-            Some(path) => format!(
-                "Error: Response was truncated (max_tokens) mid-`edit_file`. \
-                 Target path: `{path}`. No changes were applied on disk. \
-                 Next turn: split the edit into TWO smaller `edit_file` calls \
-                 (e.g. change one function or block at a time) rather than one \
-                 large diff. Your next `max_tokens` budget is restored to full \
-                 for the retry, but each individual tool call should fit in a \
-                 few hundred lines of diff."
-            ),
-            None => "Error: Response was truncated (max_tokens) mid-`edit_file` \
-                 (no target path recovered). Next turn: retry with a smaller, \
-                 targeted edit scoped to a single function or block."
-                .to_string(),
+            Some(path) => max_tokens::edit_file_truncation_with_path(path),
+            None => max_tokens::EDIT_FILE_TRUNCATION_NO_PATH.to_string(),
         },
-        other => format!(
-            "Error: Response was truncated (max_tokens). Tool '{other}' was not executed. \
-             Please try again with a simpler approach or break the task into smaller steps."
-        ),
+        other => max_tokens::generic_tool_truncation(other),
     }
 }
 

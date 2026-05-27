@@ -118,3 +118,45 @@ mod lazy_regex_guard {
         let _ = &*ARG_RE;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Phase 2 of the core-loop architecture refactor migrated these
+    // tests out of the deleted `aura_agent::prompts::fix::tests`
+    // module, where they were lexically co-located with the fix
+    // prompt builder. The behaviour they assert is implemented here
+    // in `parse_error_references`, so the tests now live next to
+    // their target.
+
+    use super::parse_error_references;
+
+    #[test]
+    fn parse_error_references_extracts_methods_and_types() {
+        let stderr = r#"error[E0599]: no method named `foo` found for struct `MyStruct` in the current scope
+  --> src/main.rs:10:5
+error[E0599]: no method named `bar` found for struct `MyStruct` in the current scope
+  --> src/main.rs:15:5"#;
+        let refs = parse_error_references(stderr);
+        assert!(refs.types_referenced.contains(&"MyStruct".to_string()));
+        assert_eq!(refs.methods_not_found.len(), 2);
+        assert_eq!(refs.source_locations.len(), 2);
+    }
+
+    #[test]
+    fn parse_error_references_extracts_missing_fields() {
+        let stderr = r#"error[E0063]: missing field `name` in initializer of `crate::types::User`"#;
+        let refs = parse_error_references(stderr);
+        assert!(refs
+            .missing_fields
+            .iter()
+            .any(|(t, f)| t == "User" && f == "name"));
+    }
+
+    #[test]
+    fn parse_error_references_extracts_wrong_arg_counts() {
+        let stderr = "this function takes 2 arguments but 3 arguments were supplied";
+        let refs = parse_error_references(stderr);
+        assert_eq!(refs.wrong_arg_counts.len(), 1);
+        assert!(refs.wrong_arg_counts[0].contains("expected 2 got 3"));
+    }
+}

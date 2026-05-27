@@ -1,0 +1,28 @@
+[package]
+name = "aura-prompts"
+description = "Render-only prompt construction layer for Aura (Phase 2 boundary crate)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# IMPORTANT — boundary contract (Phase 2 of the core-loop architecture
+# refactor): this crate is render-only. It must NOT depend on
+# `aura-agent`, `aura-automaton`, `aura-runtime`, or `aura-reasoner`.
+# The forbidden-imports test in `tests/no_upstream_imports.rs` re-asserts
+# this at the source level; the actual enforcement is here, in Cargo.
+# Any future PR that tries to add one of those deps will fail to
+# compile.
+[dependencies]
+aura-config = { path = "../aura-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
