@@ -1,6 +1,7 @@
 //! Translation layer between `aura_agent::AgentLoopEvent` and the
-//! crate-local [`AutomatonEvent`]. Lives in its own file so the
-//! large match arm doesn't clutter the `dev_loop` dispatch root.
+//! crate-local [`AutomatonEvent`]. Lives in `builtins/common/` because
+//! `dev_loop`, `task_run`, and `chat` all spawn the same forwarder
+//! pattern from inside their tick.
 //!
 //! # Drop policy (post-E.4 follow-up)
 //!

@@ -9,7 +9,22 @@ use crate::AutomatonError;
 pub struct TickContext {
     pub automaton_id: AutomatonId,
     pub state: AutomatonState,
-    pub event_tx: mpsc::Sender<AutomatonEvent>,
+    /// Outbound automaton event channel. Intentionally private — the
+    /// **only** way to push protocol events from inside a builtin is
+    /// [`Self::emit`], which centralizes the closed-receiver /
+    /// channel-full policy (PROTOCOL events log at `error!`, advisory
+    /// events log at `warn!`, the channel-full case becomes a typed
+    /// `AutomatonError::EventDelivery`). Pre-Phase-6 the field was
+    /// `pub`, and the dev-loop / task-run tick paths reached into it
+    /// directly to spawn the advisory forwarder — easy to confuse
+    /// with the protocol path and easy to bypass the closed-receiver
+    /// logging policy. The Phase-6 invariant is: no caller may push
+    /// an `AutomatonEvent` here without going through [`Self::emit`];
+    /// the one exception is the advisory forwarder spawned by
+    /// [`crate::builtins`], which deliberately keeps its own debounce
+    /// policy and reaches the sender via the explicitly-named
+    /// [`Self::forwarder_sender_clone`] accessor.
+    event_tx: mpsc::Sender<AutomatonEvent>,
     pub config: serde_json::Value,
     pub workspace_root: Option<std::path::PathBuf>,
     shutdown: tokio_util::sync::CancellationToken,
@@ -38,8 +53,8 @@ impl TickContext {
         match self.event_tx.try_send(event) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Closed(event)) => {
-                let kind = event_kind(&event);
-                let is_protocol = is_protocol_event(&event);
+                let kind = event.kind();
+                let is_protocol = event.is_protocol();
                 // Protocol events (`TaskStarted` / `TaskCompleted` /
                 // `TaskFailed` / `TokenUsage` / `LoopFinished` /
                 // `Stopped`) carry runtime-state-machine semantics —
@@ -83,89 +98,43 @@ impl TickContext {
     pub fn cancellation_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown
     }
-}
 
-/// Short string identifying which `AutomatonEvent` variant we're
-/// looking at — used as a grep-friendly `event_kind=...` field on
-/// the closed-receiver warnings emitted by [`TickContext::emit`].
-/// Centralised here so future event variants pick up sensible
-/// defaults via the catch-all arm without touching every log site.
-fn event_kind(event: &AutomatonEvent) -> &'static str {
-    match event {
-        AutomatonEvent::Started { .. } => "started",
-        AutomatonEvent::Stopped { .. } => "stopped",
-        AutomatonEvent::Paused { .. } => "paused",
-        AutomatonEvent::Resumed { .. } => "resumed",
-        AutomatonEvent::Error { .. } => "error",
-        AutomatonEvent::TextDelta { .. } => "text_delta",
-        AutomatonEvent::ThinkingDelta { .. } => "thinking_delta",
-        AutomatonEvent::Progress { .. } => "progress",
-        AutomatonEvent::ToolCallStarted { .. } => "tool_call_started",
-        AutomatonEvent::ToolCallSnapshot { .. } => "tool_call_snapshot",
-        AutomatonEvent::ToolCallCompleted { .. } => "tool_call_completed",
-        AutomatonEvent::ToolResult { .. } => "tool_result",
-        AutomatonEvent::TaskStarted { .. } => "task_started",
-        AutomatonEvent::TaskCompleted { .. } => "task_completed",
-        AutomatonEvent::TaskFailed { .. } => "task_failed",
-        AutomatonEvent::TaskDescriptionRefining { .. } => "task_description_refining",
-        AutomatonEvent::TaskDescriptionRefined { .. } => "task_description_refined",
-        AutomatonEvent::CommitSkipped { .. } => "commit_skipped",
-        AutomatonEvent::ToolCallRetrying { .. } => "tool_call_retrying",
-        AutomatonEvent::ToolCallFailed { .. } => "tool_call_failed",
-        AutomatonEvent::LoopFinished { .. } => "loop_finished",
-        AutomatonEvent::SpecSaved { .. } => "spec_saved",
-        AutomatonEvent::SpecsTitle { .. } => "specs_title",
-        AutomatonEvent::SpecsSummary { .. } => "specs_summary",
-        AutomatonEvent::BuildVerificationStarted => "build_verification_started",
-        AutomatonEvent::BuildVerificationPassed => "build_verification_passed",
-        AutomatonEvent::BuildVerificationFailed { .. } => "build_verification_failed",
-        AutomatonEvent::TestVerificationStarted => "test_verification_started",
-        AutomatonEvent::TestVerificationPassed => "test_verification_passed",
-        AutomatonEvent::TestVerificationFailed { .. } => "test_verification_failed",
-        AutomatonEvent::BuildFixAttempt { .. } => "build_fix_attempt",
-        AutomatonEvent::TestFixAttempt { .. } => "test_fix_attempt",
-        AutomatonEvent::FileOpsApplied { .. } => "file_ops_applied",
-        AutomatonEvent::GitCommitted { .. } => "git_committed",
-        AutomatonEvent::GitCommitFailed { .. } => "git_commit_failed",
-        AutomatonEvent::GitPushed { .. } => "git_pushed",
-        AutomatonEvent::GitPushFailed { .. } => "git_push_failed",
-        AutomatonEvent::SessionRolledOver { .. } => "session_rolled_over",
-        AutomatonEvent::TokenUsage { .. } => "token_usage",
-        AutomatonEvent::MessageSaved { .. } => "message_saved",
-        AutomatonEvent::AgentInstanceUpdated { .. } => "agent_instance_updated",
-        AutomatonEvent::LogLine { .. } => "log_line",
-        AutomatonEvent::Done => "done",
-        AutomatonEvent::DebugLlmCall { .. } => "debug.llm_call",
-        AutomatonEvent::DebugIteration { .. } => "debug.iteration",
-        AutomatonEvent::DebugBlocker { .. } => "debug.blocker",
-        AutomatonEvent::DebugRetry { .. } => "debug.retry",
+    /// Clone the outbound sender for the **advisory** forwarder path
+    /// (`crate::builtins::common::forward_event::spawn_agent_event_forwarder`).
+    ///
+    /// This is the **only** sanctioned way for a builtin to obtain a
+    /// raw `Sender<AutomatonEvent>`. Protocol events must always go
+    /// through [`Self::emit`]; bypassing this method to push
+    /// `Started` / `TaskCompleted` / `Stopped` from a builtin will
+    /// silently swallow closed-receiver telemetry that the
+    /// `emit`-based logging policy is meant to surface.
+    ///
+    /// The explicit name keeps the call site self-documenting (a
+    /// `grep forwarder_sender_clone` is a tight audit of every
+    /// advisory-channel consumer in the workspace).
+    pub(crate) fn forwarder_sender_clone(&self) -> mpsc::Sender<AutomatonEvent> {
+        self.event_tx.clone()
     }
-}
 
-/// Protocol events carry runtime-state-machine semantics that
-/// downstream observers (the aura-os-server DoD gate, operator UIs,
-/// run-log forwarders) reconstruct task outcomes from. Silently
-/// dropping one means a completed/failed task never reaches the
-/// observer — exactly the symptom observed in production logs. The
-/// list intentionally mirrors the events emitted directly via
-/// `TickContext::emit` in `aura-automaton/src/builtins/dev_loop/tick.rs`
-/// and `aura-automaton/src/builtins/task_run.rs`; advisory streaming
-/// events (`TextDelta`, `ThinkingDelta`, `ToolCallSnapshot`, …) flow
-/// through the `forward_event` debounce path instead.
-fn is_protocol_event(event: &AutomatonEvent) -> bool {
-    matches!(
-        event,
-        AutomatonEvent::Started { .. }
-            | AutomatonEvent::Stopped { .. }
-            | AutomatonEvent::Error { .. }
-            | AutomatonEvent::TaskStarted { .. }
-            | AutomatonEvent::TaskCompleted { .. }
-            | AutomatonEvent::TaskFailed { .. }
-            | AutomatonEvent::CommitSkipped { .. }
-            | AutomatonEvent::LoopFinished { .. }
-            | AutomatonEvent::TokenUsage { .. }
-            | AutomatonEvent::Done
-    )
+    /// Borrow the outbound sender for the (small) set of in-crate
+    /// helpers that need a `&Sender<AutomatonEvent>` for best-effort
+    /// emits (currently
+    /// [`crate::builtins::task_refinement::refine_task_description`]).
+    /// Same audit-trail rationale as [`Self::forwarder_sender_clone`].
+    pub(crate) fn event_sender(&self) -> &mpsc::Sender<AutomatonEvent> {
+        &self.event_tx
+    }
+
+    /// Workspace-root override as a `String`, with the
+    /// empty-string trim already applied. Returns `None` when no
+    /// override was installed at automaton start so the caller can
+    /// fall back to the project's persisted folder path.
+    pub(crate) fn workspace_root_str(&self) -> Option<String> {
+        self.workspace_root
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 //! triggers a compile / test failure rather than a silent
 //! cross-repo break.
 
-use super::{
+use crate::builtins::common::{
     forward_agent_event, spawn_agent_event_forwarder, AgentIdentityEnvelope, ForwardOutcome,
 };
 use crate::events::AutomatonEvent;

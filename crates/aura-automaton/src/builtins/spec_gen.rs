@@ -70,7 +70,7 @@ Output your response as a JSON array where each element has:
 
 Output ONLY the JSON array, no other text."#;
 
-use aura_config::SPEC_GEN_MAX_TOKENS as MAX_TOKENS;
+use super::common::{run_auxiliary_model_call, AuxiliaryModelCall};
 
 #[async_trait::async_trait]
 impl Automaton for SpecGenAutomaton {
@@ -171,17 +171,17 @@ impl SpecGenAutomaton {
             })?
             .to_string();
 
-        let request = aura_reasoner::ModelRequest::builder(&model, SPEC_GENERATION_SYSTEM_PROMPT)
-            .messages(vec![aura_reasoner::Message::user(requirements)])
-            .max_tokens(MAX_TOKENS)
-            .try_build()
-            .map_err(|e| {
-                AutomatonError::agent_execution(None, aura_agent::AgentError::Reason(e))
-            })?;
-
-        let response = self.provider.complete(request).await.map_err(|e| {
-            AutomatonError::agent_execution(None, aura_agent::AgentError::Reason(e))
-        })?;
+        let response = run_auxiliary_model_call(
+            self.provider.as_ref(),
+            AuxiliaryModelCall {
+                model: &model,
+                system_prompt: SPEC_GENERATION_SYSTEM_PROMPT,
+                user_body: requirements.to_string(),
+                max_tokens: aura_config::agent().automaton.spec_gen_max_tokens,
+                task_scope: None,
+            },
+        )
+        .await?;
 
         ctx.emit(AutomatonEvent::TokenUsage {
             task_id: None,

@@ -55,7 +55,6 @@ pub enum TickOutcome {
 struct RunningAutomaton {
     info: AutomatonInfo,
     cancel: CancellationToken,
-    event_tx: mpsc::Sender<AutomatonEvent>,
 }
 
 /// Manages the lifecycle of [`Automaton`] instances (install, run, stop, list).
@@ -98,7 +97,6 @@ impl AutomatonRuntime {
         let running = RunningAutomaton {
             info,
             cancel: cancel.clone(),
-            event_tx: event_tx.clone(),
         };
 
         self.instances.insert(id.as_str().to_string(), running);
@@ -259,18 +257,6 @@ impl AutomatonRuntime {
     pub fn stop(&self, id: &str) -> Result<(), AutomatonError> {
         if let Some(entry) = self.instances.get(id) {
             entry.value().cancel.cancel();
-            Ok(())
-        } else {
-            Err(AutomatonError::NotFound(id.to_string()))
-        }
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn trigger(&self, id: &str, payload: serde_json::Value) -> Result<(), AutomatonError> {
-        if let Some(entry) = self.instances.get(id) {
-            let _ = entry.value().event_tx.try_send(AutomatonEvent::LogLine {
-                message: format!("trigger: {payload}"),
-            });
             Ok(())
         } else {
             Err(AutomatonError::NotFound(id.to_string()))

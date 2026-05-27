@@ -320,6 +320,104 @@ pub enum AutomatonEvent {
     },
 }
 
+impl AutomatonEvent {
+    /// Short, stable string identifying the variant. Used as the
+    /// `event_kind=...` field on the closed-receiver telemetry emitted
+    /// by [`crate::TickContext::emit`] and as the discriminator any
+    /// out-of-crate consumer (run-log forwarder, operator UI badge,
+    /// `/stream/automaton/:id` WS) needs without round-tripping the
+    /// JSON tag.
+    ///
+    /// Pre-Phase-6 this lived as a free function next to the emit-side
+    /// telemetry and was hand-maintained — every new variant required
+    /// editing both the enum definition and the mirror, and the
+    /// `match` was easy to forget. The inherent method is part of the
+    /// enum's surface so the compiler enforces exhaustiveness.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Started { .. } => "started",
+            Self::Stopped { .. } => "stopped",
+            Self::Paused { .. } => "paused",
+            Self::Resumed { .. } => "resumed",
+            Self::Error { .. } => "error",
+            Self::TextDelta { .. } => "text_delta",
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::Progress { .. } => "progress",
+            Self::ToolCallStarted { .. } => "tool_call_started",
+            Self::ToolCallSnapshot { .. } => "tool_call_snapshot",
+            Self::ToolCallCompleted { .. } => "tool_call_completed",
+            Self::ToolResult { .. } => "tool_result",
+            Self::TaskStarted { .. } => "task_started",
+            Self::TaskCompleted { .. } => "task_completed",
+            Self::TaskFailed { .. } => "task_failed",
+            Self::TaskDescriptionRefining { .. } => "task_description_refining",
+            Self::TaskDescriptionRefined { .. } => "task_description_refined",
+            Self::CommitSkipped { .. } => "commit_skipped",
+            Self::ToolCallRetrying { .. } => "tool_call_retrying",
+            Self::ToolCallFailed { .. } => "tool_call_failed",
+            Self::LoopFinished { .. } => "loop_finished",
+            Self::SpecSaved { .. } => "spec_saved",
+            Self::SpecsTitle { .. } => "specs_title",
+            Self::SpecsSummary { .. } => "specs_summary",
+            Self::BuildVerificationStarted => "build_verification_started",
+            Self::BuildVerificationPassed => "build_verification_passed",
+            Self::BuildVerificationFailed { .. } => "build_verification_failed",
+            Self::TestVerificationStarted => "test_verification_started",
+            Self::TestVerificationPassed => "test_verification_passed",
+            Self::TestVerificationFailed { .. } => "test_verification_failed",
+            Self::BuildFixAttempt { .. } => "build_fix_attempt",
+            Self::TestFixAttempt { .. } => "test_fix_attempt",
+            Self::FileOpsApplied { .. } => "file_ops_applied",
+            Self::GitCommitted { .. } => "git_committed",
+            Self::GitCommitFailed { .. } => "git_commit_failed",
+            Self::GitPushed { .. } => "git_pushed",
+            Self::GitPushFailed { .. } => "git_push_failed",
+            Self::SessionRolledOver { .. } => "session_rolled_over",
+            Self::TokenUsage { .. } => "token_usage",
+            Self::MessageSaved { .. } => "message_saved",
+            Self::AgentInstanceUpdated { .. } => "agent_instance_updated",
+            Self::LogLine { .. } => "log_line",
+            Self::Done => "done",
+            Self::DebugLlmCall { .. } => "debug.llm_call",
+            Self::DebugIteration { .. } => "debug.iteration",
+            Self::DebugBlocker { .. } => "debug.blocker",
+            Self::DebugRetry { .. } => "debug.retry",
+        }
+    }
+
+    /// `true` when the variant carries runtime-state-machine semantics
+    /// that downstream observers (aura-os-server's DoD gate, the
+    /// operator UI badge, the run-log forwarder) reconstruct task
+    /// outcomes from. Used by [`crate::TickContext::emit`] to elevate
+    /// closed-receiver logging to `error!` for these so a silently
+    /// dropped `TaskCompleted` no longer manifests as the
+    /// "tasks completed but UI never sees them" production symptom.
+    ///
+    /// Advisory streaming events (`TextDelta`, `ThinkingDelta`,
+    /// `ToolCallSnapshot`, …) flow through the
+    /// `crate::builtins::common::forward_event` debounce path instead
+    /// and stay at `warn!`. The list intentionally mirrors the events
+    /// emitted directly via `TickContext::emit` in
+    /// `crate::builtins::dev_loop::tick` and `crate::builtins::task_run`.
+    #[must_use]
+    pub const fn is_protocol(&self) -> bool {
+        matches!(
+            self,
+            Self::Started { .. }
+                | Self::Stopped { .. }
+                | Self::Error { .. }
+                | Self::TaskStarted { .. }
+                | Self::TaskCompleted { .. }
+                | Self::TaskFailed { .. }
+                | Self::CommitSkipped { .. }
+                | Self::LoopFinished { .. }
+                | Self::TokenUsage { .. }
+                | Self::Done
+        )
+    }
+}
+
 impl From<aura_agent::DebugEvent> for AutomatonEvent {
     fn from(ev: aura_agent::DebugEvent) -> Self {
         match ev {

@@ -203,12 +203,15 @@ impl ChatAutomaton {
         };
 
         // Chat shares the dev-loop / task-run advisory drain pattern;
-        // see `dev_loop::forward_event` for the post-E.4 drop policy
+        // see `common::forward_event` for the post-E.4 drop policy
         // that keeps the high-cadence streaming-pump events from
         // flooding the operator log.
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-        let _forwarder =
-            super::dev_loop::spawn_agent_event_forwarder(ctx.event_tx.clone(), event_rx, None);
+        let _forwarder = super::common::spawn_agent_event_forwarder(
+            ctx.forwarder_sender_clone(),
+            event_rx,
+            None,
+        );
 
         let cancel = ctx.cancellation_token().clone();
         let executor = NoOpExecutor;

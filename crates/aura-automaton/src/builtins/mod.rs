@@ -1,4 +1,5 @@
 mod chat;
+mod common;
 pub mod dev_loop;
 mod noop_executor;
 mod spec_gen;

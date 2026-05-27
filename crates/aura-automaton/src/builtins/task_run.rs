@@ -8,21 +8,25 @@
 //! no `TaskAggregate` / `commit_and_push` (no end-of-task git), no
 //! `validate_execution` wrapper, no `extract_shell_command` shortcut
 //! for `run:` / `shell:` titled tasks, no `prior_failure` / `work_log`
-//! retry warm-up plumbing. PR C re-introduces `AgentIdentityEnvelope`.
+//! retry warm-up plumbing. Phase 6 hard-fails on a missing `model`
+//! field in the dispatch JSON (parity with `dev_loop` and
+//! `spec_gen`), shares the
+//! [`super::common::run_tracked_task`] handoff with `dev_loop`, and
+//! routes the success / failure / cancel transitions through
+//! [`super::common::finalize_task_outcome`].
 
 use std::sync::Arc;
 
-use tracing::{error, info, warn};
+use tracing::warn;
 
-use aura_agent::agent_runner::{
-    AgentRunner, AgentRunnerConfig, AgenticTaskParams, TaskTrackingConfig,
-};
-use aura_prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
+use aura_agent::agent_runner::{AgentRunner, AgentRunnerConfig};
 use aura_reasoner::ModelProvider;
-use aura_tools::catalog::{ToolCatalog, ToolProfile};
+use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;
 
-use super::noop_executor::NoOpExecutor;
+use super::common::{
+    finalize_task_outcome, run_tracked_task, AgentIdentityEnvelope, TaskExecutionRequest,
+};
 use crate::context::TickContext;
 use crate::error::AutomatonError;
 use crate::events::AutomatonEvent;
@@ -75,21 +79,21 @@ struct TaskRunConfig {
     task_id: String,
     #[allow(dead_code)]
     agent_instance_id: String,
-    /// Model identifier from the dispatch JSON. Mirrors the dev-loop
-    /// path, which extracts the model from its own `from_json` so
-    /// pre-implementation task refinement can issue a typed
-    /// `ModelRequest` without reaching into `AgentRunner` internals.
-    /// Optional here (defaults to empty) because pre-refinement
-    /// rollouts of the single-task path may install a `TaskRunAutomaton`
-    /// without populating the field; an empty model deliberately
-    /// short-circuits refinement (the helper logs and falls back to
-    /// the original description) rather than failing the tick.
+    /// Model identifier from the dispatch JSON. Mirrors the
+    /// `dev_loop` / `spec_gen` policy: a missing or blank `model`
+    /// field is a typed `InvalidConfig` failure rather than a silent
+    /// fall-through. Pre-Phase-6 this field accepted an empty string
+    /// and downstream refinement saw `""` — the same routing
+    /// regression where the `claude-opus-4-7` selection got swapped
+    /// for `claude-opus-4-6` because the omission was silent. Phase 6
+    /// aligns all three automatons on the hard-fail policy.
     model: String,
     /// Identity envelope parsed off the dispatch JSON. Reuses the
-    /// `AgentIdentityEnvelope` from `dev_loop` so the two automatons
-    /// share a single parser + render pathway. Stays empty
-    /// (`is_empty == true`) until the aura-os populator lands.
-    agent_identity: super::dev_loop::AgentIdentityEnvelope,
+    /// `AgentIdentityEnvelope` from `crate::builtins::common::config`
+    /// so the two automatons share a single parser + render pathway.
+    /// Stays empty (`is_empty == true`) until the aura-os populator
+    /// lands.
+    agent_identity: AgentIdentityEnvelope,
     /// Phase 3a (reread-efficiency plan): opt-in switch for the early
     /// "is the test gate already green?" oracle. The state machine
     /// and steering kind live in
@@ -128,14 +132,21 @@ impl TaskRunConfig {
             .and_then(|v| v.as_str())
             .unwrap_or("default")
             .to_string();
+        // Phase 6: align with `dev_loop` / `spec_gen` — hard-fail on
+        // a missing model identifier instead of silently propagating
+        // `""` into the refinement call.
         let model = config
             .get("model")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or_default()
+            .ok_or_else(|| {
+                AutomatonError::InvalidConfig(
+                    "missing model — task-run requires an explicit model identifier in the start request".into(),
+                )
+            })?
             .to_string();
-        let agent_identity = super::dev_loop::AgentIdentityEnvelope::from_json(config);
+        let agent_identity = AgentIdentityEnvelope::from_json(config);
         let early_test_oracle = config
             .get("early_test_oracle")
             .and_then(serde_json::Value::as_bool)
@@ -188,7 +199,8 @@ impl Automaton for TaskRunAutomaton {
         let result = self
             .run_agentic_task(ctx, &cfg, &project, &spec, &task)
             .await;
-        self.finalize_task(ctx, &task.id, result).await
+        let _outcome = finalize_task_outcome(ctx, self.domain.as_ref(), &task, result).await?;
+        Ok(TickOutcome::Done)
     }
 }
 
@@ -243,171 +255,28 @@ impl TaskRunAutomaton {
             &cfg.model,
             spec,
             task,
-            Some(&ctx.event_tx),
+            Some(ctx.event_sender()),
         )
         .await?;
 
-        let effective_path = ctx
-            .workspace_root
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| project.path.clone());
-
-        let project_info = ProjectInfo {
-            project_id: None,
-            name: &project.name,
-            description: project.description.as_deref().unwrap_or(""),
-            folder_path: &effective_path,
-            build_command: project.build_command.as_deref(),
-            test_command: project.test_command.as_deref(),
-        };
-        let spec_info = SpecInfo {
-            title: &spec.title,
-            markdown_contents: &spec.content,
-        };
-        let task_info = TaskInfo {
-            title: &task_owned.title,
-            description: &task_owned.description,
-            execution_notes: "",
-            files_changed: &[],
-        };
-        let session_info = SessionInfo {
-            summary_of_previous_context: "",
-        };
-        let tools = self.catalog.tools_for_profile(ToolProfile::Engine);
-
-        // Borrow the parsed identity envelope (if any) as a transient
-        // `AgentInfo<'_>` so `SystemPromptBuilder` renders the
-        // `<agent_identity>` / `<agent_skills>` / `<agent_system_prompt>`
-        // sections. `as_agent_info()` returns `None` whenever the
-        // wire fields are absent / blank.
-        let agent_info = cfg.agent_identity.as_agent_info();
-
-        let params = AgenticTaskParams {
-            project: &project_info,
-            spec: &spec_info,
-            task: &task_info,
-            session: &session_info,
-            work_log: &[],
-            completed_deps: &[],
-            workspace_map: "",
-            codebase_snapshot: "",
-            type_defs_context: "",
-            dep_api_context: "",
-            member_count: 1,
-            tools,
-            attempt: 0,
-            agent: agent_info.as_ref(),
-        };
-
-        // Advisory drain: same pattern as `dev_loop::tick::execute_task`
-        // and `chat::run_chat_loop`. See `dev_loop::forward_event` for
-        // the post-E.4 drop policy that keeps the high-cadence
-        // streaming-pump events from flooding the operator log.
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-        let _forwarder = super::dev_loop::spawn_agent_event_forwarder(
-            ctx.event_tx.clone(),
-            event_rx,
-            Some(task_owned.id.clone()),
-        );
-
-        let cancel = ctx.cancellation_token().clone();
-        let inner_executor: Arc<dyn aura_agent::types::AgentToolExecutor> = self
-            .tool_executor
-            .clone()
-            .unwrap_or_else(|| Arc::new(NoOpExecutor));
-
-        let tracking = TaskTrackingConfig {
-            inner_executor,
-            project_folder: effective_path.clone(),
-            build_command: project.build_command.clone(),
-            test_command: project.test_command.clone(),
+        run_tracked_task(TaskExecutionRequest {
+            ctx,
+            runner: &self.runner,
+            provider: self.provider.as_ref(),
+            catalog: self.catalog.as_ref(),
+            task: &task_owned,
+            spec,
+            project,
+            identity: &cfg.agent_identity,
+            tool_executor: self.tool_executor.clone(),
             // Phase 5: forward the per-task switch parsed off the
             // dispatch JSON so the agent loop installs the
             // `EarlyTestOracle` source into the per-run
             // `SteeringRegistry`.
             early_test_oracle: Some(cfg.early_test_oracle),
-        };
-
-        self.runner
-            .execute_task_tracked(
-                self.provider.as_ref(),
-                tracking,
-                &params,
-                Some(event_tx),
-                Some(cancel),
-            )
-            .await
-            .map_err(|e| AutomatonError::agent_execution(Some(cfg.task_id.clone()), e))
-    }
-
-    async fn finalize_task(
-        &self,
-        ctx: &mut TickContext,
-        task_id: &str,
-        result: Result<aura_agent::agent_runner::TaskExecutionResult, AutomatonError>,
-    ) -> Result<TickOutcome, AutomatonError> {
-        // User-initiated stop fires the shared cancellation token. The agent
-        // loop unwinds with either an empty `Ok(TaskExecutionResult)` or an
-        // `Err(AgentExecution(...))` carrying the cancelled-stream message.
-        // Either way it is NOT a task failure: report it cleanly so the audit
-        // trail shows "cancelled by stop" instead of "task execution failed"
-        // and skip transitioning the task to `failed` (rolling back to
-        // `ready` mirrors the dev-loop behaviour and leaves the task in a
-        // state the next run can pick up).
-        if ctx.is_cancelled() {
-            info!(
-                automaton_id = %ctx.automaton_id,
-                task_id,
-                "Task run cancelled by user stop"
-            );
-            if let Err(te) = self.domain.transition_task(task_id, "ready", None).await {
-                warn!(
-                    task_id,
-                    error = %te,
-                    "Failed to roll cancelled task back to ready"
-                );
-            }
-            ctx.emit(AutomatonEvent::LogLine {
-                message: format!("Task {task_id} cancelled by stop request"),
-            })?;
-            return Ok(TickOutcome::Done);
-        }
-
-        match result {
-            Ok(exec) => {
-                if let Err(e) = self.domain.transition_task(task_id, "done", None).await {
-                    warn!(task_id, error = %e, "Failed to transition task to done");
-                }
-
-                info!(task_id, notes = %exec.notes, "task completed");
-
-                ctx.emit(AutomatonEvent::TaskCompleted {
-                    task_id: task_id.to_string(),
-                    summary: exec.notes,
-                })?;
-                ctx.emit(AutomatonEvent::TokenUsage {
-                    task_id: Some(task_id.to_string()),
-                    input_tokens: exec.input_tokens,
-                    output_tokens: exec.output_tokens,
-                })?;
-            }
-            Err(e) => {
-                error!(task_id, error = %e, "task execution failed");
-
-                if let Err(te) = self.domain.transition_task(task_id, "failed", None).await {
-                    warn!(task_id, error = %te, "Failed to transition task to failed");
-                }
-
-                ctx.emit(AutomatonEvent::TaskFailed {
-                    task_id: task_id.to_string(),
-                    reason: e.to_string(),
-                })?;
-            }
-        }
-
-        Ok(TickOutcome::Done)
+            build_retry_note: None,
+        })
+        .await
     }
 }
 
@@ -421,11 +290,13 @@ mod tests {
         let cfg = TaskRunConfig::from_json(&json!({
             "project_id": "proj-1",
             "task_id": "task-1",
+            "model": "claude-opus-4-7",
         }))
         .expect("parse minimal config");
         assert_eq!(cfg.project_id, "proj-1");
         assert_eq!(cfg.task_id, "task-1");
         assert_eq!(cfg.agent_instance_id, "default");
+        assert_eq!(cfg.model, "claude-opus-4-7");
     }
 
     #[test]
@@ -434,6 +305,7 @@ mod tests {
             "project_id": "proj-1",
             "task_id": "task-1",
             "agent_instance_id": "inst-7",
+            "model": "claude-opus-4-7",
         }))
         .expect("parse with explicit instance id");
         assert_eq!(cfg.agent_instance_id, "inst-7");
@@ -441,16 +313,54 @@ mod tests {
 
     #[test]
     fn from_json_missing_project_id_errors() {
-        let err =
-            TaskRunConfig::from_json(&json!({ "task_id": "task-1" })).expect_err("missing field");
+        let err = TaskRunConfig::from_json(&json!({
+            "task_id": "task-1",
+            "model": "claude-opus-4-7",
+        }))
+        .expect_err("missing field");
         assert!(err.to_string().to_lowercase().contains("project_id"));
     }
 
     #[test]
     fn from_json_missing_task_id_errors() {
-        let err = TaskRunConfig::from_json(&json!({ "project_id": "proj-1" }))
-            .expect_err("missing field");
+        let err = TaskRunConfig::from_json(&json!({
+            "project_id": "proj-1",
+            "model": "claude-opus-4-7",
+        }))
+        .expect_err("missing field");
         assert!(err.to_string().to_lowercase().contains("task_id"));
+    }
+
+    /// Phase 6 model-required policy: align task-run with dev_loop /
+    /// spec_gen. Pre-Phase-6 the field defaulted to `""` and the
+    /// refinement call silently fell through with an empty model
+    /// string — the same root-cause shape as the
+    /// `claude-opus-4-7` → `claude-opus-4-6` regression. The
+    /// hard-fail surfaces the configuration gap up front instead of
+    /// burning provider budget on a half-configured run.
+    #[test]
+    fn from_json_missing_model_errors() {
+        let err = TaskRunConfig::from_json(&json!({
+            "project_id": "proj-1",
+            "task_id": "task-1",
+        }))
+        .expect_err("missing model must error");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("model"),
+            "error must mention the missing model field, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_json_blank_model_errors() {
+        let err = TaskRunConfig::from_json(&json!({
+            "project_id": "proj-1",
+            "task_id": "task-1",
+            "model": "   ",
+        }))
+        .expect_err("blank model must error");
+        assert!(err.to_string().to_lowercase().contains("model"));
     }
 
     #[test]
@@ -458,6 +368,7 @@ mod tests {
         let cfg = TaskRunConfig::from_json(&json!({
             "project_id": "proj-1",
             "task_id": "task-1",
+            "model": "claude-opus-4-7",
         }))
         .expect("parse minimal config");
         assert!(
@@ -471,6 +382,7 @@ mod tests {
         let cfg = TaskRunConfig::from_json(&json!({
             "project_id": "proj-1",
             "task_id": "task-1",
+            "model": "claude-opus-4-7",
             "early_test_oracle": false,
         }))
         .expect("parse with explicit oracle override");

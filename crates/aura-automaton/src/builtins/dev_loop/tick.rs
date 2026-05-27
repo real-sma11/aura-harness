@@ -1,12 +1,17 @@
 //! Per-tick orchestration for [`super::DevLoopAutomaton`].
 //!
 //! Lifecycle:
-//! - `on_install` emits a `LogLine` so operators can see the loop started.
+//! - `on_install` parses the start-request JSON exactly once (see
+//!   [`super::DevLoopAutomaton::parsed_config`]) and emits a `LogLine`
+//!   so operators can see the loop started. Subsequent ticks read the
+//!   stashed [`DevLoopConfig`] instead of reparsing JSON.
 //! - First `tick` initializes the queue: list tasks -> drop `done` ->
-//!   sort by `order` -> store in `STATE_TASK_QUEUE`.
+//!   sort by `order` -> stash via the typed
+//!   [`DevLoopState`] blob.
 //! - Subsequent ticks pop one task, transition it to `in_progress`,
-//!   execute through `AgentRunner::execute_task_tracked`, then record
-//!   success or failure (transition + counter + event).
+//!   hand off to [`super::super::common::run_tracked_task`], then
+//!   record success or failure through
+//!   [`super::super::common::finalize_task_outcome`].
 //! - `on_stop` emits `LoopFinished` if the loop did not already finish
 //!   naturally.
 //!
@@ -23,25 +28,53 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use aura_agent::agent_runner::{AgenticTaskParams, TaskExecutionResult, TaskTrackingConfig};
 use aura_agent::run_project_build_check;
-use aura_prompts::{ProjectInfo, SessionInfo, SpecInfo, TaskInfo};
-use aura_tools::catalog::ToolProfile;
 use aura_tools::domain_tools::TaskDescriptor;
 
-use super::forward_event::spawn_agent_event_forwarder;
-use super::{
-    DevLoopAutomaton, DevLoopConfig, STATE_COMPLETED_COUNT, STATE_FAILED_COUNT, STATE_INITIALIZED,
-    STATE_LOOP_FINISHED, STATE_TASK_QUEUE,
+use super::DevLoopAutomaton;
+use crate::builtins::common::config::SharedDevLoopConfig;
+use crate::builtins::common::{
+    finalize_task_outcome, run_tracked_task, DevLoopConfig, TaskExecutionRequest, TaskOutcome,
 };
-use crate::builtins::noop_executor::NoOpExecutor;
 use crate::context::TickContext;
 use crate::error::AutomatonError;
 use crate::events::AutomatonEvent;
 use crate::runtime::{Automaton, TickOutcome};
 use crate::schedule::Schedule;
+
+/// Single blob holding all per-tick scratch state. Replaces the
+/// pre-Phase-6 set of magic-string `AutomatonState` keys
+/// (`"initialized"` / `"task_queue"` / `"completed_count"` /
+/// `"failed_count"` / `"loop_finished"`). One struct, one source of
+/// truth, one serde error path. The compiler now enforces the field
+/// set instead of relying on every reader to spell the same key
+/// string the writer used.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct DevLoopState {
+    initialized: bool,
+    task_queue: Vec<String>,
+    completed_count: u32,
+    failed_count: u32,
+    loop_finished: bool,
+}
+
+/// Magic-string key the typed [`DevLoopState`] is serialized under.
+/// The single private constant exists so a future rename only has to
+/// happen here; nothing outside this module references it.
+const DEV_LOOP_STATE_KEY: &str = "dev_loop_state";
+
+impl DevLoopState {
+    fn load(ctx: &TickContext) -> Self {
+        ctx.state.get(DEV_LOOP_STATE_KEY).unwrap_or_default()
+    }
+
+    fn save(&self, ctx: &mut TickContext) -> Result<(), AutomatonError> {
+        ctx.state.set(DEV_LOOP_STATE_KEY, self)
+    }
+}
 
 #[async_trait::async_trait]
 impl Automaton for DevLoopAutomaton {
@@ -54,7 +87,7 @@ impl Automaton for DevLoopAutomaton {
     }
 
     async fn on_install(&self, ctx: &TickContext) -> Result<(), AutomatonError> {
-        let cfg = DevLoopConfig::from_json(&ctx.config)?;
+        let cfg = self.parse_or_get_config(ctx)?;
         info!(project_id = %cfg.project_id, "Dev loop automaton installed");
         ctx.emit(AutomatonEvent::LogLine {
             message: format!("dev loop starting for project {}", cfg.project_id),
@@ -67,25 +100,23 @@ impl Automaton for DevLoopAutomaton {
             return Ok(TickOutcome::Done);
         }
 
-        let cfg = DevLoopConfig::from_json(&ctx.config)?;
-        let initialized: bool = ctx.state.get(STATE_INITIALIZED).unwrap_or(false);
+        let cfg = self.parse_or_get_config(ctx)?;
+        let mut state = DevLoopState::load(ctx);
 
-        if !initialized {
-            return self.initialize_queue(ctx, &cfg).await;
+        if !state.initialized {
+            return self.initialize_queue(ctx, &cfg, &mut state).await;
         }
 
-        self.process_next_task(ctx, &cfg).await
+        self.process_next_task(ctx, &cfg, &mut state).await
     }
 
     async fn on_stop(&self, ctx: &TickContext) -> Result<(), AutomatonError> {
-        let already_finished: bool = ctx.state.get(STATE_LOOP_FINISHED).unwrap_or(false);
-        if !already_finished {
-            let completed: u32 = ctx.state.get(STATE_COMPLETED_COUNT).unwrap_or(0);
-            let failed: u32 = ctx.state.get(STATE_FAILED_COUNT).unwrap_or(0);
+        let state = DevLoopState::load(ctx);
+        if !state.loop_finished {
             ctx.emit(AutomatonEvent::LoopFinished {
                 outcome: "stopped".into(),
-                completed_count: completed,
-                failed_count: failed,
+                completed_count: state.completed_count,
+                failed_count: state.failed_count,
             })?;
         }
         Ok(())
@@ -93,10 +124,33 @@ impl Automaton for DevLoopAutomaton {
 }
 
 impl DevLoopAutomaton {
+    /// Parse the start-request JSON exactly once and stash the typed
+    /// `DevLoopConfig` on the automaton struct. Subsequent calls
+    /// return the same `Arc` without re-touching the JSON. Errors on
+    /// the first parse (missing model, missing project_id) propagate
+    /// out of `on_install`; subsequent ticks observe the
+    /// successfully-stashed config.
+    fn parse_or_get_config(
+        &self,
+        ctx: &TickContext,
+    ) -> Result<SharedDevLoopConfig, AutomatonError> {
+        if let Some(cfg) = self.parsed_config.get() {
+            return Ok(cfg.clone());
+        }
+        let parsed = DevLoopConfig::from_json(&ctx.config)?;
+        let cfg: SharedDevLoopConfig = Arc::new(parsed);
+        // `OnceLock::set` only returns Err if another thread won the
+        // race; if so, just use the value the winner installed —
+        // both are derived from the same JSON.
+        let _ = self.parsed_config.set(cfg.clone());
+        Ok(self.parsed_config.get().cloned().unwrap_or(cfg))
+    }
+
     async fn initialize_queue(
         &self,
         ctx: &mut TickContext,
         cfg: &DevLoopConfig,
+        state: &mut DevLoopState,
     ) -> Result<TickOutcome, AutomatonError> {
         if self.tool_executor.is_none() {
             return Err(AutomatonError::InvalidConfig(
@@ -113,7 +167,7 @@ impl DevLoopAutomaton {
 
         if tasks.is_empty() {
             info!("No tasks found for project, finishing");
-            return self.finish(ctx);
+            return self.finish(ctx, state);
         }
 
         tasks.retain(|t| t.status != "done");
@@ -123,10 +177,11 @@ impl DevLoopAutomaton {
         info!(remaining = queue.len(), "Task queue initialized");
 
         let pending = queue.len();
-        ctx.state.set(STATE_TASK_QUEUE, &queue)?;
-        ctx.state.set(STATE_INITIALIZED, &true)?;
-        ctx.state.set(STATE_COMPLETED_COUNT, &0u32)?;
-        ctx.state.set(STATE_FAILED_COUNT, &0u32)?;
+        state.task_queue = queue;
+        state.initialized = true;
+        state.completed_count = 0;
+        state.failed_count = 0;
+        state.save(ctx)?;
 
         ctx.emit(AutomatonEvent::LogLine {
             message: format!("Dev loop ready: {pending} tasks to execute"),
@@ -139,16 +194,15 @@ impl DevLoopAutomaton {
         &self,
         ctx: &mut TickContext,
         cfg: &DevLoopConfig,
+        state: &mut DevLoopState,
     ) -> Result<TickOutcome, AutomatonError> {
-        let mut queue: Vec<String> = ctx.state.get(STATE_TASK_QUEUE).unwrap_or_default();
-
-        if queue.is_empty() {
+        if state.task_queue.is_empty() {
             info!("Task queue empty, finishing loop");
-            return self.finish(ctx);
+            return self.finish(ctx, state);
         }
 
-        let task_id = queue.remove(0);
-        ctx.state.set(STATE_TASK_QUEUE, &queue)?;
+        let task_id = state.task_queue.remove(0);
+        state.save(ctx)?;
 
         let project = self
             .domain
@@ -180,113 +234,29 @@ impl DevLoopAutomaton {
         })?;
 
         let result = self
-            .execute_task_with_build_retry(ctx, cfg, &task, &project.build_command)
+            .execute_task_with_build_retry(ctx, cfg, &project, &task)
             .await;
 
-        // User-initiated stop fires the shared cancellation token, which the
-        // agent loop honours by returning an early `Ok(TaskExecutionResult)`.
-        // Roll the task back to `ready` instead of marking it `done` or
-        // `failed` so the next dev loop start can pick it up.
-        if ctx.is_cancelled() {
-            return self
-                .record_task_cancelled(ctx, &task)
-                .await
-                .map(|()| TickOutcome::Done);
-        }
+        let outcome = finalize_task_outcome(ctx, self.domain.as_ref(), &task, result).await?;
 
-        match result {
-            Ok(exec) => {
-                self.record_task_success(ctx, &task, exec).await?;
+        match outcome {
+            TaskOutcome::Cancelled => {
+                // User-initiated stop — the finalizer rolled the task
+                // back to `ready` and emitted the `LogLine`. Leave
+                // counters untouched and exit the loop cleanly.
+                Ok(TickOutcome::Done)
             }
-            Err(e) => {
-                self.record_task_failure(ctx, &task, e).await?;
-                return self.finish_failed(ctx);
+            TaskOutcome::Success => {
+                state.completed_count = state.completed_count.saturating_add(1);
+                state.save(ctx)?;
+                Ok(TickOutcome::Continue)
+            }
+            TaskOutcome::Failure => {
+                state.failed_count = state.failed_count.saturating_add(1);
+                state.save(ctx)?;
+                self.finish_failed(ctx, state)
             }
         }
-
-        Ok(TickOutcome::Continue)
-    }
-
-    /// Mid-task cancellation handler.
-    ///
-    /// Called when the operator triggers a stop while a task is in flight.
-    /// Distinguishes intentional cancellation from genuine failure: logs at
-    /// `INFO`, leaves `STATE_FAILED_COUNT` untouched, transitions the task
-    /// back to `ready`, and emits a `LogLine` event so the operator UI shows
-    /// "Task <id> cancelled by stop request" instead of a phantom failure.
-    async fn record_task_cancelled(
-        &self,
-        ctx: &mut TickContext,
-        task: &TaskDescriptor,
-    ) -> Result<(), AutomatonError> {
-        info!(
-            automaton_id = %ctx.automaton_id,
-            task_id = %task.id,
-            title = %task.title,
-            "Task cancelled by user stop"
-        );
-
-        if let Err(e) = self.domain.transition_task(&task.id, "ready", None).await {
-            warn!(
-                task_id = %task.id,
-                error = %e,
-                "Failed to roll cancelled task back to ready"
-            );
-        }
-
-        ctx.emit(AutomatonEvent::LogLine {
-            message: format!("Task {} cancelled by stop request", task.id),
-        })?;
-        Ok(())
-    }
-
-    async fn record_task_success(
-        &self,
-        ctx: &mut TickContext,
-        task: &TaskDescriptor,
-        exec: TaskExecutionResult,
-    ) -> Result<(), AutomatonError> {
-        if let Err(e) = self.domain.transition_task(&task.id, "done", None).await {
-            warn!(task_id = %task.id, error = %e, "Failed to sync task done status to backend");
-        }
-
-        let completed: u32 = ctx.state.get(STATE_COMPLETED_COUNT).unwrap_or(0) + 1;
-        ctx.state.set(STATE_COMPLETED_COUNT, &completed)?;
-
-        ctx.emit(AutomatonEvent::TaskCompleted {
-            task_id: task.id.clone(),
-            summary: exec.notes,
-        })?;
-        ctx.emit(AutomatonEvent::TokenUsage {
-            task_id: Some(task.id.clone()),
-            input_tokens: exec.input_tokens,
-            output_tokens: exec.output_tokens,
-        })?;
-
-        info!(task_id = %task.id, title = %task.title, "Task completed successfully");
-        Ok(())
-    }
-
-    async fn record_task_failure(
-        &self,
-        ctx: &mut TickContext,
-        task: &TaskDescriptor,
-        e: AutomatonError,
-    ) -> Result<(), AutomatonError> {
-        warn!(task_id = %task.id, error = %e, "Task execution failed");
-
-        if let Err(te) = self.domain.transition_task(&task.id, "failed", None).await {
-            warn!(task_id = %task.id, error = %te, "Failed to sync task failed status to backend");
-        }
-
-        let failed: u32 = ctx.state.get(STATE_FAILED_COUNT).unwrap_or(0) + 1;
-        ctx.state.set(STATE_FAILED_COUNT, &failed)?;
-
-        ctx.emit(AutomatonEvent::TaskFailed {
-            task_id: task.id.clone(),
-            reason: e.to_string(),
-        })?;
-        Ok(())
     }
 
     /// Run the agent once; if the tree is still red, retry once with stderr.
@@ -294,16 +264,18 @@ impl DevLoopAutomaton {
         &self,
         ctx: &TickContext,
         cfg: &DevLoopConfig,
+        project: &aura_tools::domain_tools::ProjectDescriptor,
         task: &TaskDescriptor,
-        build_command: &Option<String>,
-    ) -> Result<TaskExecutionResult, AutomatonError> {
-        let effective_path = self.effective_project_path(ctx, cfg).await?;
-        let exec = self.execute_task(ctx, cfg, task, None).await?;
+    ) -> Result<aura_agent::agent_runner::TaskExecutionResult, AutomatonError> {
+        let effective_path = ctx
+            .workspace_root_str()
+            .unwrap_or_else(|| project.path.clone());
+        let exec = self.execute_task(ctx, cfg, project, task, None).await?;
         if ctx.is_cancelled() {
             return Ok(exec);
         }
         let Err(build_err) =
-            verify_build_after_agent(&effective_path, build_command.as_deref()).await
+            verify_build_after_agent(&effective_path, project.build_command.as_deref()).await
         else {
             return Ok(exec);
         };
@@ -315,44 +287,24 @@ impl DevLoopAutomaton {
             &build_err.to_string(),
             aura_config::DEV_LOOP_RETRY_NOTE_MAX_BYTES,
         );
-        let exec = self.execute_task(ctx, cfg, task, Some(retry_note)).await?;
+        let exec = self
+            .execute_task(ctx, cfg, project, task, Some(retry_note))
+            .await?;
         if ctx.is_cancelled() {
             return Ok(exec);
         }
-        verify_build_after_agent(&effective_path, build_command.as_deref()).await?;
+        verify_build_after_agent(&effective_path, project.build_command.as_deref()).await?;
         Ok(exec)
-    }
-
-    async fn effective_project_path(
-        &self,
-        ctx: &TickContext,
-        cfg: &DevLoopConfig,
-    ) -> Result<String, AutomatonError> {
-        let project = self
-            .domain
-            .get_project(&cfg.project_id, None)
-            .await
-            .map_err(|e| AutomatonError::domain_api(None, e))?;
-        Ok(ctx
-            .workspace_root
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| project.path.clone()))
     }
 
     async fn execute_task(
         &self,
         ctx: &TickContext,
         cfg: &DevLoopConfig,
+        project: &aura_tools::domain_tools::ProjectDescriptor,
         task: &TaskDescriptor,
         build_retry_note: Option<String>,
-    ) -> Result<TaskExecutionResult, AutomatonError> {
-        let project = self
-            .domain
-            .get_project(&cfg.project_id, None)
-            .await
-            .map_err(|e| AutomatonError::domain_api(Some(task.id.clone()), e))?;
+    ) -> Result<aura_agent::agent_runner::TaskExecutionResult, AutomatonError> {
         let spec = self
             .domain
             .get_spec(&task.spec_id, None)
@@ -373,98 +325,23 @@ impl DevLoopAutomaton {
                 &cfg.model,
                 &spec,
                 task,
-                Some(&ctx.event_tx),
+                Some(ctx.event_sender()),
             )
             .await?
         } else {
             task.clone()
         };
 
-        let effective_path = ctx
-            .workspace_root
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| project.path.clone());
-
-        let mut task_description = task_owned.description.clone();
-        if let Some(note) = build_retry_note {
-            task_description.push_str("\n\n---\n\nBuild still failing after your last pass:\n\n");
-            task_description.push_str(&note);
-        }
-
-        let project_info = ProjectInfo {
-            project_id: None,
-            name: &project.name,
-            description: project.description.as_deref().unwrap_or(""),
-            folder_path: &effective_path,
-            build_command: project.build_command.as_deref(),
-            test_command: project.test_command.as_deref(),
-        };
-        let spec_info = SpecInfo {
-            title: &spec.title,
-            markdown_contents: &spec.content,
-        };
-        let task_info = TaskInfo {
-            title: &task_owned.title,
-            description: &task_description,
-            execution_notes: "",
-            files_changed: &[],
-        };
-        let session_info = SessionInfo {
-            summary_of_previous_context: "",
-        };
-
-        let tools = self.catalog.tools_for_profile(ToolProfile::Engine);
-
-        // Borrow the parsed identity envelope (if any) as a transient
-        // `AgentInfo<'_>` so `SystemPromptBuilder` renders the
-        // `<agent_identity>` / `<agent_skills>` / `<agent_system_prompt>`
-        // sections. `as_agent_info()` returns `None` whenever the
-        // wire fields are absent / blank, leaving the prompt
-        // byte-identical to the empty-identity baseline.
-        let agent_info = cfg.agent_identity.as_agent_info();
-
-        let params = AgenticTaskParams {
-            project: &project_info,
-            spec: &spec_info,
-            task: &task_info,
-            session: &session_info,
-            work_log: &[],
-            completed_deps: &[],
-            workspace_map: "",
-            codebase_snapshot: "",
-            type_defs_context: "",
-            dep_api_context: "",
-            member_count: 1,
-            tools,
-            attempt: 0,
-            agent: agent_info.as_ref(),
-        };
-
-        // Inner channel: the agent loop emits advisory events
-        // (`TextDelta` / `ThinkingDelta` / `ToolStart` /
-        // `ToolInputSnapshot` / `ToolCallCompleted` / `ToolResult`)
-        // here at a high cadence on the E.4 streaming-pump path. The
-        // forwarder consumes them and projects through
-        // `forward_agent_event` onto `ctx.event_tx`. See
-        // `forward_event.rs` for the post-E.4 drop policy that keeps
-        // this from flooding the operator log when the outer consumer
-        // is briefly behind or has already torn down.
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
-        let _forwarder =
-            spawn_agent_event_forwarder(ctx.event_tx.clone(), event_rx, Some(task.id.clone()));
-
-        let inner_executor: Arc<dyn aura_agent::types::AgentToolExecutor> = self
-            .tool_executor
-            .clone()
-            .unwrap_or_else(|| Arc::new(NoOpExecutor));
-
-        let tracking = TaskTrackingConfig {
-            inner_executor,
-            project_folder: effective_path.clone(),
-            build_command: project.build_command.clone(),
-            test_command: project.test_command.clone(),
+        run_tracked_task(TaskExecutionRequest {
+            ctx,
+            runner: &self.runner,
+            provider: self.provider.as_ref(),
+            catalog: self.catalog.as_ref(),
+            task: &task_owned,
+            spec: &spec,
+            project,
+            identity: &cfg.agent_identity,
+            tool_executor: self.tool_executor.clone(),
             // Phase 5: dev-loop tasks default to runner-level
             // `early_test_oracle` (set `true` for task-shaped
             // automaton runners via
@@ -472,43 +349,38 @@ impl DevLoopAutomaton {
             // here means "use the runner default" rather than
             // forcing the per-task override.
             early_test_oracle: None,
-        };
-
-        let cancel = ctx.cancellation_token().clone();
-        let exec = self
-            .runner
-            .execute_task_tracked(
-                self.provider.as_ref(),
-                tracking,
-                &params,
-                Some(event_tx),
-                Some(cancel),
-            )
-            .await
-            .map_err(|e| AutomatonError::agent_execution(Some(task.id.clone()), e))?;
-
-        Ok(exec)
+            build_retry_note,
+        })
+        .await
     }
 
-    fn finish(&self, ctx: &mut TickContext) -> Result<TickOutcome, AutomatonError> {
-        Self::finish_with_outcome(ctx, LoopFinishOutcome::Completed)
+    fn finish(
+        &self,
+        ctx: &mut TickContext,
+        state: &mut DevLoopState,
+    ) -> Result<TickOutcome, AutomatonError> {
+        Self::finish_with_outcome(ctx, state, LoopFinishOutcome::Completed)
     }
 
-    fn finish_failed(&self, ctx: &mut TickContext) -> Result<TickOutcome, AutomatonError> {
-        Self::finish_with_outcome(ctx, LoopFinishOutcome::Failed)
+    fn finish_failed(
+        &self,
+        ctx: &mut TickContext,
+        state: &mut DevLoopState,
+    ) -> Result<TickOutcome, AutomatonError> {
+        Self::finish_with_outcome(ctx, state, LoopFinishOutcome::Failed)
     }
 
     fn finish_with_outcome(
         ctx: &mut TickContext,
+        state: &mut DevLoopState,
         outcome: LoopFinishOutcome,
     ) -> Result<TickOutcome, AutomatonError> {
-        let completed: u32 = ctx.state.get(STATE_COMPLETED_COUNT).unwrap_or(0);
-        let failed: u32 = ctx.state.get(STATE_FAILED_COUNT).unwrap_or(0);
-        ctx.state.set(STATE_LOOP_FINISHED, &true)?;
+        state.loop_finished = true;
+        state.save(ctx)?;
         ctx.emit(AutomatonEvent::LoopFinished {
             outcome: outcome.as_str().into(),
-            completed_count: completed,
-            failed_count: failed,
+            completed_count: state.completed_count,
+            failed_count: state.failed_count,
         })?;
         Ok(TickOutcome::Done)
     }
@@ -586,19 +458,20 @@ mod completion_tests {
     #[test]
     fn terminal_task_failure_finishes_loop_as_failed() {
         let (mut ctx, mut rx) = test_context();
-        ctx.state
-            .set(STATE_COMPLETED_COUNT, &2u32)
-            .expect("u32 always serializes");
-        ctx.state
-            .set(STATE_FAILED_COUNT, &1u32)
-            .expect("u32 always serializes");
+        let mut state = DevLoopState {
+            completed_count: 2,
+            failed_count: 1,
+            ..DevLoopState::default()
+        };
 
-        let outcome = DevLoopAutomaton::finish_with_outcome(&mut ctx, LoopFinishOutcome::Failed)
-            .expect("failed finish should emit LoopFinished");
+        let outcome =
+            DevLoopAutomaton::finish_with_outcome(&mut ctx, &mut state, LoopFinishOutcome::Failed)
+                .expect("failed finish should emit LoopFinished");
 
         assert!(matches!(outcome, TickOutcome::Done));
+        let stored = DevLoopState::load(&ctx);
         assert!(
-            ctx.state.get::<bool>(STATE_LOOP_FINISHED).unwrap_or(false),
+            stored.loop_finished,
             "failed finish must suppress on_stop's secondary LoopFinished event"
         );
         match rx.try_recv().expect("LoopFinished event expected") {
@@ -614,4 +487,32 @@ mod completion_tests {
             other => panic!("unexpected event: {other:?}"),
         }
     }
+
+    #[test]
+    fn state_serializes_as_single_blob() {
+        // Regression for the magic-string-key bag: writing the typed
+        // `DevLoopState` once must round-trip every field through
+        // `AutomatonState::get/set` (one JSON blob, one key).
+        let mut state = AutomatonState::new();
+        let saved = DevLoopState {
+            initialized: true,
+            task_queue: vec!["a".into(), "b".into()],
+            completed_count: 3,
+            failed_count: 1,
+            loop_finished: false,
+        };
+        state.set(DEV_LOOP_STATE_KEY, &saved).expect("serialize");
+        let loaded: DevLoopState = state.get(DEV_LOOP_STATE_KEY).expect("deserialize");
+        assert!(loaded.initialized);
+        assert_eq!(loaded.task_queue, vec!["a", "b"]);
+        assert_eq!(loaded.completed_count, 3);
+        assert_eq!(loaded.failed_count, 1);
+        assert!(!loaded.loop_finished);
+        // Exactly one key written — the one we wrote.
+        let keys: Vec<&String> = state.keys().collect();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0], DEV_LOOP_STATE_KEY);
+    }
+
+    use crate::state::AutomatonState;
 }

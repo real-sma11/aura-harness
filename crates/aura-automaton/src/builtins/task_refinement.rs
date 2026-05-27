@@ -31,11 +31,12 @@
 //!    [`AutomatonEvent::TaskDescriptionRefined`] and return the
 //!    updated descriptor returned by the domain API.
 
-use aura_reasoner::{Message, ModelProvider, ModelRequest, ToolChoice};
+use aura_reasoner::ModelProvider;
 use aura_tools::domain_tools::{DomainApi, SpecDescriptor, TaskDescriptor, TaskUpdate};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use super::common::{run_auxiliary_model_call, AuxiliaryModelCall};
 use crate::error::AutomatonError;
 use crate::events::AutomatonEvent;
 
@@ -55,8 +56,6 @@ const REFINEMENT_SYSTEM_PROMPT: &str =
     "You refine software engineering task descriptions before implementation. \
 Rewrite the task description so it precisely matches the spec's intent and acceptance criteria. \
 Keep it concise and actionable.";
-
-use aura_config::REFINEMENT_MAX_TOKENS;
 
 /// Refine the description of `task` against `spec` via `provider`,
 /// persist it through `domain`, and return the updated descriptor.
@@ -100,27 +99,17 @@ pub(crate) async fn refine_task_description(
         },
     );
 
-    let request = match build_refinement_request(model, spec, task) {
-        Ok(req) => req,
-        Err(e) => {
-            // Builder validation (empty model, zero max_tokens, etc.)
-            // is a programmer error rather than a runtime fault, but
-            // we still surface it as a LogLine and fall through so a
-            // bad model-name config doesn't strand the task.
-            emit_best_effort(
-                event_tx,
-                AutomatonEvent::LogLine {
-                    message: format!("task description refinement failed for {}: {e}", task.id),
-                },
-            );
-            return Ok(task.clone());
-        }
+    let call = AuxiliaryModelCall {
+        model,
+        system_prompt: REFINEMENT_SYSTEM_PROMPT,
+        user_body: build_refinement_user_body(spec, task),
+        max_tokens: aura_config::agent().automaton.refinement_max_tokens,
+        task_scope: Some(task.id.clone()),
     };
-
-    let response = match provider.complete(request).await {
+    let response = match run_auxiliary_model_call(provider, call).await {
         Ok(r) => r,
         Err(e) => {
-            warn!(task_id = %task.id, error = %e, "model provider rejected refinement call");
+            warn!(task_id = %task.id, error = %e, "auxiliary model call rejected refinement");
             emit_best_effort(
                 event_tx,
                 AutomatonEvent::LogLine {
@@ -186,17 +175,14 @@ pub(crate) async fn refine_task_description(
     Ok(updated)
 }
 
-/// Construct the single-shot, non-streaming refinement request. Mirrors
-/// the shape used by `aura_automaton::builtins::spec_gen` —
-/// `ModelRequest::builder(model, system).messages(...).max_tokens(...).try_build()`
-/// — so a future change to the standard auxiliary-call shape only
-/// has to happen in one obvious place.
-fn build_refinement_request(
-    model: &str,
-    spec: &SpecDescriptor,
-    task: &TaskDescriptor,
-) -> Result<ModelRequest, aura_reasoner::ReasonerError> {
-    let user_body = format!(
+/// Build the user-message body for the refinement call. Mirrors the
+/// shape used by `aura_automaton::builtins::spec_gen` so the
+/// auxiliary-call template in
+/// [`super::common::run_auxiliary_model_call`] stays the single seam
+/// where the `ModelRequest::builder(...)` knobs (`max_tokens`,
+/// `tool_choice`, etc.) are picked.
+fn build_refinement_user_body(spec: &SpecDescriptor, task: &TaskDescriptor) -> String {
+    format!(
         "# Spec: {spec_title}\n\n{spec_content}\n\n\
          # Current Task: {task_title}\n\n{task_desc}\n\n\
          # Output\nReturn only the refined task description in markdown, no preamble.",
@@ -204,14 +190,7 @@ fn build_refinement_request(
         spec_content = spec.content,
         task_title = task.title,
         task_desc = task.description,
-    );
-
-    ModelRequest::builder(model, REFINEMENT_SYSTEM_PROMPT)
-        .messages(vec![Message::user(user_body)])
-        .tools(Vec::new())
-        .tool_choice(ToolChoice::None)
-        .max_tokens(REFINEMENT_MAX_TOKENS)
-        .try_build()
+    )
 }
 
 /// Wrap the model output and the original task block in the stable
@@ -264,8 +243,8 @@ mod tests {
     use anyhow::anyhow;
     use async_trait::async_trait;
     use aura_reasoner::{
-        ContentBlock, Message as ReasonerMessage, ModelResponse, ProviderTrace, ReasonerError,
-        Role, StopReason, Usage,
+        ContentBlock, Message as ReasonerMessage, ModelRequest, ModelResponse, ProviderTrace,
+        ReasonerError, Role, StopReason, Usage,
     };
     use aura_tools::domain_tools::{
         CreateSessionParams, DomainApi, MessageDescriptor, ProjectDescriptor, ProjectUpdate,
