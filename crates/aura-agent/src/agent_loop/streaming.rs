@@ -485,19 +485,6 @@ fn looks_like_transient_stream_error(message: &str) -> bool {
 // readability.
 
 impl super::AgentLoop {
-    /// Retry budget / backoff envelope used by the per-tool-call
-    /// retry loop. Reads `aura_config::reasoner().llm_retry` (sourced
-    /// from `AURA_LLM_MAX_RETRIES` / `AURA_LLM_BACKOFF_INITIAL_MS` /
-    /// `AURA_LLM_BACKOFF_CAP_MS` at startup) — the same value
-    /// `aura_reasoner::AnthropicConfig` and `stream_pump` honour, so
-    /// every retry path stays in lockstep.
-    ///
-    /// Defaults: 8 retries with initial 250ms, cap 30s, doubling each
-    /// attempt.
-    fn stream_retry_params() -> (u32, u64, u64) {
-        aura_config::reasoner().llm_retry.as_legacy_triple()
-    }
-
     /// Re-drive `provider.complete_streaming` after a mid-stream abort
     /// that carried a [`PartialToolUse`]. Emits
     /// [`AgentLoopEvent::ToolCallRetrying`] before every sleep and
@@ -513,7 +500,12 @@ impl super::AgentLoop {
         initial_reason: String,
         initial_partial: Option<PartialToolUse>,
     ) -> Result<ModelResponse, LlmCallError> {
-        let (max_retries, backoff_initial_ms, backoff_cap_ms) = Self::stream_retry_params();
+        // Shared with `agent_loop::stream_pump::run_stream_pump` so
+        // both retry surfaces honour the same `AURA_LLM_MAX_RETRIES` /
+        // `AURA_LLM_BACKOFF_INITIAL_MS` / `AURA_LLM_BACKOFF_CAP_MS`
+        // tuning (Phase 3 dedup).
+        let (max_retries, backoff_initial_ms, backoff_cap_ms) =
+            super::stream_pump::stream_retry_params();
         // Preserve tool identity across retries: once a stream starts
         // and dies before `content_block_start`, subsequent retries may
         // not carry any partial at all — but the UI still benefits from

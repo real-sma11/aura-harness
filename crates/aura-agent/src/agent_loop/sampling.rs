@@ -219,7 +219,7 @@ pub(crate) async fn run_sampling_request(
     // hooks / queued input (E.2/E.4) into a single termination
     // predicate.
     let dispatch_says_break = agent
-        .dispatch_stop_reason(&response, executor, event_tx, state)
+        .dispatch_stop_reason(&response, executor, event_tx, cancellation_token, state)
         .await;
 
     SamplingRequestResult {
@@ -328,7 +328,19 @@ async fn run_sampling_request_streaming(
     state.result.iterations = iteration + 1;
     streaming::emit_iteration_complete(event_tx, iteration, &response, iteration_started_at);
 
-    if is_cancelled(cancellation_token) {
+    // Mid-tool cancellation contract: when the pump observed the
+    // cancellation it synthesised `[CANCELLED]` tool_results with
+    // `stop_loop = true` and folded them into `tool_results` so the
+    // Anthropic `tool_use ↔ tool_result` adjacency stays intact. We
+    // MUST still call `dispatch_streamed_response` in that case so the
+    // trailing tool_result-bearing user message is appended; otherwise
+    // the transcript ends on an orphaned assistant `tool_use` and the
+    // next sampling call is structurally invalid. When there are no
+    // tool_results to dispatch (e.g. cancellation arrived before any
+    // `OutputItemDone(tool_use)`) we keep the fast bail-out path —
+    // there is no adjacency to repair and the cancellation propagates
+    // unchanged to the outer turn loop.
+    if is_cancelled(cancellation_token) && tool_results.is_empty() {
         debug!("Cancellation observed after stream pump; skipping tool dispatch");
         return SamplingRequestResult {
             needs_follow_up: false,

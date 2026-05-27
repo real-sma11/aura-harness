@@ -30,6 +30,7 @@ use crate::types::{
 use aura_config::{READS_AFTER_WRITE_ALLOWANCE, WRITE_FILE_CHUNK_BYTES};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::streaming::emit as emit_event;
@@ -142,6 +143,7 @@ impl AgentLoop {
         executor: &dyn AgentToolExecutor,
         state: &mut LoopState,
         event_tx: Option<&Sender<AgentLoopEvent>>,
+        cancellation_token: Option<&CancellationToken>,
     ) -> (Vec<ToolCallResult>, Vec<String>, HashSet<String>) {
         let mut side_messages: Vec<String> = Vec::new();
 
@@ -175,7 +177,7 @@ impl AgentLoop {
             // (success, error, or panic — the surrounding `await`
             // still drops the guard before unwinding propagates).
             let _heartbeat = spawn_tool_heartbeat(event_tx, &to_execute, tool_heartbeat_interval());
-            executor.execute(&to_execute).await
+            execute_with_cancellation(executor, &to_execute, cancellation_token).await
         };
 
         let any_write_success = track_tool_effects(
@@ -207,6 +209,75 @@ impl AgentLoop {
         all_results.extend(circling_reads);
         all_results.extend(executed);
         (all_results, side_messages, blocked_ids)
+    }
+}
+
+/// Synthesise `[CANCELLED]` tool_result blocks for a batch of
+/// in-flight tool calls. Used by [`execute_with_cancellation`] when
+/// the user-supplied `CancellationToken` fires while the executor is
+/// awaiting tool completion.
+///
+/// Each synthesised result carries:
+///
+/// - `is_error = true` so cache invalidation skips it and the model
+///   sees the result as a failure.
+/// - `kind = AgentError` so the existing telemetry / dup-audit
+///   layers treat it as a harness-side rejection rather than a tool
+///   crash.
+/// - `stop_loop = true` so
+///   [`super::tool_execution::check_termination_conditions`] breaks
+///   the loop on the same iteration the cancellation arrived. This
+///   is the cancellation seam called out by
+///   `pipeline_cancellation_mid_tool_execution_aborts_loop`: without
+///   `stop_loop`, the loop would happily keep iterating and the
+///   model would never see the cancellation as a turn boundary.
+///
+/// The `[CANCELLED]` tag is the contract surface
+/// `pipeline_cancellation_mid_tool_execution_aborts_loop` asserts —
+/// it satisfies Anthropic's `tool_use ↔ tool_result` adjacency rule
+/// (every `tool_use` in the prior assistant message gets a paired
+/// `tool_result` block) so we can break cleanly without leaving the
+/// transcript in a structurally-invalid state.
+pub(super) fn cancelled_results_for(to_execute: &[ToolCallInfo]) -> Vec<ToolCallResult> {
+    to_execute
+        .iter()
+        .map(|tc| ToolCallResult {
+            tool_use_id: tc.id.clone(),
+            content:
+                "[CANCELLED] Tool execution was cancelled by the user before the tool returned."
+                    .to_string(),
+            is_error: true,
+            kind: aura_core::ToolResultKind::AgentError,
+            stop_loop: true,
+            file_changes: Vec::new(),
+        })
+        .collect()
+}
+
+/// Wrap a single batch of tool execution in a `tokio::select!` on
+/// the user-supplied cancellation token so a mid-tool Stop press
+/// terminates the loop on the same iteration instead of waiting for
+/// the executor to naturally return. When the token has not been
+/// supplied (headless / non-cancellable callers) this collapses to
+/// `executor.execute(...).await`.
+///
+/// Pre-fix, the executor call here was an un-`select!`-ed `.await`,
+/// so stop fired on the harness side but the loop kept the
+/// (potentially multi-minute) tool round-trip alive — see
+/// `pipeline_cancellation_mid_tool_execution_aborts_loop` for the
+/// regression contract.
+async fn execute_with_cancellation(
+    executor: &dyn AgentToolExecutor,
+    to_execute: &[ToolCallInfo],
+    cancellation_token: Option<&CancellationToken>,
+) -> Vec<ToolCallResult> {
+    let Some(token) = cancellation_token else {
+        return executor.execute(to_execute).await;
+    };
+    tokio::select! {
+        biased;
+        () = token.cancelled() => cancelled_results_for(to_execute),
+        results = executor.execute(to_execute) => results,
     }
 }
 
