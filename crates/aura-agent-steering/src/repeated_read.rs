@@ -1,31 +1,31 @@
-//! Per-turn repeated-read tracker (Phase 3b of the reread-efficiency plan).
+//! Per-turn repeated-read tracker (Phase 3b of the reread-efficiency
+//! plan).
 //!
 //! `RepeatedReadTracker` watches the stream of `content_hash` values
 //! attached to read-only tool results inside a single model turn (one
-//! request/response round-trip) and queues a [`SteeringKind::RepeatedRead`]
-//! nudge whenever any single hash crosses the
-//! [`aura_config::REPEATED_READ_THRESHOLD`] occurrences in that turn.
-//! The nudge fires on the *next* turn so it lands in the prompt
-//! prefix the model actually reads, and at most once per
+//! request/response round-trip) and queues a
+//! [`SteeringKind::RepeatedRead`] nudge whenever any single hash
+//! crosses the [`aura_config::REPEATED_READ_THRESHOLD`] occurrences
+//! in that turn. The nudge fires on the *next* turn so it lands in
+//! the prompt prefix the model actually reads, and at most once per
 //! `(turn, content_hash)` pair so a 4th, 5th, … repeat does not spam
 //! the model with a fresh nudge inside the same turn.
 //!
-//! Phase 2 of the core-loop architecture refactor relocated this
-//! evaluator out of `prompts/steering/` (where it had no business
-//! living once the prompts layer became render-only) and into
-//! `agent_loop/steering/`, alongside the other stateful evaluators.
+//! Relocated from `aura-agent::agent_loop::steering::repeated_read`
+//! in Phase 6a so the steering crate can sit below the agent loop in
+//! the layer order.
 
 use std::collections::HashMap;
 
 use aura_prompts::SteeringKind;
 
-use crate::agent_loop::tool_execution::content_hash_hex;
+use crate::helpers::content_hash_hex;
+use crate::registry::TurnSteering;
 use crate::types::{ToolCallInfo, ToolCallResult};
 
-use super::TurnSteering;
-
-/// Per-turn occurrence tracker for read-only tool result `content_hash`
-/// values. See module-level documentation for the contract.
+/// Per-turn occurrence tracker for read-only tool result
+/// `content_hash` values. See module-level documentation for the
+/// contract.
 ///
 /// The tracker only stores hashes; rendering the nudge body is
 /// delegated to [`aura_prompts::SteeringRenderer`] via
@@ -33,12 +33,12 @@ use super::TurnSteering;
 /// every other steering kind.
 #[derive(Debug, Default)]
 pub struct RepeatedReadTracker {
-    /// `content_hash` → number of times observed in the current turn.
-    /// Cleared on every [`Self::begin_turn`] call.
+    /// `content_hash` → number of times observed in the current
+    /// turn. Cleared on every [`Self::begin_turn`] call.
     counts: HashMap<String, usize>,
-    /// Hashes whose count crossed the firing threshold in the current
-    /// turn. Drained by [`Self::begin_turn`] into the [`SteeringKind`]
-    /// vec returned to the caller.
+    /// Hashes whose count crossed the firing threshold in the
+    /// current turn. Drained by [`Self::begin_turn`] into the
+    /// [`SteeringKind`] vec returned to the caller.
     pending: Vec<String>,
 }
 
@@ -52,7 +52,8 @@ impl RepeatedReadTracker {
         Self::default()
     }
 
-    /// Record one observation of `content_hash` for the current turn.
+    /// Record one observation of `content_hash` for the current
+    /// turn.
     ///
     /// Returns `true` when this call moved the count past the
     /// `aura_config::REPEATED_READ_THRESHOLD` boundary and queued a
@@ -88,10 +89,10 @@ impl RepeatedReadTracker {
     /// Begin a new model turn for tests: drain the queued nudges,
     /// render them as [`SteeringKind`] values, and clear the
     /// per-turn counts. Production code reaches this via the
-    /// [`TurnSteering::begin_turn`] + [`TurnSteering::drain_for_next_turn`]
-    /// pair instead — the inherent method is retained for the
-    /// pre-Phase-5 unit-test fixtures that drive the tracker
-    /// directly.
+    /// [`TurnSteering::begin_turn`] +
+    /// [`TurnSteering::drain_for_next_turn`] pair instead — the
+    /// inherent method is retained for the pre-Phase-5 unit-test
+    /// fixtures that drive the tracker directly.
     #[cfg(test)]
     pub fn begin_turn(&mut self) -> Vec<SteeringKind> {
         self.counts.clear();
@@ -182,17 +183,13 @@ mod tests {
     #[test]
     fn resets_per_turn_counts() {
         let mut tracker = RepeatedReadTracker::new();
-        // Two reads in turn 1 — below threshold.
         tracker.record("hash_a");
         tracker.record("hash_a");
         assert_eq!(tracker.pending_count(), 0);
 
-        // Turn boundary clears the count for hash_a.
         let drained = tracker.begin_turn();
         assert!(drained.is_empty());
 
-        // Two more reads in turn 2 — still below threshold because the
-        // counter reset.
         tracker.record("hash_a");
         tracker.record("hash_a");
         assert_eq!(

@@ -17,9 +17,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+blake3 = { workspace = true }
 
 [lints]
 workspace = true

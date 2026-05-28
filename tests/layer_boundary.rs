@@ -96,10 +96,15 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-context-skills", "context"),
     ("aura-prompts", "context"),
     ("aura-context-prompts", "context"),
+    // Phase 6a renamed `aura-kernel` to `aura-agent-kernel` and
+    // converted the original crate into a re-export shell.
     ("aura-kernel", "agent"),
+    ("aura-agent-kernel", "agent"),
+    ("aura-agent-loop", "agent"),
+    ("aura-agent-subagent", "agent"),
     ("aura-terminal", "surface"),
     ("aura-agent", "agent"),
-    // Phase 3 empty placeholder for Phase 6a steering extraction.
+    // Phase 3 placeholder, populated in Phase 6a.
     ("aura-agent-steering", "agent"),
     ("aura-auth", "core"),
     ("aura-automaton", "surface"),

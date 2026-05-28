@@ -332,6 +332,7 @@ fn slice_raw_to_line_numbered(
 /// not the upstream `ToolResult` metadata map. Keeping a private copy
 /// of the hash avoids plumbing metadata through `ToolCallResult`
 /// (which would touch every executor and test fixture in the tree).
+#[allow(dead_code)]
 pub(crate) fn content_hash_hex(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);

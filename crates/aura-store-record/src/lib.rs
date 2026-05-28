@@ -54,7 +54,7 @@ mod record;
 
 pub use kind::RecordKind;
 pub use log::{RecordLog, RecordLogError};
-pub use payload::RecordPayload;
+pub use payload::{summarize_payload, RecordPayload, DEFAULT_SUMMARY_CHUNK_BYTES};
 pub use record::{RecordEntry, RecordEntryBuilder, KERNEL_VERSION};
 
 #[cfg(test)]

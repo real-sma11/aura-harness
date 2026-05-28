@@ -68,5 +68,6 @@ pub(super) async fn process_one(
         tool_use_id,
         tool_name: &tool_name,
         executed,
+        lite_threshold: kernel.lite_payload_threshold(),
     }))
 }

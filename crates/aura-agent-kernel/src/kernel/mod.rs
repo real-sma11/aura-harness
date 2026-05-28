@@ -29,8 +29,10 @@ use crate::policy::{Policy, PolicyConfig};
 use crate::ExecutorRouter;
 use async_trait::async_trait;
 use aura_core::{AgentId, RecordEntry, RuntimeCapabilityInstall, ToolState};
+use aura_core_modes::KernelMode;
 use aura_reasoner::ModelProvider;
 use aura_store::Store;
+use aura_store_record::DEFAULT_SUMMARY_CHUNK_BYTES;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +74,21 @@ pub struct KernelConfig {
     /// Originating user id used when a live approval response is remembered
     /// forever into persisted user tool defaults.
     pub originating_user_id: Option<String>,
+    /// Phase 6a kernel audit tier (`Audited` vs `AuditedLite`).
+    ///
+    /// Imported from [`aura_core_modes::KernelMode`]; the kernel does
+    /// not own this enum. `Audited` (default) records full inline
+    /// payloads; `AuditedLite` summarises payloads above
+    /// [`KernelConfig::audited_lite_threshold_bytes`] into a
+    /// `RecordPayload::Summary { head, tail, full_hash, full_len }`.
+    /// Sequence numbers and `RecordKind` values are identical across
+    /// the two modes — only the payload representation differs.
+    pub kernel_mode: KernelMode,
+    /// Payload-size threshold (bytes) above which `AuditedLite`
+    /// switches from full inline to head/tail summary. Defaults to
+    /// [`aura_store_record::DEFAULT_SUMMARY_CHUNK_BYTES`] (1 KiB).
+    /// Ignored when `kernel_mode == KernelMode::Audited`.
+    pub audited_lite_threshold_bytes: usize,
 }
 
 impl Default for KernelConfig {
@@ -86,6 +103,8 @@ impl Default for KernelConfig {
             tool_timeout_ms: 120_000,
             tool_approval_prompter: None,
             originating_user_id: None,
+            kernel_mode: KernelMode::Audited,
+            audited_lite_threshold_bytes: DEFAULT_SUMMARY_CHUNK_BYTES,
         }
     }
 }
@@ -352,4 +371,90 @@ impl Kernel {
             .get_runtime_capabilities(self.agent_id)
             .map_err(|e| crate::KernelError::Store(format!("get_runtime_capabilities: {e}")))
     }
+
+    /// Returns the kernel's configured [`KernelMode`].
+    #[must_use]
+    pub fn kernel_mode(&self) -> KernelMode {
+        self.config.kernel_mode
+    }
+
+    /// Returns `Some(threshold)` when [`KernelConfig::kernel_mode`] is
+    /// [`KernelMode::AuditedLite`] (effect payloads above `threshold`
+    /// bytes are summarised), or `None` for [`KernelMode::Audited`]
+    /// (no summarisation; payloads stored verbatim).
+    #[must_use]
+    pub fn lite_payload_threshold(&self) -> Option<usize> {
+        match self.config.kernel_mode {
+            KernelMode::Audited => None,
+            KernelMode::AuditedLite => Some(self.config.audited_lite_threshold_bytes),
+        }
+    }
+
+    /// Encode `bytes` into a [`aura_store_record::RecordPayload`]
+    /// honouring [`KernelConfig::kernel_mode`].
+    ///
+    /// - `KernelMode::Audited` always produces
+    ///   [`aura_store_record::RecordPayload::Inline`] (full bytes).
+    /// - `KernelMode::AuditedLite` produces
+    ///   [`aura_store_record::RecordPayload::Summary`] when
+    ///   `bytes.len() > audited_lite_threshold_bytes`, else
+    ///   [`aura_store_record::RecordPayload::Inline`] (below
+    ///   threshold). Sequence numbers + RecordKind are unaffected.
+    #[must_use]
+    pub fn encode_payload(&self, bytes: &[u8]) -> aura_store_record::RecordPayload {
+        match self.config.kernel_mode {
+            KernelMode::Audited => aura_store_record::RecordPayload::inline(bytes.to_vec()),
+            KernelMode::AuditedLite => aura_store_record::summarize_payload(
+                bytes,
+                self.config.audited_lite_threshold_bytes,
+            ),
+        }
+    }
+}
+
+/// Phase 6a consolidation: write a System-shaped `RecordEntry`
+/// through the kernel crate.
+///
+/// Previously `aura-runtime::tool_permissions::append_agent_tool_permissions_entry`
+/// constructed and appended this entry inline, bypassing the kernel
+/// and violating the "kernel owns every `RecordEntry` write"
+/// invariant. The body of the build-and-write now lives here; the
+/// runtime retains responsibility for the scheduler's
+/// `processing_claim` (a scheduler-side lock) which the kernel crate
+/// would not be able to see without a layering violation.
+///
+/// On-disk shape: identical to the prior runtime path — same
+/// `seq = head_seq + 1`, same window-hashed `context_hash`, same
+/// `append_entry_direct` write path. Replay and audit consumers see
+/// no diff.
+///
+/// # Errors
+///
+/// Returns [`KernelError::Store`] for any backend failure.
+pub fn write_system_record(
+    store: &Arc<dyn Store>,
+    agent_id: AgentId,
+    tx: aura_core::Transaction,
+) -> Result<u64, crate::KernelError> {
+    let head = store
+        .get_head_seq(agent_id)
+        .map_err(|e| crate::KernelError::Store(format!("get_head_seq: {e}")))?;
+    let from_seq = head.saturating_sub(49).max(1);
+    let window = if head == 0 {
+        Vec::new()
+    } else {
+        store
+            .scan_record(agent_id, from_seq, 50)
+            .map_err(|e| crate::KernelError::Store(format!("scan_record: {e}")))?
+    };
+    let context_hash = crate::context::hash_tx_with_window(&tx, &window)
+        .map_err(|e| crate::KernelError::Internal(format!("context hash: {e}")))?;
+    let seq = head + 1;
+    let entry = RecordEntry::builder(seq, tx)
+        .context_hash(context_hash)
+        .build();
+    store
+        .append_entry_direct(agent_id, seq, &entry)
+        .map_err(|e| crate::KernelError::Store(format!("append_entry_direct: {e}")))?;
+    Ok(seq)
 }

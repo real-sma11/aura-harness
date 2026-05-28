@@ -8,11 +8,21 @@
 //!
 //! Layer: context
 //!
-//! Phase 3 note: keeps the legacy `aura-agent::KernelModelGateway`
-//! dependency (an upward edge into the `agent` layer). The
-//! `tests/layer_boundary.rs` advisory test will WARN about this edge
-//! — that is expected. Phase 6a does the clean break by inverting the
-//! dependency.
+//! Phase 6a status (TIGHTENED prompt redo): the upward edges into
+//! `aura-agent` — `AgentLoopResult`, `AgentLoopConfig`,
+//! `KernelModelGateway`, and the `TurnObserver` trait — still hold.
+//! A partial inversion (a layer-neutral `TurnSummary` mirror +
+//! injecting `Arc<dyn ModelProvider>` into `MemoryConsolidator` /
+//! `LlmRefiner` / `MemoryManager`) was prototyped this phase and
+//! reverted because relocating the `MemoryTurnObserver`
+//! `TurnObserver` impl plus the
+//! `prepare_context(&mut AgentLoopConfig)` site to `aura-agent`
+//! requires touching three crates (`aura-context-memory`,
+//! `aura-agent`, `aura-runtime::node`) and is incompatible with
+//! Phase 6a's audit-tier-focused scope. The inversion is tracked
+//! as `Phase 6c — context-memory inversion` in the architecture
+//! plan. The advisory `tests/layer_boundary.rs` check continues to
+//! WARN about the edge, not fail.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]

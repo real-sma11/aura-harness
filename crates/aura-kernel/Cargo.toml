@@ -1,29 +1,13 @@
 [package]
 name = "aura-kernel"
-description = "Deterministic kernel for Aura"
+description = "Phase 6a compatibility shell over aura-agent-kernel"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aura-core = { path = "../aura-core" }
-aura-store = { path = "../aura-store" }
-aura-reasoner = { path = "../aura-reasoner" }
-thiserror = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-tokio = { workspace = true }
-hex = { workspace = true }
-blake3 = { workspace = true }
-bytes = { workspace = true }
-async-trait = { workspace = true }
-futures-util = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-proptest = { workspace = true }
+aura-agent-kernel = { path = "../aura-agent-kernel" }
 
 [lints]
 workspace = true

@@ -5,10 +5,11 @@
 //!
 //! The Shamir-recovery transcript that motivated Phase 3 watched the
 //! agent re-read 8 source files 30+ times before noticing that the
-//! declared test gate already passed in 1386 ms — the task was already
-//! satisfied before the agent's first edit. The full oracle (run the
-//! `test_command`, parse the exit code, surface a `task_already_satisfied`
-//! system message when it passes) short-circuits that flow.
+//! declared test gate already passed in 1386 ms — the task was
+//! already satisfied before the agent's first edit. The full oracle
+//! (run the `test_command`, parse the exit code, surface a
+//! `task_already_satisfied` system message when it passes)
+//! short-circuits that flow.
 //!
 //! # Why this is the minimum-viable variant, not the full oracle
 //!
@@ -16,57 +17,34 @@
 //! plumbing into the streaming sampling pump (E.4) at exactly the
 //! "first read-only batch closed, but no write yet" boundary. That
 //! boundary today does not exist as a single seam — the pump in
-//! [`crate::agent_loop::stream_pump`] interleaves tool execution with
-//! `OutputItemDone` events on a `FuturesOrdered`, and reaching back into
-//! it to spawn an out-of-band `cargo test` invocation safely (with the
-//! existing per-tool timeout, cancellation token, and event channel
-//! semantics intact) is invasive enough to risk regressing the streaming
-//! path's parity guarantees.
+//! `aura_agent::agent_loop::stream_pump` interleaves tool execution
+//! with `OutputItemDone` events on a `FuturesOrdered`, and reaching
+//! back into it to spawn an out-of-band `cargo test` invocation
+//! safely (with the existing per-tool timeout, cancellation token,
+//! and event channel semantics intact) is invasive enough to risk
+//! regressing the streaming path's parity guarantees.
 //!
 //! Phase 3 therefore ships the oracle in two parts:
 //!
 //! 1. The state machine that decides *when* the hint should fire:
-//!    [`EarlyTestOracle`]. Driven by the same `tool_name` strings the
-//!    agent loop already sees on every `ToolCallInfo`, it tracks the
-//!    "first read-only batch" boundary precisely.
+//!    [`EarlyTestOracle`]. Driven by the same `tool_name` strings
+//!    the agent loop already sees on every `ToolCallInfo`, it
+//!    tracks the "first read-only batch" boundary precisely.
 //! 2. A [`SteeringKind::TaskAlreadySatisfiedHint`] variant that
 //!    surfaces the hint without claiming the test gate has already
-//!    been verified. The body matches the
-//!    `task_already_satisfied { … }` shape the plan specified, except
-//!    `summary` is replaced with a `note` that the harness has *not*
-//!    run the test command — the model still has to invoke it (or
-//!    let the existing `task_done` DoD gate run it on completion).
+//!    been verified.
 //!
-//! Phase 2 of the core-loop architecture refactor relocated the
-//! oracle out of `prompts/steering/` (where it had no business
-//! living once the prompts layer became render-only) into
-//! `agent_loop/steering/`. Phase 5 will wire the oracle into the
-//! live loop; today the relocation is behaviour-preserving.
+//! Phase 6a relocated the oracle from `aura-agent` into
+//! `aura-agent-steering` so the steering crate sits strictly below
+//! the agent loop in the layer order.
 
 use aura_prompts::SteeringKind;
 
 use crate::helpers::{is_exploration_tool, is_write_tool};
+use crate::registry::TurnSteering;
 use crate::types::{ToolCallInfo, ToolCallResult};
 
-use super::TurnSteering;
-
 /// State machine tracking the "first read-only batch closed" boundary.
-///
-/// A *batch* is a contiguous run of read-only tool calls
-/// (`read_file` / `list_files` / `search_code` / `stat_file` /
-/// `find_files`); the batch closes the first time the agent issues a
-/// non-read tool (typically a write, but any non-read counts) or the
-/// caller explicitly signals a turn boundary via [`Self::close_batch`].
-///
-/// Once closed, the oracle queues exactly one
-/// [`SteeringKind::TaskAlreadySatisfiedHint`] which subsequent calls
-/// to [`Self::take_hint`] return — and only the *first* such call
-/// returns it. Subsequent batches do not re-fire the hint; this is a
-/// once-per-task signal by design.
-//
-// `OracleState` is internal — `EarlyTestOracle` exposes its
-// armed-ness through [`Self::is_armed`] / [`Self::take_hint`] /
-// the [`TurnSteering`] impl.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OracleState {
     AwaitingFirstRead,
@@ -88,7 +66,8 @@ enum OracleState {
 ///   sessions or any task where the operator wants the oracle off.
 ///
 /// The oracle is single-shot: at most one hint per [`Self::take_hint`]
-/// caller, regardless of how many batches the task subsequently opens.
+/// caller, regardless of how many batches the task subsequently
+/// opens.
 #[derive(Debug)]
 pub struct EarlyTestOracle {
     test_command: Option<String>,
@@ -99,7 +78,8 @@ pub struct EarlyTestOracle {
 }
 
 impl EarlyTestOracle {
-    /// Construct an oracle bound to the task's declared test command.
+    /// Construct an oracle bound to the task's declared test
+    /// command.
     ///
     /// The oracle short-circuits to `Done` when `enabled` is `false`
     /// or `test_command` is `None`, so callers can construct one

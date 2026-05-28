@@ -197,32 +197,17 @@ pub(crate) async fn append_agent_tool_permissions_entry(
 
     // Hold the processing claim for the entire read-modify-write window so a
     // concurrent scheduler drain cannot wedge a different entry at the same
-    // seq between our `get_head_seq` and `append_entry_direct`.
+    // seq between our `get_head_seq` and `append_entry_direct`. The
+    // scheduler claim is a runtime-side lock; the actual entry build +
+    // store write is delegated to `aura_kernel::write_system_record`
+    // so this code path no longer bypasses the kernel crate (Phase 6a).
     let _claim = scheduler
         .processing_claim(agent_id)
         .await
         .map_err(|e| format!("claim agent processing: {e}"))?;
 
-    let head = store
-        .get_head_seq(agent_id)
-        .map_err(|e| format!("get_head_seq: {e}"))?;
-    let from_seq = head.saturating_sub(49).max(1);
-    let window = if head == 0 {
-        Vec::new()
-    } else {
-        store
-            .scan_record(agent_id, from_seq, 50)
-            .map_err(|e| format!("scan_record: {e}"))?
-    };
-    let context_hash =
-        aura_kernel::hash_tx_with_window(&tx, &window).map_err(|e| format!("context hash: {e}"))?;
-    let seq = head + 1;
-    let entry = RecordEntry::builder(seq, tx.clone())
-        .context_hash(context_hash)
-        .build();
-    store
-        .append_entry_direct(agent_id, seq, &entry)
-        .map_err(|e| format!("append_entry_direct: {e}"))?;
+    aura_kernel::write_system_record(store, agent_id, tx.clone())
+        .map_err(|e| format!("write_system_record: {e}"))?;
     Ok(tx)
 }
 

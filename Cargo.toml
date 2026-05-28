@@ -82,9 +82,16 @@ members = [
     "crates/aura-reasoner",
     "crates/aura-model-reasoner",
     "crates/aura-kernel",
+    # Phase 6a agent layer split:
+    #   aura-agent-kernel    - deterministic kernel (renamed from aura-kernel)
+    #   aura-agent-loop      - agent turn-loop entrypoint shell
+    #   aura-agent-steering  - turn-state steering evaluators
+    #   aura-agent-subagent  - subagent derivation + inheritance
+    "crates/aura-agent-kernel",
+    "crates/aura-agent-loop",
+    "crates/aura-agent-subagent",
     "crates/aura-terminal",
     "crates/aura-agent",
-    # Phase 3 placeholder for Phase 6a steering extraction
     "crates/aura-agent-steering",
     "crates/aura-auth",
     "crates/aura-automaton",

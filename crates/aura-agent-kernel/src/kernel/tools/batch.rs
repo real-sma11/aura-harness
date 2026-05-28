@@ -110,6 +110,7 @@ pub(super) async fn process_many(
             tool_use_id,
             tool_name: &proposal.tool,
             executed,
+            lite_threshold: kernel.lite_payload_threshold(),
         });
 
         entries.push(result.entry.clone());

@@ -10,11 +10,11 @@
 use aura_prompts::SteeringKind;
 use serde_json::json;
 
-use crate::agent_loop::steering::early_oracle::EarlyTestOracle;
-use crate::agent_loop::steering::implement_now::ImplementNowSteering;
-use crate::agent_loop::steering::repeated_read::RepeatedReadTracker;
-use crate::agent_loop::steering::SteeringRegistry;
-use crate::types::{ToolCallInfo, ToolCallResult};
+use crate::early_oracle::EarlyTestOracle;
+use crate::implement_now::ImplementNowSteering;
+use crate::registry::SteeringRegistry;
+use crate::repeated_read::RepeatedReadTracker;
+use crate::types::{FileChange, FileChangeKind, ToolCallInfo, ToolCallResult};
 
 fn read_tool(id: &str, path: &str) -> ToolCallInfo {
     ToolCallInfo {
@@ -50,9 +50,9 @@ fn ok_write_result(id: &str, path: &str) -> ToolCallResult {
         is_error: false,
         kind: aura_core::ToolResultKind::Ok,
         stop_loop: false,
-        file_changes: vec![crate::types::FileChange {
+        file_changes: vec![FileChange {
             path: path.to_string(),
-            kind: crate::types::FileChangeKind::Modify,
+            kind: FileChangeKind::Modify,
             lines_added: 1,
             lines_removed: 0,
         }],
@@ -64,8 +64,6 @@ fn repeated_read_drains_after_threshold() {
     let mut registry = SteeringRegistry::new();
     registry.push(Box::new(RepeatedReadTracker::new()));
 
-    // Issue the same identical-byte read THRESHOLD times so the
-    // tracker queues exactly one nudge for the NEXT turn.
     let threshold = aura_config::REPEATED_READ_THRESHOLD;
     for i in 0..threshold {
         let tool = read_tool(&format!("toolu_{i}"), "src/lib.rs");
@@ -73,8 +71,6 @@ fn repeated_read_drains_after_threshold() {
         registry.observe_tool(&tool, &result);
     }
 
-    // First begin_turn boundary is when the queued nudge should
-    // ride out.
     registry.begin_turn();
     let drained = registry.drain_for_next_turn();
     assert_eq!(
@@ -87,8 +83,6 @@ fn repeated_read_drains_after_threshold() {
         "drained kind must be a RepeatedRead nudge",
     );
 
-    // Second turn: counts are reset and no fresh repeats — drain is
-    // empty. Pins the "at most once per (turn, hash) pair" contract.
     registry.begin_turn();
     let drained2 = registry.drain_for_next_turn();
     assert!(
@@ -131,8 +125,6 @@ fn implement_now_drains_when_threshold_crossed() {
         "implement_now_injected latch must be set after the drain so the circling-read gate fires",
     );
 
-    // Second turn: the one-shot latch on `ImplementNowSteering`
-    // holds even though the counter is still over threshold.
     registry.begin_turn();
     let drained2 = registry.drain_for_next_turn();
     assert!(
@@ -171,8 +163,6 @@ fn implement_now_skipped_after_write() {
         let result = ok_read_result(&tool.id, "stub");
         registry.observe_tool(&tool, &result);
     }
-    // A successful write disarms the gate even though the
-    // exploration counter is already over threshold.
     let write = write_tool("toolu_write", "src/file_0.rs");
     let write_res = ok_write_result(&write.id, "src/file_0.rs");
     registry.observe_tool(&write, &write_res);
@@ -191,15 +181,11 @@ fn early_oracle_drains_after_first_read_batch() {
         true,
     )));
 
-    // First read-only batch is "open": observe a couple of reads,
-    // begin_turn closes the batch and queues the hint for drain.
     let r1 = read_tool("toolu_r1", "src/lib.rs");
     let r2 = read_tool("toolu_r2", "src/main.rs");
     registry.observe_tool(&r1, &ok_read_result(&r1.id, "fn lib() {}"));
     registry.observe_tool(&r2, &ok_read_result(&r2.id, "fn main() {}"));
 
-    // First begin_turn closes the open batch. The drain yields the
-    // single TaskAlreadySatisfiedHint.
     registry.begin_turn();
     let drained = registry.drain_for_next_turn();
     assert_eq!(
@@ -214,7 +200,6 @@ fn early_oracle_drains_after_first_read_batch() {
         other => panic!("unexpected kind: {other:?}"),
     }
 
-    // Subsequent turns: oracle is disarmed. No further hints.
     registry.begin_turn();
     let drained2 = registry.drain_for_next_turn();
     assert!(drained2.is_empty(), "early oracle is single-shot per task",);
@@ -236,9 +221,8 @@ fn early_oracle_skipped_without_test_command() {
 }
 
 #[test]
-fn registry_for_config_installs_minimum_two_sources() {
-    let config = crate::agent_loop::AgentLoopConfig::for_agent("test-model");
-    let registry = SteeringRegistry::for_config(&config);
+fn registry_for_loop_installs_minimum_two_sources() {
+    let registry = SteeringRegistry::for_loop(false, None);
     // Chat config: no `phase_reset_signal`, no `early_test_oracle`.
     // Only the always-installed `RepeatedReadTracker` and
     // (permanently-disarmed) `ImplementNowSteering` should ride.

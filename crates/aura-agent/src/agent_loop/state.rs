@@ -172,7 +172,10 @@ impl LoopState {
             session_read_paths: std::collections::HashSet::new(),
             read_after_write_allowances: std::collections::HashMap::new(),
             implement_now_injected: false,
-            steering: SteeringRegistry::for_config(config),
+            steering: SteeringRegistry::for_loop(
+                config.phase_reset_signal.is_some(),
+                config.early_test_oracle.clone(),
+            ),
         }
     }
 

@@ -1,0 +1,17 @@
+[package]
+name = "aura-agent-loop"
+description = "Agent turn-loop entrypoint (Phase 6a shell over aura-agent)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Phase 6a shell: re-export the agent turn loop from `aura-agent`
+# so future callers (notably `aura-fleet-spawn`) can bind to the
+# layered `aura-agent-loop` crate name today. The full extraction
+# of the loop into this crate stages in a later phase.
+aura-agent = { path = "../aura-agent" }
+
+[lints]
+workspace = true

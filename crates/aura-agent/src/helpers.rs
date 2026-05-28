@@ -1,40 +1,20 @@
 //! Helper functions for the agent loop.
+//!
+//! Phase 6a moved `append_warning`, `is_exploration_tool`, and
+//! `is_write_tool` into `aura-agent-steering` so the steering crate
+//! does not need to depend back on `aura-agent`. This module
+//! re-exports them under their historical `crate::helpers::*`
+//! paths so every existing call site keeps working unchanged.
 
 use aura_core::LineDiff;
-use aura_reasoner::{ContentBlock, Message, Role};
 use std::path::Path;
 
 use crate::types::{FileChange, FileChangeKind};
 
-/// Append a warning as a text block to the last user message, or push a new
-/// user message if the last message isn't a user message.
-///
-/// This is safe to call after `tool_result` messages because it appends to
-/// the existing user message rather than inserting a new one that would
-/// break the `tool_use/tool_result` adjacency required by Anthropic.
-pub fn append_warning(messages: &mut Vec<Message>, warning: &str) {
-    if let Some(last) = messages.last_mut() {
-        if last.role == Role::User {
-            last.content.push(ContentBlock::Text {
-                text: warning.to_string(),
-            });
-            return;
-        }
-    }
-    messages.push(Message::user(warning));
-}
+pub use aura_agent_steering::{append_warning, is_exploration_tool, is_write_tool};
 
-/// Check if a tool name is a write tool (mutation).
-#[must_use]
-pub fn is_write_tool(name: &str) -> bool {
-    aura_config::WRITE_TOOLS.contains(&name)
-}
-
-/// Check if a tool name is an exploration tool (read-only).
-#[must_use]
-pub fn is_exploration_tool(name: &str) -> bool {
-    aura_config::EXPLORATION_TOOLS.contains(&name)
-}
+#[cfg(test)]
+use aura_reasoner::{Message, Role};
 
 /// Infer file mutations for a successful write tool call.
 ///

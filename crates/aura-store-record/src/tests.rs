@@ -96,6 +96,62 @@ fn record_payload_inline_round_trips() {
     assert_eq!(payload, parsed);
 }
 
+#[test]
+fn record_payload_summary_round_trips() {
+    // Phase 6a: AuditedLite summary variant.
+    let payload = RecordPayload::Summary {
+        head: Bytes::from_static(b"head-bytes"),
+        tail: Bytes::from_static(b"tail-bytes"),
+        full_hash: "abcdef".into(),
+        full_len: 1024,
+    };
+    let json = serde_json::to_string(&payload).expect("serialise");
+    let parsed: RecordPayload = serde_json::from_str(&json).expect("deserialise");
+    assert_eq!(payload, parsed);
+}
+
+#[test]
+fn summarize_payload_below_threshold_yields_inline() {
+    let bytes = b"small";
+    let payload = crate::summarize_payload(bytes, 1024);
+    match payload {
+        RecordPayload::Inline(b) => assert_eq!(b.as_ref(), bytes),
+        other => panic!("expected Inline, got {other:?}"),
+    }
+}
+
+#[test]
+fn summarize_payload_above_threshold_yields_summary() {
+    // 5 KiB payload, 1 KiB threshold.
+    let payload_bytes: Vec<u8> = (0u8..=255).cycle().take(5 * 1024).collect();
+    let payload = crate::summarize_payload(&payload_bytes, 1024);
+    match payload {
+        RecordPayload::Summary {
+            head,
+            tail,
+            full_hash,
+            full_len,
+        } => {
+            assert_eq!(head.len(), 1024);
+            assert_eq!(tail.len(), 1024);
+            assert_eq!(full_len, payload_bytes.len());
+            assert_eq!(head.as_ref(), &payload_bytes[..1024]);
+            assert_eq!(tail.as_ref(), &payload_bytes[payload_bytes.len() - 1024..]);
+            let expected = blake3::hash(&payload_bytes).to_hex().to_string();
+            assert_eq!(full_hash, expected);
+        }
+        other => panic!("expected Summary, got {other:?}"),
+    }
+}
+
+#[test]
+fn summarize_payload_is_deterministic_across_calls() {
+    let payload_bytes: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+    let first = crate::summarize_payload(&payload_bytes, 1024);
+    let second = crate::summarize_payload(&payload_bytes, 1024);
+    assert_eq!(first, second, "summarisation must be deterministic");
+}
+
 // ---------------------------------------------------------------------
 // In-memory `RecordLog` mock — proves the trait is satisfiable and
 // that the strict-monotone-sequence invariant documented in

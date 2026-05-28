@@ -1,0 +1,31 @@
+[package]
+name = "aura-agent-kernel"
+description = "Deterministic kernel for Aura (agent layer, Phase 6a)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core = { path = "../aura-core" }
+aura-core-modes = { path = "../aura-core-modes" }
+aura-store = { path = "../aura-store" }
+aura-store-record = { path = "../aura-store-record" }
+aura-reasoner = { path = "../aura-reasoner" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

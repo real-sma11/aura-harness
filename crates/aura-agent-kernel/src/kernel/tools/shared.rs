@@ -216,6 +216,31 @@ pub(super) struct ToolOutcomeInputs<'a> {
     pub tool_use_id: String,
     pub tool_name: &'a str,
     pub executed: Option<(Action, Effect)>,
+    /// `Some(threshold)` when the kernel is in
+    /// [`aura_core_modes::KernelMode::AuditedLite`] — effect payloads
+    /// above `threshold` bytes are summarised before write. `None`
+    /// (Audited mode) stores payloads verbatim.
+    pub lite_threshold: Option<usize>,
+}
+
+/// Apply [`aura_core_modes::KernelMode::AuditedLite`] summarisation to
+/// `effect.payload` if `lite_threshold` is `Some(n)` and the payload
+/// exceeds `n`. The summary is serialised through the
+/// [`aura_store_record::RecordPayload`] taxonomy and re-encoded as
+/// JSON bytes so existing `Bytes`-typed payload fields downstream do
+/// not need to learn about the new shape.
+///
+/// In [`aura_core_modes::KernelMode::Audited`] mode (`None`), or for
+/// payloads below the threshold, the effect is returned unchanged.
+fn maybe_summarise_effect_payload(mut effect: Effect, lite_threshold: Option<usize>) -> Effect {
+    if let Some(threshold) = lite_threshold {
+        if effect.payload.len() > threshold {
+            let summary = aura_store_record::summarize_payload(&effect.payload, threshold);
+            let encoded = serde_json::to_vec(&summary).unwrap_or_else(|_| effect.payload.to_vec());
+            effect.payload = bytes::Bytes::from(encoded);
+        }
+    }
+    effect
 }
 
 /// Build a [`RecordEntry`] and the surrounding [`ProcessResult`] from
@@ -236,12 +261,14 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
         tool_use_id,
         tool_name,
         executed,
+        lite_threshold,
     } = inputs;
 
     let mut proposals = ProposalSet::new();
     proposals.proposals.push(kernel_proposal);
 
     if let Some((action, effect)) = executed {
+        let effect = maybe_summarise_effect_payload(effect, lite_threshold);
         let effect_failed = effect.status == EffectStatus::Failed;
         let decoded = decode_tool_effect(&effect);
         let had_failures = effect_failed || decoded.is_error;
@@ -328,6 +355,57 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
             runtime_capability_update: None,
             clear_runtime_capabilities: false,
             tool_decision: Some(tool_decision),
+        }
+    }
+}
+
+#[cfg(test)]
+mod summarisation_tests {
+    use super::*;
+    use aura_core::{Effect, EffectStatus};
+    use aura_store_record::RecordPayload;
+
+    fn effect_with(payload: Vec<u8>) -> Effect {
+        Effect::new(
+            aura_core::ActionId::generate(),
+            aura_core::EffectKind::Agreement,
+            EffectStatus::Committed,
+            payload,
+        )
+    }
+
+    #[test]
+    fn audited_mode_preserves_payload_verbatim() {
+        let original = vec![0xABu8; 4096];
+        let out = maybe_summarise_effect_payload(effect_with(original.clone()), None);
+        assert_eq!(out.payload.as_ref(), original.as_slice());
+    }
+
+    #[test]
+    fn audited_lite_below_threshold_is_inline() {
+        let payload = vec![0x42u8; 256];
+        let out = maybe_summarise_effect_payload(effect_with(payload.clone()), Some(1024));
+        assert_eq!(out.payload.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn audited_lite_above_threshold_is_summary_json() {
+        let payload = vec![0x37u8; 8192];
+        let out = maybe_summarise_effect_payload(effect_with(payload.clone()), Some(1024));
+        let decoded: RecordPayload = serde_json::from_slice(out.payload.as_ref())
+            .expect("payload should round-trip as RecordPayload JSON in AuditedLite mode");
+        match decoded {
+            RecordPayload::Summary {
+                full_len,
+                full_hash,
+                ..
+            } => {
+                assert_eq!(full_len, payload.len());
+                assert!(!full_hash.is_empty());
+            }
+            RecordPayload::Inline(_) => {
+                panic!("payload above threshold must summarise, not stay inline")
+            }
         }
     }
 }
