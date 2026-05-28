@@ -13,7 +13,9 @@
 //! and beyond.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use aura_plugin_hooks::HookEvent;
 use aura_reasoner::{Message, ModelProvider, ToolDefinition};
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
@@ -130,7 +132,7 @@ impl AgentLoop {
         &self,
         provider: &dyn ModelProvider,
         executor: &dyn AgentToolExecutor,
-        messages: Vec<Message>,
+        mut messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
         options: RunOptions<'_>,
     ) -> Result<AgentLoopResult, crate::AgentError> {
@@ -139,6 +141,54 @@ impl AgentLoop {
             cancellation_token,
             handle,
         } = options;
+        // Phase 8: fire UserPromptSubmit hook for the most recent
+        // user message in the input history. Handlers may return
+        // `Replace { new_value }` to mutate the prompt before it
+        // enters the model context, or `Block { reason }` to drop
+        // the turn entirely. The `is_empty(event)` short-circuit
+        // guarantees zero overhead when no plugins are enabled.
+        if let Some(host) = self.config.plugin_hooks.as_ref() {
+            if !host.is_empty(HookEvent::UserPromptSubmit) {
+                if let Some(idx) = messages
+                    .iter()
+                    .rposition(|m| matches!(m.role, aura_reasoner::Role::User))
+                {
+                    let prompt_text = messages[idx].text_content();
+                    let outcome =
+                        host.fire_user_prompt_submit(&prompt_text, Utc::now().to_rfc3339());
+                    match &outcome.decision {
+                        aura_plugin_hooks::HookOutcome::Replace { new_value } => {
+                            messages[idx] = aura_reasoner::Message::user(new_value);
+                        }
+                        aura_plugin_hooks::HookOutcome::Block { reason } => {
+                            tracing::info!(
+                                hook_reason = %reason,
+                                "UserPromptSubmit hook blocked prompt; returning empty result"
+                            );
+                            return Ok(AgentLoopResult {
+                                timed_out: false,
+                                insufficient_credits: false,
+                                stalled: false,
+                                llm_error: Some(format!("prompt blocked by plugin hook: {reason}")),
+                                total_text: String::new(),
+                                total_thinking: String::new(),
+                                total_input_tokens: 0,
+                                total_output_tokens: 0,
+                                total_cache_creation_input_tokens: 0,
+                                total_cache_read_input_tokens: 0,
+                                estimated_context_tokens: 0,
+                                context_breakdown: Default::default(),
+                                file_changes: Vec::new(),
+                                iterations: 0,
+                                messages,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let started_at = Instant::now();
         // ALWAYS instantiate an internal [`Session`] so the agent
         // loop has a unified handle to the `InputQueue` regardless
         // of whether the caller supplied an [`AgentRunnerHandle`].
@@ -188,10 +238,31 @@ impl AgentLoop {
             session: session.as_ref(),
         };
         let fut = self.run_inner(&ctx, messages, tools);
-        match observer {
+        let result = match observer {
             Some(obs) => aura_reasoner::DEBUG_RETRY_OBSERVER.scope(obs, fut).await,
             None => fut.await,
+        };
+        // Phase 8: fire `Stop` when the agent loop completes
+        // *cleanly* (i.e. `Ok(_)`). The hook is observer-only —
+        // its outcome cannot mutate the result. Errors and
+        // cancellations bypass the hook (those are not natural
+        // stops). The `is_empty(event)` short-circuit guarantees
+        // zero overhead when no plugins are enabled.
+        if let Ok(ref agent_result) = result {
+            if let Some(host) = self.config.plugin_hooks.as_ref() {
+                if !host.is_empty(HookEvent::Stop) {
+                    let duration_ms =
+                        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    host.fire_stop(
+                        u32::try_from(agent_result.iterations).unwrap_or(u32::MAX),
+                        agent_result.total_input_tokens,
+                        agent_result.total_output_tokens,
+                        duration_ms,
+                    );
+                }
+            }
         }
+        result
     }
 
     async fn run_inner(

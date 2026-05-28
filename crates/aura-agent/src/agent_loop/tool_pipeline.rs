@@ -313,6 +313,46 @@ pub(crate) async fn process_tool_results(
         cached_ids,
     } = prepared;
 
+    // Phase 8: fire `PreToolUse` + `PostToolUse` hooks for each
+    // call in the batch. The `is_empty(event)` short-circuit
+    // guarantees zero overhead for empty installs.
+    //
+    // **Deviation note**: `process_tool_results` is called *after*
+    // the executor has already run the batch (the `PreExecuted`
+    // batch type confirms this). Wiring `PreToolUse` to *block*
+    // dispatch mid-flight requires threading the hook host
+    // through the streaming pump's `spawn_tool_with_timeout` site
+    // — that is intentionally deferred to a follow-up patch so
+    // this commit stays surgical. `PreToolUse` fires here with
+    // the correct ctx so plugins can observe; `Block` decisions
+    // are surfaced in `tracing::warn!` only for now.
+    if let Some(host) = agent.config.plugin_hooks.as_ref() {
+        if !host.is_empty(aura_plugin_hooks::HookEvent::PreToolUse) {
+            for tc in &tool_calls {
+                let args = serde_json::to_string(&tc.input).unwrap_or_default();
+                let outcome = host.fire_pre_tool_use(&tc.name, &args, &tc.id);
+                if outcome.is_blocked() {
+                    tracing::warn!(
+                        tool_name = %tc.name,
+                        tool_use_id = %tc.id,
+                        "PreToolUse hook returned Block — observer-only in this revision"
+                    );
+                }
+            }
+        }
+        if !host.is_empty(aura_plugin_hooks::HookEvent::PostToolUse) {
+            for r in &all_results {
+                let tc_name = tool_calls
+                    .iter()
+                    .find(|t| t.id == r.tool_use_id)
+                    .map_or("", |t| t.name.as_str());
+                let status = if r.is_error { "error" } else { "ok" };
+                let summary: String = r.content.chars().take(256).collect();
+                host.fire_post_tool_use(tc_name, &r.tool_use_id, status, &summary);
+            }
+        }
+    }
+
     // Cumulative tracking (steering registry, file-change journal,
     // session-read cache, read-after-write allowances). The Live
     // path's cached-results subset is included here because

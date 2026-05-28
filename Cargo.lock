@@ -184,6 +184,7 @@ dependencies = [
  "aura-config",
  "aura-core",
  "aura-kernel",
+ "aura-plugin-hooks",
  "aura-prompts",
  "aura-reasoner",
  "aura-store",
@@ -511,6 +512,8 @@ dependencies = [
 name = "aura-fleet-daemon"
 version = "0.1.0"
 dependencies = [
+ "aura-config",
+ "aura-context-skills",
  "aura-core",
  "aura-core-modes",
  "aura-fleet-dispatch",
@@ -518,6 +521,8 @@ dependencies = [
  "aura-fleet-quota",
  "aura-fleet-registry",
  "aura-fleet-spawn",
+ "aura-plugin-core",
+ "aura-plugin-hooks",
  "aura-store",
  "thiserror 1.0.69",
  "tokio",
@@ -589,6 +594,7 @@ dependencies = [
  "aura-core-permissions",
  "aura-fleet-quota",
  "aura-fleet-registry",
+ "aura-plugin-hooks",
  "aura-store",
  "aura-store-db",
  "aura-store-record",
@@ -661,7 +667,11 @@ dependencies = [
 name = "aura-plugin-core"
 version = "0.1.0"
 dependencies = [
+ "aura-config",
  "aura-plugin-api",
+ "aura-plugin-connectors",
+ "aura-plugin-hooks",
+ "aura-plugin-mcp",
  "semver",
  "serde",
  "serde_json",
@@ -728,6 +738,8 @@ dependencies = [
  "aura-agent-subagent",
  "aura-automaton",
  "aura-compaction",
+ "aura-config",
+ "aura-context-skills",
  "aura-core",
  "aura-core-modes",
  "aura-core-permissions",
@@ -737,6 +749,8 @@ dependencies = [
  "aura-fleet-spawn",
  "aura-kernel",
  "aura-memory",
+ "aura-plugin-core",
+ "aura-plugin-hooks",
  "aura-prompts",
  "aura-protocol",
  "aura-reasoner",

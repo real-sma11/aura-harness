@@ -47,15 +47,19 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aura_config::PluginsConfig;
+use aura_context_skills::SkillRegistry;
 use aura_fleet_dispatch::FleetDispatcher;
 use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
 use aura_fleet_spawn::{
     ChildRunner, FleetSpawner, FleetSpawnerConfig, OrphanStore, ParentLeaseRegistry,
 };
+use aura_plugin_core::{load_enabled_plugins, PluginRuntime};
+use aura_plugin_hooks::{CtxMeta, HookEngine, HookEvent, SessionStartHookCtx};
 use aura_store::Store;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -63,6 +67,7 @@ use tracing::info;
 
 pub use aura_fleet_dispatch::AgentJob;
 pub use aura_fleet_mailbox::{Mailbox, MailboxConfig, MailboxError, MailboxSender};
+pub use aura_plugin_core::PluginLoadError;
 
 /// Wiring config consumed at daemon construction time.
 #[derive(Debug, Clone, Default)]
@@ -83,6 +88,43 @@ pub enum FleetDaemonError {
     /// [`FleetDaemon::run`] call.
     #[error("fleet daemon: mailbox receiver already taken")]
     ReceiverAlreadyTaken,
+    /// Catastrophic plugin load failure (the plugins root exists
+    /// but cannot be walked). Per-plugin failures do NOT surface
+    /// here — they're captured in
+    /// [`SessionStartReport::plugin_load_failures`].
+    #[error("fleet daemon: plugin load failed: {0}")]
+    Plugin(String),
+}
+
+/// Report returned from [`FleetDaemon::prepare_session`].
+///
+/// The materialised [`PluginRuntime`] is exposed so the caller can
+/// clone its `Arc<HookEngine>` / `Arc<McpConnectionManager>` /
+/// `Arc<ConnectorRegistry>` handles into the agent loop and fleet
+/// spawner config.
+#[derive(Debug)]
+pub struct SessionStartReport {
+    /// Materialised plugin runtime. The hook engine is already
+    /// loaded with every enabled plugin's hook contributions; the
+    /// `SessionStart` event has already fired for every registered
+    /// handler.
+    pub runtime: PluginRuntime,
+    /// Echoed session id (for callers that use the report to
+    /// derive subsequent firing-site contexts).
+    pub session_id: String,
+    /// Echoed root agent id.
+    pub agent_id: String,
+}
+
+impl SessionStartReport {
+    /// Convenience accessor for the per-plugin failure list. Returns
+    /// the same `Vec` as `runtime.load_failures` — kept here as a
+    /// shortcut so callers don't need to chase through the runtime
+    /// field.
+    #[must_use]
+    pub fn plugin_load_failures(&self) -> &[aura_plugin_hooks::PluginLoadFailure] {
+        &self.runtime.load_failures
+    }
 }
 
 /// Read-only bundle of [`Arc`] handles to the daemon's subsystems.
@@ -216,6 +258,84 @@ impl FleetDaemon {
     #[must_use]
     pub fn config(&self) -> &DaemonConfig {
         &self.config
+    }
+
+    /// **Phase 8** session-start materialisation.
+    ///
+    /// Walks `aura_home/plugins/` (filtered by `plugins_config`),
+    /// materialises the enabled plugins into a [`PluginRuntime`],
+    /// merges plugin skill roots into `skills`, and fires
+    /// [`HookEvent::SessionStart`] against the freshly-loaded hook
+    /// engine.
+    ///
+    /// Returns a [`SessionStartReport`] that the caller can inspect
+    /// (or surface into a session-start record). The report
+    /// includes the materialised [`PluginRuntime`] (clone the
+    /// `Arc` handles to wire the engine into your agent loop /
+    /// fleet spawner).
+    ///
+    /// **Backward-compat invariant**: an empty `~/.aura/plugins/`
+    /// directory + an empty `[plugins]` config yield a zero-cost
+    /// pass-through:
+    /// - `runtime.is_empty() == true`
+    /// - the [`HookEngine`] short-circuits via `is_empty(event)`
+    ///   on every subsequent firing site.
+    /// - no skill roots are added, no MCP processes are spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FleetDaemonError::Plugin`] for catastrophic walk
+    /// failures (the plugins directory exists but is unreadable).
+    /// Per-plugin failures are collected into
+    /// [`SessionStartReport::plugin_load_failures`] and do NOT
+    /// fail this call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_session(
+        &self,
+        aura_home: &Path,
+        plugins_config: &PluginsConfig,
+        skills: &mut SkillRegistry,
+        agent_id: &str,
+        session_id: &str,
+        mode: &str,
+        model_id: &str,
+    ) -> Result<SessionStartReport, FleetDaemonError> {
+        let runtime = load_enabled_plugins(aura_home, plugins_config)
+            .map_err(|err| FleetDaemonError::Plugin(format!("plugin load: {err}")))?;
+
+        // Skill roots: hand to the skills registry.
+        skills.add_plugin_roots(&runtime.skill_roots);
+
+        // SessionStart hook ctx → fire chain.
+        let ctx = SessionStartHookCtx {
+            meta: CtxMeta {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                parent_agent_id: None,
+            },
+            mode: mode.to_string(),
+            model_id: model_id.to_string(),
+            enabled_plugins: runtime.enabled.clone(),
+            plugin_load_failures: runtime.load_failures.clone(),
+        };
+        if !runtime.hook_engine.is_empty(HookEvent::SessionStart) {
+            let _ = HookEngine::fire_event(&runtime.hook_engine, &ctx, aura_home);
+        }
+
+        info!(
+            session_id,
+            agent_id,
+            enabled_count = runtime.enabled.len(),
+            failure_count = runtime.load_failures.len(),
+            skill_root_count = runtime.skill_roots.len(),
+            "fleet daemon: session prepared"
+        );
+
+        Ok(SessionStartReport {
+            runtime,
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+        })
     }
 
     /// Phase 7b: drain the mailbox until every sender is dropped.

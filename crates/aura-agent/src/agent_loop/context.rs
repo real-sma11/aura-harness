@@ -185,6 +185,21 @@ pub(super) fn compact_if_needed(
     let reserved_tokens = reserved_output_tokens(config, max_ctx);
     let raw_message_bytes = compaction::estimate_message_chars(&state.messages);
     let request_kind = effective_compaction_request_kind(config, iteration);
+
+    // Phase 8: fire `PreCompact` hook. A `Block` decision skips
+    // compaction this turn. Empty-engine short-circuit guarantees
+    // zero overhead for empty installs.
+    if let Some(host) = config.plugin_hooks.as_ref() {
+        if !host.is_empty(aura_plugin_hooks::HookEvent::PreCompact) {
+            let outcome = host.fire_pre_compact(estimated_tokens, "auto");
+            if outcome.is_blocked() {
+                tracing::info!("PreCompact hook blocked compaction this turn");
+                recompute_breakdown(config, state, tools);
+                return CompactionOutcome::None;
+            }
+        }
+    }
+
     let report = compaction::compact_messages(CompactionInput {
         messages: &mut state.messages,
         policy: CompactionPolicy {
@@ -206,6 +221,18 @@ pub(super) fn compact_if_needed(
         let compacted_tokens = heuristic_context_tokens(&state.messages);
         state.last_context_tokens_estimate = Some(compacted_tokens);
         state.result.estimated_context_tokens = compacted_tokens;
+
+        // Phase 8: fire `PostCompact` hook (observer-only).
+        if let Some(host) = config.plugin_hooks.as_ref() {
+            if !host.is_empty(aura_plugin_hooks::HookEvent::PostCompact) {
+                let summary = match &outcome {
+                    CompactionOutcome::Applied(tier) => format!("{tier:?}"),
+                    CompactionOutcome::NeedsSummary(_) => "needs_summary".to_string(),
+                    CompactionOutcome::None => "none".to_string(),
+                };
+                host.fire_post_compact(estimated_tokens, compacted_tokens, &summary);
+            }
+        }
     }
 
     recompute_breakdown(config, state, tools);

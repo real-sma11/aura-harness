@@ -51,6 +51,7 @@ pub mod error;
 pub mod install;
 pub mod manifest;
 pub mod marketplace;
+pub mod runtime;
 pub mod trust;
 
 pub use aura_plugin_api::{ContributionKind, PluginContributor, PluginId, PluginRoot};
@@ -65,6 +66,7 @@ pub use manifest::{
     SystemPromptContribution, TrustSection,
 };
 pub use marketplace::{MarketplaceEntry, MarketplaceManifest};
+pub use runtime::{load_enabled_plugins, PluginLoadError, PluginRuntime};
 pub use trust::{
     enable_with_prompter, summarise_contributions, AlwaysNo, AlwaysYes, EnableDecision,
     EnableError, EnableOutcome, PluginEnableState, TrustPrompter, TtyPrompter,

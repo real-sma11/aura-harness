@@ -14,10 +14,13 @@ use aura_core::{AgentId, SubagentExit, SubagentResult, Transaction, TransactionT
 use aura_core_modes::{ModeViolation, SpawnMode};
 use aura_fleet_quota::{BudgetTicket, QuotaError, QuotaPool, QuotaRequest};
 use aura_fleet_registry::{AgentSlot, FleetRegistry, RegistryError};
+use aura_plugin_hooks::{HookEngine, SharedHookEngine, SubagentStartHookCtx, SubagentStopHookCtx};
 use aura_store::Store;
 use bytes::Bytes;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::time::Instant;
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -124,6 +127,18 @@ pub struct FleetSpawnerConfig {
     /// gracefully propagates into every detached / batch child.
     /// `None` disables fleet-shutdown propagation (default).
     pub fleet_shutdown: Option<CancellationToken>,
+    /// Optional shared [`HookEngine`] for [`HookEvent::SubagentStart`] /
+    /// [`HookEvent::SubagentStop`] firing. `None` disables hook
+    /// firing entirely (the empty-install backward-compat path).
+    pub hook_engine: Option<SharedHookEngine>,
+    /// Resolved `AURA_HOME` path. Required when [`Self::hook_engine`]
+    /// is `Some` so the hook subprocess can be handed the correct
+    /// `AURA_HOME` env var.
+    pub aura_home: Option<PathBuf>,
+    /// Session id used for hook env injection. `None` produces an
+    /// empty `AURA_SESSION_ID` value, which is acceptable for
+    /// in-process tests.
+    pub session_id: Option<String>,
 }
 
 impl Default for FleetSpawnerConfig {
@@ -131,6 +146,9 @@ impl Default for FleetSpawnerConfig {
         Self {
             max_concurrent_tools: 4,
             fleet_shutdown: None,
+            hook_engine: None,
+            aura_home: None,
+            session_id: None,
         }
     }
 }
@@ -344,6 +362,16 @@ impl FleetSpawner {
 
         match mode {
             SpawnMode::Wait => {
+                fire_subagent_start_hook(
+                    self.config.hook_engine.as_ref(),
+                    self.config.aura_home.as_deref(),
+                    self.config.session_id.as_deref(),
+                    parent_agent_id,
+                    child_agent_id,
+                    &spec_for_runner,
+                    &manifest,
+                );
+                let started_at = Instant::now();
                 let result = runner
                     .run(ChildRunContext {
                         spec: spec_for_runner,
@@ -357,6 +385,15 @@ impl FleetSpawner {
                     .await?;
                 drop(ticket);
                 let _ = registry.set_state(child_agent_id, state_for_exit(&result.exit));
+                fire_subagent_stop_hook(
+                    self.config.hook_engine.as_ref(),
+                    self.config.aura_home.as_deref(),
+                    self.config.session_id.as_deref(),
+                    parent_agent_id,
+                    child_agent_id,
+                    &result,
+                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                );
                 if let Some(key) = dedupe_key {
                     leases_for_dedupe.record_dedupe(
                         parent_agent_id,
@@ -385,12 +422,25 @@ impl FleetSpawner {
                     .write(&orphan_record)
                     .map_err(|e| SpawnError::Orphan(e.to_string()))?;
 
+                fire_subagent_start_hook(
+                    self.config.hook_engine.as_ref(),
+                    self.config.aura_home.as_deref(),
+                    self.config.session_id.as_deref(),
+                    parent_agent_id,
+                    child_agent_id,
+                    &spec_for_runner,
+                    &manifest,
+                );
+                let hook_engine_for_task = self.config.hook_engine.clone();
+                let aura_home_for_task = self.config.aura_home.clone();
+                let session_id_for_task = self.config.session_id.clone();
                 let (result_tx, result_rx) = oneshot::channel::<SubagentResult>();
                 let registry_clone = registry.clone();
                 let orphans_for_task = orphans.clone();
                 let runner_clone = runner.clone();
                 let cancellation_clone = cancellation.clone();
                 tokio::spawn(async move {
+                    let started_at = Instant::now();
                     let outcome = runner_clone
                         .run(ChildRunContext {
                             spec: spec_for_runner,
@@ -427,6 +477,15 @@ impl FleetSpawner {
                         model_id: orphan_record.model_id.clone(),
                         originating_user_id: orphan_record.originating_user_id.clone(),
                     });
+                    fire_subagent_stop_hook(
+                        hook_engine_for_task.as_ref(),
+                        aura_home_for_task.as_deref(),
+                        session_id_for_task.as_deref(),
+                        parent_agent_id,
+                        child_agent_id,
+                        &result,
+                        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    );
                     let _ = result_tx.send(result);
                     drop(ticket);
                 });
@@ -758,6 +817,81 @@ fn build_cancellation(
         }
     }
     child
+}
+
+/// Fire the [`HookEvent::SubagentStart`] hook chain. No-op when no
+/// hook engine is configured (the empty-install backward-compat
+/// path) or when the engine has zero handlers registered.
+fn fire_subagent_start_hook(
+    engine: Option<&SharedHookEngine>,
+    aura_home: Option<&std::path::Path>,
+    session_id: Option<&str>,
+    parent_agent_id: AgentId,
+    child_agent_id: AgentId,
+    spec: &aura_agent_subagent::SubagentSpec,
+    manifest: &aura_agent_subagent::OverrideManifest,
+) {
+    let Some(engine) = engine else {
+        return;
+    };
+    if engine.is_empty(aura_plugin_hooks::HookEvent::SubagentStart) {
+        return;
+    }
+    let Some(home) = aura_home else {
+        return;
+    };
+    let manifest_json = serde_json::to_string(manifest).unwrap_or_else(|_| "{}".to_string());
+    let ctx = SubagentStartHookCtx {
+        meta: aura_plugin_hooks::CtxMeta {
+            session_id: session_id.unwrap_or_default().to_string(),
+            agent_id: child_agent_id.to_string(),
+            parent_agent_id: Some(parent_agent_id.to_string()),
+        },
+        child_id: child_agent_id.to_string(),
+        mode: format!("{:?}", spec.mode).to_ascii_lowercase(),
+        kernel_mode: format!("{:?}", spec.kernel_mode).to_ascii_lowercase(),
+        override_manifest: manifest_json,
+    };
+    let _ = HookEngine::fire_event(engine, &ctx, home);
+}
+
+/// Fire the [`HookEvent::SubagentStop`] hook chain. Observer-only.
+fn fire_subagent_stop_hook(
+    engine: Option<&SharedHookEngine>,
+    aura_home: Option<&std::path::Path>,
+    session_id: Option<&str>,
+    parent_agent_id: AgentId,
+    child_agent_id: AgentId,
+    result: &SubagentResult,
+    duration_ms: u64,
+) {
+    let Some(engine) = engine else {
+        return;
+    };
+    if engine.is_empty(aura_plugin_hooks::HookEvent::SubagentStop) {
+        return;
+    }
+    let Some(home) = aura_home else {
+        return;
+    };
+    let result_summary = match &result.exit {
+        SubagentExit::Completed => "completed".to_string(),
+        SubagentExit::Cancelled => "cancelled".to_string(),
+        SubagentExit::Timeout => "timeout".to_string(),
+        SubagentExit::Failed { reason } => format!("failed: {reason}"),
+        SubagentExit::Rejected { reason } => format!("rejected: {reason}"),
+    };
+    let ctx = SubagentStopHookCtx {
+        meta: aura_plugin_hooks::CtxMeta {
+            session_id: session_id.unwrap_or_default().to_string(),
+            agent_id: child_agent_id.to_string(),
+            parent_agent_id: Some(parent_agent_id.to_string()),
+        },
+        child_id: child_agent_id.to_string(),
+        result_summary,
+        duration_ms,
+    };
+    let _ = HookEngine::fire_event(engine, &ctx, home);
 }
 
 fn state_for_exit(exit: &SubagentExit) -> aura_fleet_registry::AgentState {

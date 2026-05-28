@@ -35,6 +35,10 @@ aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }
 aura-fleet-daemon = { path = "../aura-fleet-daemon" }
+aura-config = { path = "../aura-config" }
+aura-context-skills = { path = "../aura-context-skills" }
+aura-plugin-core = { path = "../aura-plugin-core" }
+aura-plugin-hooks = { path = "../aura-plugin-hooks" }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

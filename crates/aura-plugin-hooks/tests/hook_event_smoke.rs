@@ -57,7 +57,7 @@ fn engine_fires_event_with_env_injection() {
     let dir = TempDir::new().expect("temp dir");
     let script = noop_script(dir.path());
 
-    let mut engine = HookEngine::default();
+    let engine = HookEngine::default();
     engine.register(RegisteredHook {
         plugin_id: "test-plug".into(),
         event: HookEvent::SessionStart,
@@ -105,7 +105,7 @@ fn env_vars_include_codex_and_claude_aliases() {
 
 #[test]
 fn engine_records_failed_hook_in_summary() {
-    let mut engine = HookEngine::default();
+    let engine = HookEngine::default();
     // Register a deliberately bogus command. The spawn will fail (no
     // such binary on the OS PATH); the summary must show 1 failure
     // and no success, and the engine must NOT return an Err.

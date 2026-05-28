@@ -225,6 +225,15 @@ pub struct AgentLoopConfig {
     /// [`crate::agent_runner::AgentRunnerConfig::early_test_oracle`].
     /// Chat / generic callers leave it `None`.
     pub early_test_oracle: Option<EarlyTestOracleConfig>,
+    /// **Phase 8** plugin hook host. When `Some`, the agent loop
+    /// fires lifecycle events through the host's `fire_*`
+    /// helpers; when `None`, the loop carries zero hook overhead.
+    ///
+    /// The host's `is_empty(event)` short-circuit guarantees zero
+    /// overhead even when the host is `Some` but no hooks are
+    /// registered for a given event — the empty-install backward-
+    /// compat invariant.
+    pub plugin_hooks: Option<aura_plugin_hooks::PluginHookHost>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -299,6 +308,11 @@ impl AgentLoopConfig {
             // populates `Some(EarlyTestOracleConfig { enabled: true,
             // test_command: ... })` from its dispatch JSON.
             early_test_oracle: None,
+            // Phase 8: plugin hook firing is opt-in. The runtime
+            // crate populates this when a plugin runtime is
+            // materialised at session start; chat / unit-test
+            // callers leave it `None`.
+            plugin_hooks: None,
         }
     }
 }

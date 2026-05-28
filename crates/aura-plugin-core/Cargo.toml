@@ -9,6 +9,10 @@ repository.workspace = true
 
 [dependencies]
 aura-plugin-api = { path = "../aura-plugin-api" }
+aura-plugin-hooks = { path = "../aura-plugin-hooks" }
+aura-plugin-mcp = { path = "../aura-plugin-mcp" }
+aura-plugin-connectors = { path = "../aura-plugin-connectors" }
+aura-config = { path = "../aura-config" }
 semver = { version = "1.0", features = ["serde"] }
 serde = { workspace = true }
 thiserror = { workspace = true }

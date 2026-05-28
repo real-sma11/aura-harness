@@ -129,13 +129,49 @@ impl SkillRegistry {
         self.skills.is_empty()
     }
 
-    /// Phase 3 stub. Phase 8 wires plugin-provided skill roots into
-    /// discovery; today this method is intentionally a no-op so the
-    /// agent loop can call it unconditionally without a feature flag.
+    /// Add plugin-contributed skill roots to the registry.
     ///
-    /// _Stub — does nothing today; see Phase 8 plugin runtime integration._
-    pub fn add_plugin_roots(&mut self, _roots: &[std::path::PathBuf]) {
-        // intentionally no-op until Phase 8 plugin runtime integration
+    /// Each `root` is treated like the existing `extra_dirs`
+    /// loader entry: every direct sub-directory of `root` that
+    /// contains a `SKILL.md` file is parsed and registered with
+    /// [`SkillSource::Extra`](crate::types::SkillSource::Extra).
+    ///
+    /// Per the Phase 8 invariant: plugin skill roots are merged
+    /// AFTER personal / agent / workspace roots; a workspace skill
+    /// with the same name as a plugin skill keeps the slot via
+    /// the existing precedence rules.
+    ///
+    /// Empty `roots` is a no-op, preserving the empty-install
+    /// backward-compat invariant.
+    pub fn add_plugin_roots(&mut self, roots: &[std::path::PathBuf]) {
+        if roots.is_empty() {
+            return;
+        }
+        let cfg = crate::loader::SkillLoaderConfig {
+            extra_dirs: roots.to_vec(),
+            ..crate::loader::SkillLoaderConfig::default()
+        };
+        let loader = crate::loader::SkillLoader::new(cfg);
+        for result in loader.load_all() {
+            match result {
+                Ok(skill) => {
+                    let name = skill.frontmatter.name.clone();
+                    let new_precedence = skill.source.precedence();
+                    if let Some(existing) = self.skills.get(&name) {
+                        if new_precedence <= existing.source.precedence() {
+                            tracing::debug!(
+                                "plugin skill {name} ignored (existing source has equal/higher precedence)"
+                            );
+                            continue;
+                        }
+                    }
+                    self.skills.insert(name, skill);
+                }
+                Err(err) => {
+                    tracing::warn!("failed to load plugin skill: {err}");
+                }
+            }
+        }
     }
 }
 

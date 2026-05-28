@@ -17,6 +17,7 @@ aura-reasoner = { path = "../aura-reasoner" }
 aura-store = { path = "../aura-store" }
 aura-tools = { path = "../aura-tools" }
 aura-auth = { path = "../aura-auth" }
+aura-plugin-hooks = { path = "../aura-plugin-hooks" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

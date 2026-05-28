@@ -16,6 +16,7 @@ aura-store = { path = "../aura-store" }
 aura-store-record = { path = "../aura-store-record" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }
+aura-plugin-hooks = { path = "../aura-plugin-hooks" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
