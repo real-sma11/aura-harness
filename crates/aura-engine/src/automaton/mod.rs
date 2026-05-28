@@ -281,7 +281,7 @@ impl AutomatonBridge {
         config.max_context_tokens = crate::context_window_for_model(model);
         config.auth_token = auth_token.map(String::from);
         // Forward all four router/billing identifiers from the
-        // `POST /automaton/start` payload. These flow into
+        // `POST /v1/run` payload. These flow into
         // `AgentLoopConfig` (see `configure_loop_config`) and then
         // onto every `ModelRequest`, where the Anthropic provider
         // stamps them as `X-Aura-Org-Id` / `X-Aura-Session-Id` /

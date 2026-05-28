@@ -73,11 +73,12 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 axum = { workspace = true }
 # Phase C / Commit 4 note: the HTTP `DomainApi` impl moved to
-# `aura-domain-http` (which now owns the `reqwest`-feature surface
-# the gateway used to import directly). `reqwest` stays as a
-# direct dep here because `gateway/session/cross_agent_hook.rs`
-# still issues outbound HTTP from the WS-session layer for the
-# Aura-OS cross-agent callback path.
+# `aura-domain-http` (which now owns the domain-call `reqwest`
+# surface the gateway used to import directly). `reqwest` stays as
+# a direct dep here for the runtime-owned outbound HTTP exceptions:
+# `gateway/session/generation.rs` proxies router SSE generation
+# streams, and `gateway/session/cross_agent_hook.rs` issues the
+# Aura-OS cross-agent callback.
 reqwest = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

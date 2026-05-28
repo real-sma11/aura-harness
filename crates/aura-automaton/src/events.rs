@@ -263,8 +263,7 @@ impl AutomatonEvent {
     /// `event_kind=...` field on the closed-receiver telemetry emitted
     /// by [`crate::TickContext::emit`] and as the discriminator any
     /// out-of-crate consumer (run-log forwarder, operator UI badge,
-    /// `/stream/automaton/:id` WS) needs without round-tripping the
-    /// JSON tag.
+    /// `/stream/:run_id` WS) needs without round-tripping the JSON tag.
     ///
     /// Pre-Phase-6 this lived as a free function next to the emit-side
     /// telemetry and was hand-maintained — every new variant required

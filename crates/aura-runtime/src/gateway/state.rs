@@ -3,9 +3,10 @@
 //! Split out of `mod.rs` so the dispatch root only owns the slim
 //! `create_router` mounting logic. Field visibility stays `pub(crate)`
 //! because the route handlers live in sibling modules
-//! (`automaton.rs`, `tx.rs`, `files.rs`, `memory/`, `ws.rs`, …) and
-//! reach into the state directly. External callers must always go
-//! through [`RouterState::new`].
+//! (`handlers/run.rs`, `handlers/tx.rs`, `handlers/files.rs`,
+//! `handlers/memory/`, `handlers/run_ws.rs`, …) and reach into the
+//! state directly. External callers must always go through
+//! [`RouterState::new`].
 
 use std::sync::{Arc, RwLock};
 
@@ -67,10 +68,10 @@ pub struct RouterState {
     /// Bounded pool of WebSocket connection slots.
     ///
     /// Every upgrade handler (`/ws/terminal`, `/stream/:run_id`) must call
-    /// [`super::ws::try_acquire_ws_slot`] and attach the returned permit to
-    /// the spawned socket task. When the semaphore is empty, the handler
-    /// short-circuits with `503 Service Unavailable` instead of tying
-    /// up another tokio task.
+    /// [`super::handlers::run_ws::try_acquire_ws_slot`] and attach the
+    /// returned permit to the spawned socket task. When the semaphore is
+    /// empty, the handler short-circuits with `503 Service Unavailable`
+    /// instead of tying up another tokio task.
     pub(crate) ws_slots: Arc<Semaphore>,
     /// `run_id` (UUID string) → fully-prepared chat
     /// [`crate::gateway::session::Session`] awaiting a WS attach.

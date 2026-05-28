@@ -1,8 +1,8 @@
-//! Phase 10 carve-out 1: lifted bodies of the `aura` and `aura-node`
-//! binaries. The root binary `main.rs` files are reduced to a thin
-//! entrypoint that initialises tracing / `dotenvy` and calls
-//! [`run`] / [`run_node`]; every line of useful logic now lives in
-//! this module.
+//! Phase 10 carve-out 1: lifted body of the `aura` CLI binary. The
+//! root `src/main.rs` is reduced to a thin entrypoint that initialises
+//! `dotenvy` and calls [`run`]; every line of useful CLI logic now
+//! lives in this module. The `aura-node` entrypoint lives in
+//! `aura_runtime::run_node` and is re-exported from this crate root.
 
 use crate::cli::{
     AgentsCommand, AgentsSubcommand, Cli, Commands, MigrateArgs, PluginsCommand, PluginsSubcommand,

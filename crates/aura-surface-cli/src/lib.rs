@@ -2,19 +2,20 @@
 //!
 //! Layer: surface
 //!
-//! Phase 9 + 10 surface-layer composition root for the `aura` and
-//! `aura-node` binaries. The root binaries are thin entry-points
-//! that delegate to [`run`] / [`run_node`]; this crate owns CLI
-//! parsing, session bootstrapping, plugin handling, the embedded
-//! TUI / API server, the headless `aura-node` HTTP entrypoint,
+//! Phase 9 + 10 surface-layer composition root for the `aura` CLI
+//! binary. The root `src/main.rs` entry point is a thin shim that
+//! delegates to [`run`]; this crate owns CLI parsing, session
+//! bootstrapping, plugin handling, the embedded TUI / API server,
 //! and the daemon-client wiring.
 //!
 //! Phase 9 shipped the public *type surface* of the composition
 //! root (CLI flag definitions, `AgentMode` resolution helper).
 //! Phase 10 carve-out 1 lifts the full body of `src/main.rs` (the
-//! `aura` binary) and `crates/aura-runtime/src/main.rs` (the
-//! `aura-node` binary) into this crate, so the root binaries are
-//! now both ≤ 10 lines.
+//! `aura` binary) into this crate. The `aura-node` binary body lives
+//! in [`aura_runtime::run_node`] because `aura-runtime` owns the
+//! HTTP/WS gateway binary and `aura-surface-cli` already depends on
+//! `aura-runtime` for headless-mode wiring; this crate re-exports it
+//! as [`run_node`] so the documented surface path remains callable.
 //!
 //! ## Mode resolution priority
 //!

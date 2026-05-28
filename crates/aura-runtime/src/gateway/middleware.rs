@@ -73,7 +73,7 @@ use super::RouterState;
 /// - A **public** sub-router that currently only exposes `GET /health`
 ///   for liveness probes.
 /// - A **protected** sub-router that layers every other route behind the
-///   [`auth::require_bearer_mw`] middleware via `.route_layer(...)` so
+///   [`auth_mw::require_bearer_mw`] middleware via `.route_layer(...)` so
 ///   unauthenticated callers are rejected with `401` before any handler
 ///   logic runs. Using `route_layer` (not `layer`) keeps the middleware
 ///   scoped to the matched routes and lets `.fallback` still apply
@@ -313,7 +313,7 @@ pub fn create_router(state: RouterState) -> Router {
         // the small-JSON POSTs at 4 KiB) override the 1 MiB default
         // that applies to everything else. This keeps the 1 MiB
         // ceiling as a safety net for the few legitimately-large
-        // endpoints (`/tx`, `/automaton/start`) while throwing 413
+        // endpoints (`/tx`, `/v1/run`) while throwing 413
         // early for everything that has no business seeing a megabyte
         // of body.
         //
@@ -511,7 +511,7 @@ type GovernorCfg = tower_governor::governor::GovernorConfig<
 /// non-zero integer literals, so `GovernorConfigBuilder::finish()`
 /// cannot fail here; the `.expect(...)` below is a
 /// provably-infallible-at-compile-time assertion. Covered by
-/// `router::tests::test_global_governor_config_is_valid`.
+/// `gateway::tests::test_global_governor_config_is_valid`.
 fn build_global_governor() -> Arc<GovernorCfg> {
     Arc::new(
         GovernorConfigBuilder::default()
@@ -522,7 +522,7 @@ fn build_global_governor() -> Arc<GovernorCfg> {
     )
 }
 
-/// Stricter rate limit for mutating endpoints (`/tx`, `/automaton/start`,
+/// Stricter rate limit for mutating endpoints (`/tx`, `/v1/run`,
 /// `:id/pause`, `:id/stop`). 5/sec burst 10.
 ///
 /// INVARIANT: same reasoning as [`build_global_governor`] — hard-coded

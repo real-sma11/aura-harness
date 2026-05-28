@@ -83,7 +83,7 @@ members = [
     # Phase C / Commit 4 surface-layer extraction: HTTP `DomainApi`
     # implementation (formerly `aura-runtime::domain`) plus the
     # JWT-injecting wrapper (formerly `aura-engine::jwt_domain`) live
-    # here so the gateway crate no longer depends on `reqwest`.
+    # here so the gateway crate no longer owns domain HTTP logic.
     "crates/aura-domain-http",
     "crates/aura-runtime",
     "crates/aura-protocol",

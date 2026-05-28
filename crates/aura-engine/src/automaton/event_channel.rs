@@ -5,8 +5,8 @@
 //! subscriber to a fast-terminating automaton can still observe the
 //! events emitted before it finished its handshake. The motivating
 //! incident — `aura-os-server`'s WS client connecting to
-//! `/stream/automaton/:id` *after* `POST /automaton/start` returned
-//! and seeing an empty stream — is described on [`EventChannel`].
+//! `/stream/:run_id` *after* `POST /v1/run` returned and seeing an
+//! empty stream — is described on [`EventChannel`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,9 +29,9 @@ pub(super) const EVENT_HISTORY_CAPACITY: usize = EVENT_BROADCAST_CAPACITY;
 /// How long an [`EventChannel`] is kept in [`AutomatonBridge::event_channels`]
 /// after the automaton emits `Done`. Provides a grace window for late
 /// WebSocket subscribers (in particular, aura-os-server connects to
-/// `/stream/automaton/:id` *after* `POST /automaton/start` returns, and
-/// a fast-failing automaton can emit all its events before the WS
-/// client even finishes its handshake). During this window
+/// `/stream/:run_id` *after* `POST /v1/run` returns, and a fast-failing
+/// automaton can emit all its events before the WS client even finishes
+/// its handshake). During this window
 /// `subscribe_events` still returns the full replay history so the
 /// late subscriber can reconstruct the task's outcome.
 pub(super) const RETENTION_AFTER_DONE: Duration = Duration::from_secs(300);

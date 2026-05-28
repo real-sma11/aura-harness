@@ -3,8 +3,8 @@
 //! All routes use `Authorization: Bearer <jwt>` (user JWT from session).
 //!
 //! Phase C / Commit 4 relocates this from `aura-runtime` into the
-//! standalone `aura-domain-http` crate so the gateway no longer
-//! depends on `reqwest`.
+//! standalone `aura-domain-http` crate so the gateway no longer owns
+//! domain HTTP routing or depends on `reqwest` for domain calls.
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;

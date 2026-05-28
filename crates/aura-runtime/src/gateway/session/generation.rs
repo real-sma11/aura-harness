@@ -1,6 +1,6 @@
-//! Generation request handler — proxies image/3D generation through the
-//! harness session to aura-router, translating router SSE events into typed
-//! `OutboundMessage::Generation*` variants.
+//! Generation request handler — proxies image, video, and 3D generation
+//! through the harness session to aura-router, translating router SSE events
+//! into typed `OutboundMessage::Generation*` variants.
 
 use super::Session;
 use crate::protocol::{
@@ -241,12 +241,13 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
         outbound,
         cancel,
     } = ctx;
-    // Declared-Exception surface (see `docs/invariants.md`): this proxy is a
-    // pure router-side SSE pipe, so we do not route through the kernel. We
-    // still apply bounded connect / handshake timeouts so a hung upstream
-    // cannot stall the WS session. The streaming body is guarded by an idle
-    // timeout instead of a total timeout because real generations can
-    // legitimately run for minutes as long as the router keeps sending events.
+    // Declared-Exception surface (see `docs/invariants.md`): this image /
+    // video / 3D proxy is a pure router-side SSE pipe, so we do not route
+    // through the kernel. We still apply bounded connect / handshake
+    // timeouts so a hung upstream cannot stall the WS session. The streaming
+    // body is guarded by an idle timeout instead of a total timeout because
+    // real generations can legitimately run for minutes as long as the
+    // router keeps sending events.
     let client = match reqwest::Client::builder()
         .connect_timeout(GENERATION_CONNECT_TIMEOUT)
         .build()

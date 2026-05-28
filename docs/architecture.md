@@ -492,7 +492,7 @@ Layout:
   - `auth_mw.rs` — bearer-token enforcing axum middleware.
   - `errors.rs` — `ApiError` JSON failure shape.
   - `handlers/` — per-endpoint bundles: `run.rs` (`POST /v1/run` + the lifecycle endpoints), `run_ws.rs` (`WS /stream/:run_id`), `files.rs`, `tx.rs`, `memory/`, `skills.rs`, `tool_permissions.rs`, `util.rs`.
-  - `session/` — per-WebSocket-connection state. `chat.rs` (bidirectional Chat-run handler), `cross_agent_hook.rs` (cross-agent callback path — the one place `aura-runtime` still calls `reqwest`), `generation.rs` (generation proxy guarded by [`tests/generation_proxy_guard.rs`](../crates/aura-runtime/tests/generation_proxy_guard.rs)), `helpers.rs`, `partial_json.rs`, `state.rs`, `tool_approval.rs`.
+  - `session/` — per-WebSocket-connection state. `chat.rs` (bidirectional Chat-run handler), `cross_agent_hook.rs` (cross-agent callback path), `generation.rs` (router SSE generation proxy guarded by [`tests/generation_proxy_guard.rs`](../crates/aura-runtime/tests/generation_proxy_guard.rs)), `helpers.rs`, `partial_json.rs`, `state.rs`, `tool_approval.rs`.
 
 Backward-compat re-exports preserved at the crate root: `aura_runtime::scheduler::*` and `aura_runtime::memory_observer::*` now resolve to thin re-export modules over `aura_engine::*`. Internal callers should reach `aura-engine` directly, but the old paths keep `aura-surface-cli` and any future re-export-driven external consumer building without ripple changes.
 
@@ -526,7 +526,7 @@ Layout:
 - `jwt.rs` — `JwtDomainApi`: wraps any other `DomainApi` and injects a captured JWT on every call site that didn't supply one. Used by the automaton bridge to stamp the captured bearer onto every domain call without modifying the underlying `DomainApi` impl.
 - `lib.rs` — re-exports `HttpDomainApi` and `JwtDomainApi`.
 
-The `DomainApi` *trait* continues to live in `aura-tools::domain_tools`; only the HTTP implementations live here. `aura-runtime` therefore no longer depends on `reqwest` *for domain calls* — but it still depends on `reqwest` directly for the cross-agent callback path in `gateway/session/cross_agent_hook.rs`, which is a separate outbound surface.
+The `DomainApi` *trait* continues to live in `aura-tools::domain_tools`; only the HTTP implementations live here. `aura-runtime` therefore no longer depends on `reqwest` *for domain calls* — but it still depends on `reqwest` directly for the generation proxy in `gateway/session/generation.rs` and the cross-agent callback path in `gateway/session/cross_agent_hook.rs`, which are separate outbound surfaces.
 
 #### [`aura-terminal`](../crates/aura-terminal)
 

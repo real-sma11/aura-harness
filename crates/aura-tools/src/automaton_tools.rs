@@ -126,7 +126,7 @@ impl Tool for StartDevLoopTool {
         {
             Ok(automaton_id) => Ok(ToolResult::success(
                 "start_dev_loop",
-                format!("Dev loop started (automaton_id: {automaton_id}). Monitor progress via /stream/automaton/{automaton_id}"),
+                format!("Dev loop started (run_id: {automaton_id}). Monitor progress via /stream/{automaton_id}"),
             )),
             Err(e) => Ok(ToolResult::failure("start_dev_loop", e)),
         }
@@ -300,7 +300,7 @@ impl Tool for RunTaskTool {
         {
             Ok(automaton_id) => Ok(ToolResult::success(
                 "run_task",
-                format!("Task execution started (automaton_id: {automaton_id}). Monitor via /stream/automaton/{automaton_id}"),
+                format!("Task execution started (run_id: {automaton_id}). Monitor via /stream/{automaton_id}"),
             )),
             Err(e) => Ok(ToolResult::failure("run_task", e)),
         }

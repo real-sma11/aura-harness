@@ -3,8 +3,9 @@
 //! The module `crates/aura-runtime/src/gateway/session/generation.rs` is documented in
 //! `docs/invariants.md` as an explicit exception to the "all LLM calls go
 //! through the kernel gateway" invariant. The exception is narrow: the
-//! module is a pure SSE pass-through that proxies image / 3D generation
-//! requests from a WS client to the upstream router. It does **not**:
+//! module is a pure SSE pass-through that proxies image / video / 3D
+//! generation requests from a WS client to the upstream router. It does
+//! **not**:
 //!
 //!   * persist `RecordEntry` rows into the store,
 //!   * take a `Kernel` handle or reach into kernel state,

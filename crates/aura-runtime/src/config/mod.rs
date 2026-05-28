@@ -116,7 +116,7 @@ pub struct NodeConfig {
     /// (or `true`) to re-enable the full shared-secret enforcement
     /// path: [`resolve_auth_token`] runs on startup, the router layers
     /// `require_bearer_mw` onto every protected route, and the
-    /// `/stream/automaton/:id` WebSocket handler keeps its
+    /// `/stream/:run_id` WebSocket handler keeps its
     /// belt-and-suspenders check. Leaving this off on a non-loopback
     /// listener is a deliberate trust decision; pair it with firewall
     /// or network-level controls.

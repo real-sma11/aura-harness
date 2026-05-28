@@ -3,7 +3,7 @@
 //! [`OutboundMessage`] is the top-level enum streamed from the harness to a
 //! websocket client. It covers session-level events (ready / start / end),
 //! incremental text and tool deltas, tool-result and tool-approval prompts,
-//! errors, and image / 3D generation events.
+//! errors, and image / video / 3D generation events.
 
 use serde::{Deserialize, Serialize};
 

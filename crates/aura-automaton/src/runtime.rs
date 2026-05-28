@@ -418,8 +418,8 @@ mod tests {
     /// Operator-initiated `stop()` on a long-running automaton must
     /// surface a `Stopped { reason: "Stopped" }` event so downstream
     /// observers (the `aura-os-server` run-log forwarder, the
-    /// operator UI's status badge, the `/stream/automaton/:id` WS
-    /// consumer) can distinguish a user-driven halt from a natural
+    /// operator UI's status badge, the `/stream/:run_id` WS consumer)
+    /// can distinguish a user-driven halt from a natural
     /// completion (`reason: "Completed"`) or a crash
     /// (`reason: "Failed"`).
     ///
