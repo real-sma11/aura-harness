@@ -47,15 +47,9 @@ Core ideas:
 
 ## Prerequisites
 
-`aura-harness` is a Cargo workspace that depends on a sibling repository, `aura-os`, for shared protocol types (`aura-protocol`). Both repositories must live next to each other:
+`aura-harness` is a self-contained Cargo workspace; every crate it depends on (including the WebSocket `aura-protocol` types) lives under [`crates/`](crates). There is no sibling-repo checkout step.
 
-```
-<parent>/
-  aura-harness/   # this repo
-  aura-os/        # sibling repo (for aura-protocol and related crates)
-```
-
-The path dependency is declared in [`Cargo.toml`](Cargo.toml) and [`crates/aura-runtime/Cargo.toml`](crates/aura-runtime/Cargo.toml) as `../aura-os/crates/aura-protocol`. RocksDB builds require LLVM/Clang; see [`docs/PROGRESS.md`](docs/PROGRESS.md) for platform notes.
+RocksDB builds require LLVM/Clang; see [`docs/PROGRESS.md`](docs/PROGRESS.md) for platform notes.
 
 On Linux, the `keyring` crate's Secret Service backend links against `libdbus-1`, so the workspace also needs `libdbus-1-dev` and `pkg-config` at build time (e.g. `sudo apt install libdbus-1-dev pkg-config` on Debian/Ubuntu, `sudo dnf install dbus-devel pkgconf-pkg-config` on Fedora). macOS and Windows builds need no extra system packages for keyring.
 
@@ -77,11 +71,11 @@ cargo run -p aura-runtime --bin aura-node
 
 ### Docker
 
-The Dockerfile builds from the **parent directory** that contains both `aura-harness/` and `aura-os/`, so the `aura-protocol` path dependency resolves in the image. Run from the parent:
+The Dockerfile builds the workspace from the repo root — no external sibling checkout is required:
 
 ```sh
-# in <parent>/ (contains aura-harness/ and aura-os/)
-docker build -f aura-harness/Dockerfile -t aura .
+# in aura-harness/
+docker build -t aura .
 docker run -p 8080:8080 aura
 ```
 
@@ -107,7 +101,7 @@ This workspace ships two binaries:
 
 ## CLI Reference
 
-Defined in [`src/cli.rs`](src/cli.rs):
+Defined in [`crates/aura-surface-cli/src/cli.rs`](crates/aura-surface-cli/src/cli.rs):
 
 | Command | Description |
 |---------|-------------|
@@ -116,6 +110,15 @@ Defined in [`src/cli.rs`](src/cli.rs):
 | `aura logout` | Clear stored credentials. |
 | `aura whoami` | Show current authentication status. |
 | `aura hello` | Print `Hello, World!` and exit (Spec 01 smoke test). |
+| `aura migrate [--dry-run]` | Migrate aura state (Phase 4a stub today). |
+| `aura plugins <install\|list\|enable\|disable>` | Manage declarative plugins under `AURA_HOME/plugins/` (Phase 4b). |
+| `aura agents <inspect\|reap>` | Inspect or reap live + orphaned subagents (Phase 7b). |
+
+Global flags (apply to every subcommand):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode <agent\|plan\|ask\|debug>` | (see resolution chain) | Top rung of the documented `AgentMode` resolution priority (CLI > TUI slash > SDK field > daemon default > `Agent` fallback). Resolved at session start by `aura_fleet_daemon::resolve_session_mode`. |
 
 Flags for `aura run`:
 
@@ -126,31 +129,31 @@ Flags for `aura run`:
 | `-d, --dir <path>` | -- | Override working / data directory. |
 | `--provider <anthropic\|mock>` | `anthropic` | Model provider for the current session. |
 | `-v, --verbose` | off | Enable verbose tracing output. |
+| `--allow-unrestricted-full-access` | off | Permit FullAccess sessions to bypass command allowlists (operator opt-in). |
 
 ## Architecture
 
-### Workspace crates
+The workspace is organized into **ten layers** with strict downward-only dependencies (enforced by [`tests/layer_boundary.rs`](tests/layer_boundary.rs)):
 
-All members are declared in [`Cargo.toml`](Cargo.toml) under `[workspace].members`.
+```text
+core  <  store  <  config  <  model  <  context  <
+plugin  <  exec  <  agent   <  fleet  <  surface
+```
 
-| Crate | Description |
-|-------|-------------|
-| [`aura-core`](crates/aura-core) | Shared domain types, strongly-typed IDs, hashing, time, serialization, and error types. |
-| [`aura-store`](crates/aura-store) | RocksDB persistence: record log, agent metadata, inbox queues, memory CFs, skill installs. Atomic batch commits. |
-| [`aura-reasoner`](crates/aura-reasoner) | Provider-agnostic `ModelProvider` trait: Anthropic HTTP, proxy routing, mock, streaming, retries. |
-| [`aura-kernel`](crates/aura-kernel) | Deterministic kernel: context building, reasoning, policy, execution routing, record commit. |
-| [`aura-tools`](crates/aura-tools) | Tool registry, sandboxed filesystem and command execution, domain tool wiring, automaton tools. |
-| [`aura-agent`](crates/aura-agent) | Multi-step orchestration (`AgentLoop`), tool gateways, task runner, budgets, compaction, and session bootstrap. |
-| [`aura-memory`](crates/aura-memory) | Per-agent memory: facts, events, procedures. Two-stage write pipeline (heuristic + LLM refiner), retrieval, consolidation. |
-| [`aura-skills`](crates/aura-skills) | `SKILL.md`-compatible skill packages. Parser, multi-location loader, registry, activation, and per-agent install store. |
-| [`aura-auth`](crates/aura-auth) | zOS login client and JWT credential store (`~/.aura/credentials.json`) for proxy mode. |
-| [`aura-terminal`](crates/aura-terminal) | Ratatui-based terminal UI library: themes, components, input handling, layout. |
-| [`aura-automaton`](crates/aura-automaton) | Automaton lifecycle, scheduling, runtime, state, and built-in automatons (chat, dev loop, spec gen, task run). |
-| [`aura-runtime`](crates/aura-runtime) | HTTP router, WebSocket sessions, scheduler, and per-agent worker loops with single-writer guarantee. (Renamed from `aura-node` in Phase 0.5; ships the `aura-node` binary.) |
+| Layer    | Purpose                                                                          | Representative crates                                                                          |
+|----------|----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|
+| core     | Behavior-free IDs, capability enums, mode primitives, wire types.                | `aura-core-types`, `aura-core-modes`, `aura-core-permissions`, `aura-core-auth`, `aura-core-protocol`, `aura-core`, `aura-protocol`. |
+| store    | Durable storage; record-log append surface is sealed to the kernel.              | `aura-store-db`, `aura-store-record`, `aura-store-snapshot`, `aura-store`. |
+| config   | Single source of truth for env vars + TOML config.                               | `aura-config`. |
+| model    | Provider-agnostic LLM trait + streaming completions (proxy-routed only).         | `aura-model-reasoner`, `aura-reasoner`. |
+| context  | Read-only context assembly: prompts, memory, compaction, skills.                 | `aura-context-prompts`, `aura-context-memory`, `aura-context-compaction`, `aura-context-skills` (+ legacy shells). |
+| plugin   | Plugin manifest schema, in-process API, hooks, MCP, connectors.                  | `aura-plugin-api`, `aura-plugin-core`, `aura-plugin-hooks`, `aura-plugin-mcp`, `aura-plugin-connectors`. |
+| exec     | Tool catalog, runner, sandbox, policy, isolation, conflict locks.                | `aura-exec-conflict`, `aura-exec-isolation`, `aura-exec-policy`, `aura-exec-sandbox`, `aura-exec-tools`, `aura-exec-runner`, `aura-tools`. |
+| agent    | Deterministic kernel + AgentLoop + steering + subagent derivation.               | `aura-agent-kernel`, `aura-agent-loop`, `aura-agent-steering`, `aura-agent-subagent`, `aura-agent`, `aura-kernel`. |
+| fleet    | Multi-agent registry, spawn, dispatch, quota, mailbox, daemon.                   | `aura-fleet-registry`, `aura-fleet-spawn`, `aura-fleet-dispatch`, `aura-fleet-quota`, `aura-fleet-mailbox`, `aura-fleet-daemon`. |
+| surface  | Composition roots: CLI, TUI, SDK, automaton, auth, HTTP/WS runtime.              | `aura-surface-cli`, `aura-surface-sdk`, `aura-surface-terminal`, `aura-surface-automaton`, `aura-surface-auth`, `aura-runtime`, `aura-terminal`, `aura-automaton`, `aura-auth`. |
 
-### External dependencies
-
-- [`aura-protocol`](../aura-os/crates/aura-protocol) lives in the sibling `aura-os` workspace and defines the serde types for the `/stream` WebSocket API (session init, messages, events, approvals). The harness consumes it as a relative path dependency.
+Full per-crate reference (purpose, key types, modules) lives in [`docs/architecture.md`](docs/architecture.md). All members are declared in [`Cargo.toml`](Cargo.toml) under `[workspace].members`.
 
 ### Project structure
 
@@ -160,35 +163,24 @@ aura-harness/
   Dockerfile                # multi-stage build, headless on :8080
   .env.example              # environment variable template
   index.html                # landing page
-  src/                      # `aura` binary
-    main.rs                 #   entry: TUI, headless, login/logout/whoami/hello
-    cli.rs                  #   clap command definitions
-    event_loop/             #   terminal event loop
-    api_server.rs           #   embedded /health endpoint for TUI mode
-    session_helpers.rs      #   session bootstrap re-exports + defaults
-    record_loader.rs        #   record loading utilities
-  crates/
-    aura-core/              # shared types, IDs, hashing, time
-    aura-store/             # RocksDB storage backend
-    aura-reasoner/          # LLM provider abstraction + Anthropic
-    aura-kernel/            # deterministic kernel + policy + executor
-    aura-tools/             # tool registry, sandboxed FS/cmd, domain tools
-    aura-agent/             # agent loop + runtime + compaction + session bootstrap
-    aura-memory/            # facts/events/procedures + write pipeline + retrieval
-    aura-skills/            # SKILL.md parser, loader, registry, install store
-    aura-auth/              # zOS login, credential store
-    aura-terminal/          # ratatui TUI library
-    aura-automaton/         # automaton lifecycle and built-ins
-    aura-runtime/           # HTTP server, scheduler, workers (ships the `aura-node` binary)
-  tests/                    # integration, e2e, proptest, pipeline
+  src/                      # `aura` binary entry (CLI body lives in aura-surface-cli)
+  crates/                   # 55 crates organized into the 10 layers above
+                            #   (see docs/architecture.md for the per-crate reference)
+  tests/                    # workspace integration, e2e, proptest, pipeline tests
   docs/                     # supplementary documentation
-    architecture.md         #   full architecture reference
+    architecture.md         #   full layered crate reference + user flows
+    invariants.md           #   the 12 architectural invariants + enforcement map
     PROGRESS.md             #   implementation status / build notes
     specs/                  #   design specifications (v0.1.0, v0.1.1)
     refactoring/            #   refactoring checklists
+  docker/                   # docker build assets
+  scripts/                  # check_invariants.sh + helpers
+  .github/                  # CI workflows (ci.yml, security.yml, invariants.yml)
 ```
 
 ### System diagram
+
+The kernel boundary cuts at the `agent` layer; everything below it is downward-only by layer rule.
 
 ```
                              ┌──────────────────────────────────┐

@@ -25,17 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      # aura-harness has a dev-dependency on ../aura-os/crates/aura-protocol;
-      # cargo-deny has to resolve the workspace graph, so the sibling repo
-      # must be on disk at the expected relative path.
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -44,7 +33,6 @@ jobs:
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: aura-harness/Cargo.toml
           command: check
           arguments: --all-features
 
@@ -56,14 +44,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -73,4 +53,3 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: aura-harness

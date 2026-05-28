@@ -19,18 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      # aura-harness depends on the sibling `aura-os` repo for the
-      # `aura-protocol` crate via a `../aura-os/crates/aura-protocol` path
-      # dependency. CI must check out that sibling at `../aura-os` relative to
-      # `aura-harness`.
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -42,7 +30,6 @@ jobs:
           components: rustfmt
 
       - name: cargo fmt --check
-        working-directory: aura-harness
         run: cargo fmt --all -- --check
 
   # ---------------------------------------------------------------------------
@@ -53,14 +40,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -72,11 +51,8 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aura-harness
 
       - name: cargo clippy
-        working-directory: aura-harness
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   # ---------------------------------------------------------------------------
@@ -87,14 +63,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -104,11 +72,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aura-harness
 
       - name: cargo test
-        working-directory: aura-harness
         run: cargo test --workspace --all-features
 
   # ---------------------------------------------------------------------------
@@ -120,14 +85,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -138,11 +95,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: aura-harness
           key: msrv-1.80.0
 
       - name: cargo check --workspace --locked (MSRV)
-        working-directory: aura-harness
         run: cargo check --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------------
@@ -153,14 +108,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -170,14 +117,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aura-harness
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
 
       - name: cargo deny check
-        working-directory: aura-harness
         run: cargo deny check
 
   # ---------------------------------------------------------------------------
@@ -198,14 +142,6 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -215,14 +151,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aura-harness
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
       - name: cargo audit
-        working-directory: aura-harness
         run: cargo audit
 
   # ---------------------------------------------------------------------------
@@ -237,14 +170,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: aura-harness
-
-      - name: Checkout aura-os sibling
-        uses: actions/checkout@v4
-        with:
-          repository: cypher-asi/aura-os
-          path: aura-os
 
       - name: Install system deps
         run: |
@@ -254,12 +179,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: aura-harness
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
 
       - name: cargo machete
-        working-directory: aura-harness
         run: cargo machete

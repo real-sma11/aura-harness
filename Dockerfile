@@ -7,27 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Build from the parent workspace so local path dependencies in ../aura-os
-# resolve inside the container the same way they do on the host.
-COPY aura-harness/Cargo.toml aura-harness/Cargo.lock aura-harness/rust-toolchain.toml ./
-COPY aura-harness/src              src/
-COPY aura-harness/crates/aura-core         crates/aura-core/
-COPY aura-harness/crates/aura-store        crates/aura-store/
-COPY aura-harness/crates/aura-tools        crates/aura-tools/
-COPY aura-harness/crates/aura-reasoner     crates/aura-reasoner/
-COPY aura-harness/crates/aura-kernel       crates/aura-kernel/
-COPY aura-harness/crates/aura-runtime      crates/aura-runtime/
-COPY aura-harness/crates/aura-memory       crates/aura-memory/
-COPY aura-harness/crates/aura-terminal     crates/aura-terminal/
-COPY aura-harness/crates/aura-agent        crates/aura-agent/
-COPY aura-harness/crates/aura-auth         crates/aura-auth/
-COPY aura-harness/crates/aura-automaton    crates/aura-automaton/
-COPY aura-harness/crates/aura-skills       crates/aura-skills/
-COPY aura-os/crates/aura-protocol          /aura-os/crates/aura-protocol/
-# aura-protocol inherits edition/rust-version/license/repository/lints from its
-# workspace root. Ship a minimal stub so cargo can resolve `.workspace = true`
-# without copying the entire aura-os workspace into the build.
-COPY aura-harness/docker/aura-os-workspace-stub.toml /aura-os/Cargo.toml
+# The workspace is self-contained — every dependency (including the
+# WebSocket `aura-protocol` types) lives under ./crates. Copy the whole
+# tree so all workspace members resolve.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src        src/
+COPY crates     crates/
 
 RUN cargo build --release --bin aura \
     && strip target/release/aura
