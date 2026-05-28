@@ -22,7 +22,7 @@
 
 ## Overview
 
-Aura is a deterministic multi-agent runtime for running many agents concurrently. Every agent maintains an append-only record log, a deterministic kernel advances state by consuming transactions, and reasoning is delegated to a pluggable LLM provider (proxy-routed or direct Anthropic API). All side effects flow through authorized executors so the full history is replayable from the record alone.
+Aura is a deterministic multi-agent runtime for running many agents concurrently. Every agent maintains an append-only record log, a deterministic kernel advances state by consuming transactions, and reasoning is delegated to a proxy-routed LLM provider. All side effects flow through authorized executors so the full history is replayable from the record alone.
 
 The runtime supports interactive terminal sessions (TUI), headless server deployments, and long-running automaton workflows — all backed by the same kernel, storage, and reasoning stack.
 
@@ -32,7 +32,7 @@ Core ideas:
 
 1. **The Record.** The fundamental unit of truth. Every agent has an append-only log of record entries, strictly ordered by sequence number. All state is derivable from the record; there is no hidden state.
 2. **The Kernel.** A deterministic processor that builds context from the record, calls the reasoner, enforces policy, executes actions through the executor, and commits new entries. Given the same record, the kernel always produces the same output.
-3. **Reasoning.** Probabilistic LLM calls are isolated behind a provider trait. The default path routes through a JWT-authenticated proxy (`aura-router`); alternatively, calls go directly to the Anthropic API. A mock provider is available for testing.
+3. **Reasoning.** Probabilistic LLM calls are isolated behind a provider trait. Production traffic routes through the JWT-authenticated `aura-router` proxy; a mock provider is available for tests.
 4. **Tools & Executors.** All side effects (filesystem, shell commands, domain APIs, automaton actions) are explicit. The executor router dispatches authorized actions and captures structured effects, keeping the kernel boundary clean.
 5. **Memory & Skills.** Per-agent memory (facts, events, procedures) and `SKILL.md`-based skill packages extend an agent's abilities at runtime without widening the deterministic kernel.
 
@@ -251,11 +251,11 @@ All routes are defined in `crates/aura-runtime/src/gateway/middleware.rs` (`crea
 
 ### Runs (chat / dev-loop / task-run)
 
-A "run" is the canonical entry point — any chat session, dev-loop automaton, or single-task automaton is started by POSTing an [`aura_protocol::RuntimeRequest`](crates/aura-protocol/src/runtime_request.rs) to `/v1/run`. The response carries a `run_id` plus the WS path the client should open to receive events (and, on chat runs, to send user messages).
+A "run" is the canonical entry point — any chat session, dev-loop automaton, or single-task automaton is started by POSTing an [`aura_protocol::RuntimeRequest`](crates/aura-protocol/src/runtime_request.rs) to `/v1/run`. The [`RuntimeRunResponse`](crates/aura-protocol/src/runtime_request.rs) carries a `run_id` plus the WS path the client should open to receive events (and, on chat runs, to send user messages).
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/v1/run` | Start a run (chat / dev-loop / task-run). Body is `RuntimeRequest`; returns `{ run_id, event_stream_url }`. |
+| POST | `/v1/run` | Start a run (chat / dev-loop / task-run). Body is `RuntimeRequest`; returns `RuntimeRunResponse { run_id, event_stream_url }`. |
 | GET  | `/v1/run/list` | List active runs. |
 | GET  | `/v1/run/:run_id/status` | Status for one run. |
 | POST | `/v1/run/:run_id/pause` | Pause a run. |
