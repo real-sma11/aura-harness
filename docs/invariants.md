@@ -1,11 +1,12 @@
 # Architectural Invariants
 
-This document defines the invariants that the Aura system must uphold. Every code change should be validated against these rules. Violations are bugs.
+This document defines the invariants that the Aura system must uphold. Every
+code change should be validated against these rules. Violations are bugs.
 
 Unless a section says otherwise, every invariant below is **scoped to a single
 agent's kernel and that agent's record log**. Cross-agent contracts live in
-§15 (Cross-Agent Parallelism). The architecture model below establishes the
-per-agent framing that the rest of the document relies on.
+Part D (§15, Cross-Agent Parallelism). The architecture model below
+establishes the per-agent framing that the rest of the document relies on.
 
 ---
 
@@ -71,29 +72,100 @@ orientation:
 
 ---
 
+## How To Read This Document
+
+The architectural invariants are grouped into **five parts**, each binding a
+related set of properties. **Numbering of individual invariants (§1–§15) is
+stable** — same numbers as previous revisions and as `Invariant §N`
+annotations sprinkled through the source — so external references continue
+to resolve. The physical order is **grouped** rather than strictly numeric:
+
+| Part | Theme | Invariants |
+|---|---|---|
+| [A](#part-a--kernel-boundary--mediation) | Kernel boundary & mediation | §1, §2, §3, §8, §9 |
+| [B](#part-b--policy--authorization) | Policy & authorization | §4, §11 |
+| [C](#part-c--record-audit-determinism--replay) | Record, audit, determinism & replay | §5, §6, §7, §10 |
+| [D](#part-d--concurrency--cross-agent-parallelism) | Per-agent concurrency & cross-agent parallelism | §12, §15 |
+| [E](#part-e--workspace--plugin-structure) | Workspace & plugin structure | §13, §14 |
+
+Strict numeric index for cross-references:
+
+| # | Title | Part |
+|---|---|---|
+| §1 | Each Agent's Kernel Is The Sole External Gateway | A |
+| §2 | Every State Change For Agent A Passes Through Agent A's Kernel | A |
+| §3 | Every LLM Call Is Recorded | A |
+| §4 | Full Policy Enforcement | B |
+| §5 | Complete Audit Trail | C |
+| §6 | Per-Agent Deterministic Context | C |
+| §7 | Per-Agent Monotonic Sequencing | C |
+| §8 | Gateway Transparency | A |
+| §9 | AgentLoop Isolation | A |
+| §10 | Per-Agent Append-Only Record | C |
+| §11 | Session-Scoped Tool Decisions | B |
+| §12 | Single Writer Per Agent | D |
+| §13 | Layered Architecture | E |
+| §14 | Plugin Sandbox | E |
+| §15 | Cross-Agent Parallelism | D |
+
+---
+
 ## Enforcement Map
 
 Each invariant below is guarded by one or more tests. The table below is
 the living index of which suite enforces which invariant; it is kept in
 sync with the `Enforcement:` lines under each section.
 
+### Part A — Kernel Boundary & Mediation
+
 | # | Invariant | Enforcement |
 |---|---|---|
 | §1 | Each agent's kernel is the sole external gateway | CI-gated `rg` bands in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh) + [`.github/workflows/invariants.yml`](../.github/workflows/invariants.yml) (`ModelProvider.complete(`, `append_entry_*`, `Command::new("git")`, `aura_store` imports inside `aura-agent/src/agent_loop/`). Type-level seal: [`aura_agent::RecordingModelProvider`](../crates/aura-agent/src/kernel_gateway.rs) is a crate-sealed marker trait; automatons take `P: RecordingModelProvider` so only `KernelModelGateway` (the recording wrapper) can be plugged in. Git-mutation surface covered by [`crates/aura-tools/src/git_tool/tests.rs`](../crates/aura-tools/src/git_tool/tests.rs) (`commit_reports_sha_when_there_are_changes`, `commit_rejects_empty_message`, `commit_surfaces_nonzero_exit_from_add`, `spawn_git_enforces_subcommand_allowlist`, `tool_executes_commit_via_context`, `tool_rejects_workspace_escape_via_config`, `git_push_rejects_missing_fields`). Automaton `DomainApi` mediation covered by [`crates/aura-agent/src/kernel_domain_gateway/tests.rs`](../crates/aura-agent/src/kernel_domain_gateway/tests.rs). |
 | §2 | Every state change for agent A passes through agent A's kernel | [`tests/pipeline_tests.rs`](../tests/pipeline_tests.rs), [`tests/kernel_integration.rs`](../tests/kernel_integration.rs), [`crates/aura-agent-kernel/src/kernel/tests.rs`](../crates/aura-agent-kernel/src/kernel/tests.rs), [`crates/aura-runtime/src/automaton_bridge/tests.rs`](../crates/aura-runtime/src/automaton_bridge/tests.rs) (`start_then_stop_records_two_automaton_lifecycle_entries`), and [`crates/aura-runtime/src/subagent_dispatch.rs`](../crates/aura-runtime/src/subagent_dispatch.rs) (`tests::dispatch_runs_child_and_records_parent_and_child_logs`). |
 | §3 | Every LLM call is recorded | [`crates/aura-agent/src/recording_stream.rs`](../crates/aura-agent/src/recording_stream.rs) tests (`streaming_natural_end_records_completed`, `streaming_error_records_failed`, `streaming_drop_records_failed`), [`crates/aura-agent-kernel/src/kernel/tests.rs`](../crates/aura-agent-kernel/src/kernel/tests.rs) (`reason_sync_error_records_failed`, `reason_streaming_handshake_error_records_failed`), [`tests/automaton_reasoning_recording.rs`](../tests/automaton_reasoning_recording.rs). |
-| §4 | Full policy enforcement | [`crates/aura-core/src/types/tool_permissions.rs`](../crates/aura-core/src/types/tool_permissions.rs) resolver/full-access tests, [`crates/aura-agent-kernel/src/policy/check/tests.rs`](../crates/aura-agent-kernel/src/policy/check/tests.rs), [`crates/aura-runtime/src/tool_permissions.rs`](../crates/aura-runtime/src/tool_permissions.rs) validation/monotonic tests, [`crates/aura-runtime/src/session/helpers.rs`](../crates/aura-runtime/src/session/helpers.rs) session tool-config composition tests, [`crates/aura-runtime/src/subagent_dispatch.rs`](../crates/aura-runtime/src/subagent_dispatch.rs) policy narrowing tests, [`crates/aura-tools/src/fs_tools/cmd/tests.rs`](../crates/aura-tools/src/fs_tools/cmd/tests.rs) command guardrail tests, and [`crates/aura-runtime/tests/hook_permission_request_short_circuits.rs`](../crates/aura-runtime/tests/hook_permission_request_short_circuits.rs) (carve-out 5b). |
-| §5 | Complete audit trail | [`crates/aura-agent-kernel/src/kernel/tests.rs`](../crates/aura-agent-kernel/src/kernel/tests.rs) + §4 matrix asserts `decision`/`actions`/`context_hash`. AuditedLite summarisation round-trip pinned by [`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs) and the `maybe_summarise_effect_payload` unit tests in [`crates/aura-agent-kernel/src/kernel/tools/shared.rs`](../crates/aura-agent-kernel/src/kernel/tools/shared.rs) (`summarisation_tests` module). |
-| §6 | Per-agent deterministic context | [`crates/aura-agent-kernel/tests/invariant_determinism.rs`](../crates/aura-agent-kernel/tests/invariant_determinism.rs) (proptest). |
-| §7 | Per-agent monotonic sequencing | [`crates/aura-store-db/tests/invariant_atomicity.rs`](../crates/aura-store-db/tests/invariant_atomicity.rs), [`crates/aura-store-db/src/rocks_store/tests.rs`](../crates/aura-store-db/src/rocks_store/tests.rs), and [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs) (concurrent appends across distinct agents). |
 | §8 | Gateway transparency | [`crates/aura-agent/src/agent_loop/parity_tests.rs`](../crates/aura-agent/src/agent_loop/parity_tests.rs). |
 | §9 | AgentLoop isolation | Architectural / `rg` grep bands (see Declared Exceptions) — CI-gated via [`scripts/check_invariants.sh`](../scripts/check_invariants.sh) (`aura_store` import band scoped to `aura-agent/src/agent_loop/`). |
-| §10 | Per-agent append-only record | [`crates/aura-store-db/tests/invariant_atomicity.rs`](../crates/aura-store-db/tests/invariant_atomicity.rs) (sealed-trait `static_assertions` + atomic-commit fault injection) + [`crates/aura-store-db/tests/invariant_readstore_surface.rs`](../crates/aura-store-db/tests/invariant_readstore_surface.rs) (pins the `ReadStore` trait surface so record-append methods stay on the sealed `WriteStore`). |
+
+### Part B — Policy & Authorization
+
+| # | Invariant | Enforcement |
+|---|---|---|
+| §4 | Full policy enforcement | [`crates/aura-core/src/types/tool_permissions.rs`](../crates/aura-core/src/types/tool_permissions.rs) resolver/full-access tests, [`crates/aura-agent-kernel/src/policy/check/tests.rs`](../crates/aura-agent-kernel/src/policy/check/tests.rs), [`crates/aura-runtime/src/tool_permissions.rs`](../crates/aura-runtime/src/tool_permissions.rs) validation/monotonic tests, [`crates/aura-runtime/src/session/helpers.rs`](../crates/aura-runtime/src/session/helpers.rs) session tool-config composition tests, [`crates/aura-runtime/src/subagent_dispatch.rs`](../crates/aura-runtime/src/subagent_dispatch.rs) policy narrowing tests, [`crates/aura-tools/src/fs_tools/cmd/tests.rs`](../crates/aura-tools/src/fs_tools/cmd/tests.rs) command guardrail tests, and [`crates/aura-runtime/tests/hook_permission_request_short_circuits.rs`](../crates/aura-runtime/tests/hook_permission_request_short_circuits.rs) (carve-out 5b). |
 | §11 | Session-scoped tool decisions | [`crates/aura-agent-kernel/src/policy/check/tests.rs`](../crates/aura-agent-kernel/src/policy/check/tests.rs) live prompt and session-state tests. |
+
+### Part C — Record, Audit, Determinism & Replay
+
+| # | Invariant | Enforcement |
+|---|---|---|
+| §5 | Complete audit trail | [`crates/aura-agent-kernel/src/kernel/tests.rs`](../crates/aura-agent-kernel/src/kernel/tests.rs) + the §4 matrix asserts `decision`/`actions`/`context_hash`. AuditedLite summarisation round-trip pinned by [`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs) and the `maybe_summarise_effect_payload` unit tests in [`crates/aura-agent-kernel/src/kernel/tools/shared.rs`](../crates/aura-agent-kernel/src/kernel/tools/shared.rs) (`summarisation_tests` module). |
+| §6 | Per-agent deterministic context | [`crates/aura-agent-kernel/tests/invariant_determinism.rs`](../crates/aura-agent-kernel/tests/invariant_determinism.rs) (proptest). |
+| §7 | Per-agent monotonic sequencing | [`crates/aura-store-db/tests/invariant_atomicity.rs`](../crates/aura-store-db/tests/invariant_atomicity.rs), [`crates/aura-store-db/src/rocks_store/tests.rs`](../crates/aura-store-db/src/rocks_store/tests.rs), and [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs) (concurrent appends across distinct agents). |
+| §10 | Per-agent append-only record | [`crates/aura-store-db/tests/invariant_atomicity.rs`](../crates/aura-store-db/tests/invariant_atomicity.rs) (sealed-trait `static_assertions` + atomic-commit fault injection) + [`crates/aura-store-db/tests/invariant_readstore_surface.rs`](../crates/aura-store-db/tests/invariant_readstore_surface.rs) (pins the `ReadStore` trait surface so record-append methods stay on the sealed `WriteStore`). |
+
+### Part D — Per-Agent Concurrency & Cross-Agent Parallelism
+
+| # | Invariant | Enforcement |
+|---|---|---|
 | §12 | Single writer per agent | [`crates/aura-runtime/src/scheduler.rs`](../crates/aura-runtime/src/scheduler.rs) (`test_processing_claim_released_after_error`, `scheduler must construct at most one Kernel per agent claim`), [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs), [`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs), and [`crates/aura-fleet-spawn/tests/spawn_idempotent_dedupe.rs`](../crates/aura-fleet-spawn/tests/spawn_idempotent_dedupe.rs). |
+| §15 | Cross-agent parallelism | [`crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs`](../crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs) (parallel across parents), [`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs) (serialized within a parent), [`crates/aura-fleet-spawn/tests/parallel_subagents.rs`](../crates/aura-fleet-spawn/tests/parallel_subagents.rs), [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs), [`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs). |
+
+### Part E — Workspace & Plugin Structure
+
+| # | Invariant | Enforcement |
+|---|---|---|
 | §13 | Layered architecture | [`tests/layer_boundary.rs`](../tests/layer_boundary.rs) (`every_crate_carries_a_matching_layer_doc_tag`, `warn_on_upward_layer_dependencies`). |
 | §14 | Plugin sandbox | [`crates/aura-plugin-hooks/tests/sandbox_env_scrubbing.rs`](../crates/aura-plugin-hooks/tests/sandbox_env_scrubbing.rs), [`crates/aura-runtime/tests/hook_permission_request_short_circuits.rs`](../crates/aura-runtime/tests/hook_permission_request_short_circuits.rs), [`crates/aura-runtime/tests/plugin_e2e.rs`](../crates/aura-runtime/tests/plugin_e2e.rs). |
-| §15 | Cross-agent parallelism | [`crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs`](../crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs) (parallel across parents), [`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs) (serialized within a parent), [`crates/aura-fleet-spawn/tests/parallel_subagents.rs`](../crates/aura-fleet-spawn/tests/parallel_subagents.rs), [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs), [`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs). |
+
+---
+
+# Part A — Kernel Boundary & Mediation
+
+These invariants establish **what crosses the boundary** between agent code
+and external systems, **how the per-agent kernel mediates every crossing**,
+and the structural rules that keep the boundary tight: gateways are
+transparent to consumers (§8), and the agent loop is isolated from kernel-
+owned resources (§9). Read these first — they define the surface that every
+other part defends.
 
 ---
 
@@ -244,6 +316,68 @@ covers the sync (`reason_sync_error_records_failed`) and handshake-error
 
 ---
 
+## 8. Gateway Transparency
+
+**Kernel gateways implement existing traits. Consumers are unaware of kernel
+mediation.**
+
+| Gateway | Implements | Consumer | Source |
+|---|---|---|---|
+| `KernelModelGateway` | `ModelProvider` | AgentLoop, automatons | [`crates/aura-agent/src/kernel_gateway.rs`](../crates/aura-agent/src/kernel_gateway.rs) |
+| `KernelToolGateway` | `AgentToolExecutor` | AgentLoop, AgentRunner | [`crates/aura-agent/src/kernel_gateway.rs`](../crates/aura-agent/src/kernel_gateway.rs) |
+| `KernelDomainGateway` | `DomainApi` | Automatons | [`crates/aura-agent/src/kernel_domain_gateway/handle.rs`](../crates/aura-agent/src/kernel_domain_gateway/handle.rs) (+ `routes.rs`, `wire.rs`, `tests.rs`) |
+
+The AgentLoop's public API (`run`, `run_with_events`) accepts
+`&dyn ModelProvider` and `&dyn AgentToolExecutor`. It must never depend on
+the concrete gateway types.
+
+This boundary also means the harness executes tools from runtime metadata
+without becoming the system of record for integration credentials or catalog
+state.
+
+**Enforcement:** [`crates/aura-agent/src/agent_loop/parity_tests.rs`](../crates/aura-agent/src/agent_loop/parity_tests.rs).
+
+---
+
+## 9. AgentLoop Isolation
+
+**The AgentLoop never directly accesses kernel-owned resources.**
+
+The AgentLoop must not:
+
+- Import or reference `Store`, `RocksStore`, or any store type (via the
+  `aura_store` shell or `aura_store_db` directly).
+- Import or reference `RecordEntry` or `RecordEntryBuilder`.
+- Import or reference kernel `Policy` internals.
+- Call `ModelProvider::complete` on anything other than the provider it
+  receives as a parameter.
+- Call `AgentToolExecutor::execute` on anything other than the executor it
+  receives as a parameter.
+- Construct `Transaction` objects.
+
+The AgentLoop owns: iteration logic, streaming, compaction, budget management,
+stall detection, message history.
+
+The harness as a whole may receive runtime-resolved capabilities or short-lived
+secrets through approved gateways, but it must not persist org credentials or
+become the catalog authority for integrations.
+
+**Enforcement:** `rg`-band CI gate in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh)
+scopes the `use aura_store::` band to `crates/aura-agent/src/agent_loop/**` and
+excludes test files.
+
+---
+
+# Part B — Policy & Authorization
+
+These invariants govern **whether a proposed action is allowed to proceed**,
+and **how those decisions are scoped over time**. They sit between Part A
+(everything crosses the boundary) and Part C (everything that crosses is
+recorded): the policy gate decides what to admit, and the session-scoped
+memory rules govern how `ask` decisions survive within a session.
+
+---
+
 ## 4. Full Policy Enforcement
 
 **Every tool call passes through `Policy::check()` with the complete
@@ -328,6 +462,38 @@ covers operator-plus-agent composition into session-scoped tool config.
 [`crates/aura-tools/src/fs_tools/cmd/tests.rs`](../crates/aura-tools/src/fs_tools/cmd/tests.rs)
 covers command/shell/binary guardrails. Carve-out 5b is pinned by
 [`crates/aura-runtime/tests/hook_permission_request_short_circuits.rs`](../crates/aura-runtime/tests/hook_permission_request_short_circuits.rs).
+
+---
+
+## 11. Session-Scoped Tool Decisions
+
+**Live `ask` decisions remembered for a session are scoped to the current
+session.**
+
+- Session-scoped decisions are held in policy memory via
+  `remember_tool_state_for_session()`.
+- `SessionStart` resets session-scoped tool decisions via
+  `Policy::clear_session_approvals()`
+  ([`crates/aura-agent-kernel/src/kernel/process.rs`](../crates/aura-agent-kernel/src/kernel/process.rs)
+  ~line 83).
+- `remember: session` does not persist across process restarts.
+- `remember: forever` is not session-scoped; it is persisted into
+  `UserToolDefaults` via the store's `put_user_tool_defaults`.
+
+**Enforcement:** [`crates/aura-agent-kernel/src/policy/check/tests.rs`](../crates/aura-agent-kernel/src/policy/check/tests.rs)
+covers live prompt and session-state behaviour.
+
+---
+
+# Part C — Record, Audit, Determinism & Replay
+
+These invariants describe **what gets written to the per-agent record log,
+how it's hashed and sequenced, and how it can be replayed deterministically**.
+Read as a stack of properties about a single agent's log: §5 says what each
+entry must contain; §6 says how the entry's context hash is computed; §7
+says how entries are sequenced; §10 says the resulting log is immutable.
+Together they let any one agent's history replay byte-for-byte without a
+live reasoner or executor.
 
 ---
 
@@ -416,58 +582,6 @@ and the sequence-mismatch row asserts strict monotonicity);
 for the per-agent path; and
 [`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs)
 for concurrent appends across distinct agents.
-
----
-
-## 8. Gateway Transparency
-
-**Kernel gateways implement existing traits. Consumers are unaware of kernel
-mediation.**
-
-| Gateway | Implements | Consumer | Source |
-|---|---|---|---|
-| `KernelModelGateway` | `ModelProvider` | AgentLoop, automatons | [`crates/aura-agent/src/kernel_gateway.rs`](../crates/aura-agent/src/kernel_gateway.rs) |
-| `KernelToolGateway` | `AgentToolExecutor` | AgentLoop, AgentRunner | [`crates/aura-agent/src/kernel_gateway.rs`](../crates/aura-agent/src/kernel_gateway.rs) |
-| `KernelDomainGateway` | `DomainApi` | Automatons | [`crates/aura-agent/src/kernel_domain_gateway/handle.rs`](../crates/aura-agent/src/kernel_domain_gateway/handle.rs) (+ `routes.rs`, `wire.rs`, `tests.rs`) |
-
-The AgentLoop's public API (`run`, `run_with_events`) accepts
-`&dyn ModelProvider` and `&dyn AgentToolExecutor`. It must never depend on
-the concrete gateway types.
-
-This boundary also means the harness executes tools from runtime metadata
-without becoming the system of record for integration credentials or catalog
-state.
-
-**Enforcement:** [`crates/aura-agent/src/agent_loop/parity_tests.rs`](../crates/aura-agent/src/agent_loop/parity_tests.rs).
-
----
-
-## 9. AgentLoop Isolation
-
-**The AgentLoop never directly accesses kernel-owned resources.**
-
-The AgentLoop must not:
-
-- Import or reference `Store`, `RocksStore`, or any store type (via the
-  `aura_store` shell or `aura_store_db` directly).
-- Import or reference `RecordEntry` or `RecordEntryBuilder`.
-- Import or reference kernel `Policy` internals.
-- Call `ModelProvider::complete` on anything other than the provider it
-  receives as a parameter.
-- Call `AgentToolExecutor::execute` on anything other than the executor it
-  receives as a parameter.
-- Construct `Transaction` objects.
-
-The AgentLoop owns: iteration logic, streaming, compaction, budget management,
-stall detection, message history.
-
-The harness as a whole may receive runtime-resolved capabilities or short-lived
-secrets through approved gateways, but it must not persist org credentials or
-become the catalog authority for integrations.
-
-**Enforcement:** `rg`-band CI gate in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh)
-scopes the `use aura_store::` band to `crates/aura-agent/src/agent_loop/**` and
-excludes test files.
 
 ---
 
@@ -564,23 +678,15 @@ and [`crates/aura-memory/`](../crates/aura-memory/) test scaffolding.
 
 ---
 
-## 11. Session-Scoped Tool Decisions
+# Part D — Per-Agent Concurrency & Cross-Agent Parallelism
 
-**Live `ask` decisions remembered for a session are scoped to the current
-session.**
-
-- Session-scoped decisions are held in policy memory via
-  `remember_tool_state_for_session()`.
-- `SessionStart` resets session-scoped tool decisions via
-  `Policy::clear_session_approvals()`
-  ([`crates/aura-agent-kernel/src/kernel/process.rs`](../crates/aura-agent-kernel/src/kernel/process.rs)
-  ~line 83).
-- `remember: session` does not persist across process restarts.
-- `remember: forever` is not session-scoped; it is persisted into
-  `UserToolDefaults` via the store's `put_user_tool_defaults`.
-
-**Enforcement:** [`crates/aura-agent-kernel/src/policy/check/tests.rs`](../crates/aura-agent-kernel/src/policy/check/tests.rs)
-covers live prompt and session-state behaviour.
+These two invariants describe the concurrency model. §12 is the per-agent
+**enabling** invariant — single-writer per agent is what makes the rest of
+the document's per-agent guarantees hold. §15 is the **cross-agent**
+contract that those per-agent guarantees enable: because every property in
+Parts A–C is scoped to a single agent's kernel and log, unrelated agents
+execute concurrently without any of those properties weakening. Read §12
+first, then §15.
 
 ---
 
@@ -649,6 +755,54 @@ most one Kernel per agent claim"),
 [`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs),
 [`crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs`](../crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs),
 [`crates/aura-fleet-spawn/tests/spawn_idempotent_dedupe.rs`](../crates/aura-fleet-spawn/tests/spawn_idempotent_dedupe.rs).
+
+---
+
+## 15. Cross-Agent Parallelism
+
+**Unrelated agents execute concurrently. The only cross-agent serialization
+points are the per-agent processing claim (§12.a) and the per-parent
+SubagentSpawn audit lease (§12.b). Determinism survives parallelism because
+every other guarantee in this document is per-agent.**
+
+This invariant promotes what was previously an implementation footnote into
+a top-level contract. It is the architectural reason the system can pursue
+fast parallel execution without weakening §6/§7/§10 replay determinism.
+
+| Boundary | Scope | Effect |
+|---|---|---|
+| Per-agent processing claim ([`scheduler.rs`](../crates/aura-runtime/src/scheduler.rs)) | One agent | Same agent serializes; different agents parallel. |
+| Per-parent `ParentLeaseRegistry` ([`lease.rs`](../crates/aura-fleet-spawn/src/lease.rs)) | One parent's spawn audit chain | Same parent's spawns serialize; different parents parallel. |
+| `QuotaPool` ([`aura-fleet-quota`](../crates/aura-fleet-quota/src/lib.rs)) | Budget admission only | Gates concurrency limits; does **not** create cross-agent record ordering. |
+| No global writer mutex | — | Intentional absence: there is no global lock across agent kernels. |
+
+Because every guarantee in §1–§14 is scoped to a single agent's kernel and
+log, two agents committing entries at the same wall-clock moment produce two
+independent, internally-monotonic chains that replay byte-deterministically
+without any reference to each other. Parallelism is therefore a property of
+the system, not a hazard the design tolerates.
+
+**Enforcement:**
+[`crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs`](../crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs)
+(parallel across parents),
+[`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs)
+(serialized within a parent),
+[`crates/aura-fleet-spawn/tests/parallel_subagents.rs`](../crates/aura-fleet-spawn/tests/parallel_subagents.rs),
+[`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs)
+(concurrent appends across distinct agents),
+[`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs)
+(per-agent replay is byte-deterministic).
+
+---
+
+# Part E — Workspace & Plugin Structure
+
+These invariants are about **how the workspace itself is organized** — not
+about runtime behavior. §13 pins the 10-layer crate stack and the upward-
+edge ban. §14 carves out the plugin layer: plugin processes run as
+sandboxed external children that cannot reach any of the §1 surfaces. The
+two together prevent code-organization regressions that would otherwise
+quietly weaken Parts A–D.
 
 ---
 
@@ -734,43 +888,6 @@ properties hold:
 [`crates/aura-runtime/tests/hook_permission_request_short_circuits.rs`](../crates/aura-runtime/tests/hook_permission_request_short_circuits.rs),
 [`crates/aura-runtime/tests/plugin_e2e.rs`](../crates/aura-runtime/tests/plugin_e2e.rs),
 [`crates/aura-plugin-connectors/tests/last_wins.rs`](../crates/aura-plugin-connectors/tests/last_wins.rs).
-
----
-
-## 15. Cross-Agent Parallelism
-
-**Unrelated agents execute concurrently. The only cross-agent serialization
-points are the per-agent processing claim (§12.a) and the per-parent
-SubagentSpawn audit lease (§12.b). Determinism survives parallelism because
-every other guarantee in this document is per-agent.**
-
-This invariant promotes what was previously an implementation footnote into
-a top-level contract. It is the architectural reason the system can pursue
-fast parallel execution without weakening §6/§7/§10 replay determinism.
-
-| Boundary | Scope | Effect |
-|---|---|---|
-| Per-agent processing claim ([`scheduler.rs`](../crates/aura-runtime/src/scheduler.rs)) | One agent | Same agent serializes; different agents parallel. |
-| Per-parent `ParentLeaseRegistry` ([`lease.rs`](../crates/aura-fleet-spawn/src/lease.rs)) | One parent's spawn audit chain | Same parent's spawns serialize; different parents parallel. |
-| `QuotaPool` ([`aura-fleet-quota`](../crates/aura-fleet-quota/src/lib.rs)) | Budget admission only | Gates concurrency limits; does **not** create cross-agent record ordering. |
-| No global writer mutex | — | Intentional absence: there is no global lock across agent kernels. |
-
-Because every guarantee in §1–§14 is scoped to a single agent's kernel and
-log, two agents committing entries at the same wall-clock moment produce two
-independent, internally-monotonic chains that replay byte-deterministically
-without any reference to each other. Parallelism is therefore a property of
-the system, not a hazard the design tolerates.
-
-**Enforcement:**
-[`crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs`](../crates/aura-fleet-spawn/tests/parent_lease_independent_parents.rs)
-(parallel across parents),
-[`crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs`](../crates/aura-fleet-spawn/tests/parent_lease_concurrent_spawns.rs)
-(serialized within a parent),
-[`crates/aura-fleet-spawn/tests/parallel_subagents.rs`](../crates/aura-fleet-spawn/tests/parallel_subagents.rs),
-[`crates/aura-store-db/src/rocks_store/tests_concurrent.rs`](../crates/aura-store-db/src/rocks_store/tests_concurrent.rs)
-(concurrent appends across distinct agents),
-[`crates/aura-agent-kernel/tests/replay_round_trip.rs`](../crates/aura-agent-kernel/tests/replay_round_trip.rs)
-(per-agent replay is byte-deterministic).
 
 ---
 
