@@ -19,7 +19,10 @@ aura-agent = { path = "crates/aura-agent" }
 aura-memory = { path = "crates/aura-memory" }
 aura-auth = { path = "crates/aura-auth" }
 aura-runtime = { path = "crates/aura-runtime" }
+aura-config = { path = "crates/aura-config" }
+aura-plugin-core = { path = "crates/aura-plugin-core" }
 anyhow = { workspace = true }
+toml = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
@@ -74,6 +77,9 @@ members = [
     "crates/aura-automaton",
     "crates/aura-runtime",
     "crates/aura-protocol",
+    # Phase 4b plugin layer (in-process API + on-disk manifest pipeline)
+    "crates/aura-plugin-api",
+    "crates/aura-plugin-core",
 ]
 
 [profile.dev]

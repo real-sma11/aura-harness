@@ -32,6 +32,14 @@ pub enum Commands {
     /// `aura-store-db` and `aura-plugin-core` (Phase 4b+) start
     /// producing migration-aware on-disk layouts.
     Migrate(MigrateArgs),
+    /// Manage declarative plugins (Phase 4b).
+    ///
+    /// Subcommands install / list / enable / disable interact with
+    /// the on-disk plugin cache under `AURA_HOME/plugins/` and the
+    /// `[plugins.<id>]` table inside `AURA_HOME/config.toml`. No
+    /// agent-loop wiring lands until Phase 4c (hooks/MCP/connectors)
+    /// and Phase 8 (full integration).
+    Plugins(PluginsCommand),
 }
 
 /// Arguments for the `migrate` subcommand (Phase 4a stub).
@@ -40,6 +48,46 @@ pub struct MigrateArgs {
     /// Run as a dry preview without making changes.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `aura plugins` parent command (Phase 4b).
+#[derive(Args, Debug)]
+pub struct PluginsCommand {
+    /// Plugins subcommand to run.
+    #[command(subcommand)]
+    pub action: PluginsSubcommand,
+}
+
+/// Subcommands under `aura plugins` (Phase 4b).
+#[derive(Subcommand, Debug)]
+pub enum PluginsSubcommand {
+    /// Install a plugin from a local source directory.
+    ///
+    /// The source must contain a `.aura-plugin/`, `.codex-plugin/`,
+    /// or `.claude-plugin/` subdirectory with a `manifest.toml`. The
+    /// install pipeline copies the source tree into the
+    /// `AURA_HOME/plugins/<id>/<version>/` cache layout and writes a
+    /// normalised `.aura-plugin.toml` regardless of which alias the
+    /// source used.
+    Install {
+        /// Path to the plugin source directory.
+        source: PathBuf,
+        /// Bypass `trust.require_explicit_trust = true` manifests.
+        #[arg(long)]
+        trust: bool,
+    },
+    /// List installed plugins and their active versions.
+    List,
+    /// Enable a plugin in `AURA_HOME/config.toml` (`enabled = true`).
+    Enable {
+        /// Plugin id (matches the manifest `id` field).
+        id: String,
+    },
+    /// Disable a plugin in `AURA_HOME/config.toml` (`enabled = false`).
+    Disable {
+        /// Plugin id (matches the manifest `id` field).
+        id: String,
+    },
 }
 
 /// Arguments for the `run` subcommand (also the default behaviour).

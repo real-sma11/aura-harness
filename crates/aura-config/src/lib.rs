@@ -52,6 +52,28 @@
 //! | `AURA_LLM_BACKOFF_CAP_MS` | u64 | `30_000` | [`LlmRetryConfig::backoff_cap`] (millis) |
 //! | `AURA_DEV_LOOP_ENABLED_THINKING` | bool | `false` | [`ReasonerThinkingConfig::dev_loop_enabled_thinking`] |
 //!
+//! ### Phase 4a fleet / subagent / conflict / aura-home env vars
+//!
+//! These knobs land alongside `AuraHome` resolution and the Phase 4a
+//! `[fleet] / [subagent] / [conflict] / [plugins]` config tables.
+//! They have no agent-loop wiring yet — Phase 6+ (fleet) and Phase 7
+//! (subagent) consume them. `AURA_HOME` is consumed today by
+//! [`AuraHome::resolve`].
+//!
+//! | Env var | Type | Default | Field |
+//! | --- | --- | --- | --- |
+//! | `AURA_FLEET_EMBEDDED_DAEMON` | bool | `true` | [`FleetConfig::embedded_daemon`] |
+//! | `AURA_FLEET_MAX_CONCURRENT_AGENTS` | u32 | `32` | [`FleetConfig::max_concurrent_agents`] |
+//! | `AURA_FLEET_SHUTDOWN_GRACE_MS` | u64 | `30_000` | [`FleetConfig::shutdown_grace_ms`] |
+//! | `AURA_FLEET_ORPHAN_ON_PARENT_DEATH` | bool | `true` | [`FleetConfig::orphan_on_parent_death`] |
+//! | `AURA_SUBAGENT_MAX_DEPTH` | u32 | `8` | [`SubagentConfig::max_depth`] |
+//! | `AURA_SUBAGENT_DEFAULT_MAX_TOKENS` | u32 | `64_000` | [`SubagentConfig::default_max_tokens`] |
+//! | `AURA_SUBAGENT_DEFAULT_MAX_ITERATIONS` | u32 | `50` | [`SubagentConfig::default_max_iterations`] |
+//! | `AURA_SUBAGENT_DEFAULT_TIMEOUT_MS` | u64 | `300_000` | [`SubagentConfig::default_timeout_ms`] |
+//! | `AURA_CONFLICT_ENABLED` | bool | `true` | [`ConflictConfig::enabled`] |
+//! | `AURA_CONFLICT_DEFAULT_WAIT_MS` | u64 | `30_000` | [`ConflictConfig::default_wait_ms`] |
+//! | `AURA_HOME` | path | `~/.aura` | [`AuraHome::resolve`] (read-only `CODEX_HOME` compat alias also honoured during V1 transition) |
+//!
 //! Tool-sandbox knobs (`file_ops::SKIP_DIRS`, `INCLUDE_EXTENSIONS`),
 //! console formatting constants, transport-layer debug / emergency /
 //! WAF env vars (`AURA_LLM_WAF_SAFE_JSON`,

@@ -92,6 +92,11 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-automaton", "surface"),
     ("aura-runtime", "surface"),
     ("aura-protocol", "core"),
+    // Phase 4b plugin layer:
+    //   aura-plugin-api  — in-process contributor traits (first-party only)
+    //   aura-plugin-core — declarative manifest + install + cache + marketplace
+    ("aura-plugin-api", "plugin"),
+    ("aura-plugin-core", "plugin"),
 ];
 
 #[test]

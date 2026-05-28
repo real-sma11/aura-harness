@@ -10,7 +10,7 @@ mod event_loop;
 mod record_loader;
 mod session_helpers;
 
-use cli::{Cli, Commands, MigrateArgs, RunArgs, UiMode};
+use cli::{Cli, Commands, MigrateArgs, PluginsCommand, PluginsSubcommand, RunArgs, UiMode};
 
 use anyhow::Context;
 use aura_agent::{
@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Logout) => cmd_logout().await,
         Some(Commands::Whoami) => cmd_whoami(),
         Some(Commands::Migrate(args)) => cmd_migrate(args),
+        Some(Commands::Plugins(args)) => cmd_plugins(args),
         Some(Commands::Run(args)) => run_with_args(args).await,
         None => run_with_args(RunArgs::default()).await,
     }
@@ -77,6 +78,112 @@ fn cmd_migrate(args: MigrateArgs) -> anyhow::Result<()> {
         "aura migrate stub - Phase 4a placeholder; no migration actions performed (dry_run={})",
         args.dry_run
     );
+    Ok(())
+}
+
+/// `aura plugins` (Phase 4b).
+///
+/// Dispatches to the install / list / enable / disable handlers.
+/// Resolves `AURA_HOME` once and constructs a single
+/// [`aura_plugin_core::PluginCache`] rooted at `AURA_HOME/plugins/`
+/// before dispatching so every subcommand sees the same cache root
+/// resolution rules.
+fn cmd_plugins(args: PluginsCommand) -> anyhow::Result<()> {
+    let aura_home = aura_config::AuraHome::resolve().context("resolving AURA_HOME")?;
+    let cache = aura_plugin_core::PluginCache::new(aura_home.path.join("plugins"));
+    match args.action {
+        PluginsSubcommand::Install { source, trust } => {
+            let installed = aura_plugin_core::install_with_trust(&source, &cache, trust)
+                .with_context(|| format!("installing plugin from {}", source.display()))?;
+            println!(
+                "installed {} v{}",
+                installed.manifest.id.as_str(),
+                installed.manifest.version
+            );
+        }
+        PluginsSubcommand::List => {
+            let ids = cache.list_plugins().context("listing plugin cache")?;
+            if ids.is_empty() {
+                println!("(no plugins installed under {})", cache.root().display());
+            }
+            for id in ids {
+                let active = cache
+                    .active_version(&id)
+                    .with_context(|| format!("reading active pointer for {id}"))?
+                    .unwrap_or_else(|| "(none active)".to_string());
+                println!("{id:<32} active={active}");
+            }
+        }
+        PluginsSubcommand::Enable { id } => {
+            update_plugin_enable(&aura_home.path, &id, true)?;
+            println!("enabled {id}");
+        }
+        PluginsSubcommand::Disable { id } => {
+            update_plugin_enable(&aura_home.path, &id, false)?;
+            println!("disabled {id}");
+        }
+    }
+    Ok(())
+}
+
+/// Minimal `~/.aura/config.toml` mutation: read (or synthesise) the
+/// file, set `plugins.<id>.enabled = <enabled>`, atomic-write back
+/// via tempfile + rename.
+///
+/// We intentionally use `toml::Value` (already a workspace dep) rather
+/// than pulling in `toml_edit` for Phase 4b. The trade-off is that
+/// comment / formatting is not preserved — acceptable today because
+/// the config file is operator-owned and the round-trip writes a
+/// consistent canonical layout.
+fn update_plugin_enable(
+    aura_home: &std::path::Path,
+    id: &str,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    use std::fs;
+
+    let config_path = aura_home.join("config.toml");
+    fs::create_dir_all(aura_home)
+        .with_context(|| format!("creating AURA_HOME at {}", aura_home.display()))?;
+
+    let mut root: toml::Value = if config_path.exists() {
+        let body = fs::read_to_string(&config_path)
+            .with_context(|| format!("reading {}", config_path.display()))?;
+        toml::from_str(&body).with_context(|| format!("parsing {}", config_path.display()))?
+    } else {
+        toml::Value::Table(toml::value::Table::new())
+    };
+
+    let root_table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config.toml root must be a table"))?;
+
+    let plugins_entry = root_table
+        .entry("plugins".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let plugins_table = plugins_entry
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[plugins] entry must be a table"))?;
+
+    let plugin_entry = plugins_table
+        .entry(id.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let plugin_table = plugin_entry
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[plugins.{id}] entry must be a table"))?;
+
+    plugin_table.insert("enabled".to_string(), toml::Value::Boolean(enabled));
+
+    let serialised = toml::to_string_pretty(&root).context("serialising updated config.toml")?;
+
+    let tmp = config_path.with_extension("toml.tmp");
+    fs::write(&tmp, serialised).with_context(|| format!("writing {}", tmp.display()))?;
+    if config_path.exists() {
+        // Windows fs::rename refuses to overwrite; remove first.
+        let _ = fs::remove_file(&config_path);
+    }
+    fs::rename(&tmp, &config_path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), config_path.display()))?;
     Ok(())
 }
 

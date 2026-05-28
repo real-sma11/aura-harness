@@ -133,6 +133,7 @@ dependencies = [
  "aura-core",
  "aura-kernel",
  "aura-memory",
+ "aura-plugin-core",
  "aura-protocol",
  "aura-reasoner",
  "aura-runtime",
@@ -159,6 +160,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
+ "toml",
  "tower",
  "tower-http",
  "tracing",
@@ -441,6 +443,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "aura-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-plugin-core"
+version = "0.1.0"
+dependencies = [
+ "aura-plugin-api",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+ "tracing",
+ "walkdir",
 ]
 
 [[package]]
@@ -3122,6 +3148,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
