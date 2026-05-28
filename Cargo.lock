@@ -203,6 +203,7 @@ dependencies = [
 name = "aura-auth"
 version = "0.1.0"
 dependencies = [
+ "aura-core-auth",
  "chrono",
  "dirs",
  "keyring",
@@ -263,6 +264,9 @@ dependencies = [
 name = "aura-core"
 version = "0.1.0"
 dependencies = [
+ "aura-core-modes",
+ "aura-core-permissions",
+ "aura-core-types",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -272,6 +276,59 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
+name = "aura-core-auth"
+version = "0.1.0"
+dependencies = [
+ "aura-core-types",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-core-modes"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-core-permissions"
+version = "0.1.0"
+dependencies = [
+ "aura-core-modes",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-core-protocol"
+version = "0.1.0"
+dependencies = [
+ "aura-core-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aura-core-types"
+version = "0.1.0"
+dependencies = [
+ "aura-core-modes",
+ "aura-core-permissions",
+ "blake3",
+ "hex",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

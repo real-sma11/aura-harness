@@ -1,3 +1,18 @@
+# Workspace toolchain pin (Phase 1 — aura agent-first refactor).
+#
+# Target MSRV is `rust-version = "1.80.0"` in the workspace `Cargo.toml`.
+# We previously tried pinning `channel = "1.80.0"` here, but the
+# transitive `ratatui-macros 0.7` dep (pulled in by `ratatui` for the
+# TUI surface) requires `edition2024`, which is only stable on
+# Rust 1.85+. Pinning a fixed older channel made `cargo` refuse to
+# parse the dependency manifest.
+#
+# Falling back to `channel = "stable"` gets us a recent stable
+# toolchain that can still build at the documented MSRV; CI's
+# `--msrv` job double-checks that the workspace also compiles on
+# 1.80.0. Revisit and re-pin to a specific stable when ratatui drops
+# its 2024-edition macro dep.
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
+profile = "minimal"

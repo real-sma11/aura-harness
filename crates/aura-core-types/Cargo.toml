@@ -1,27 +1,22 @@
 [package]
-name = "aura-core"
-description = "Core types, IDs, schemas, and serialization for Aura"
+name = "aura-core-types"
+description = "Behavior-free IDs and wire shapes shared by every layer (Phase 1: new identifiers; remaining types re-exported via aura-core during the split)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 aura-core-modes = { path = "../aura-core-modes" }
 aura-core-permissions = { path = "../aura-core-permissions" }
-aura-core-types = { path = "../aura-core-types" }
 serde = { workspace = true }
-serde_json = { workspace = true }
-blake3 = { workspace = true }
-thiserror = { workspace = true }
-bytes = { workspace = true }
 uuid = { workspace = true }
+blake3 = { workspace = true }
 hex = "0.4"
-base64 = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

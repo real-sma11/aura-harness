@@ -8,11 +8,63 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
+
+/// Typed errors returned by [`run_build_command`] and its helpers.
+///
+/// Library-crate signature replacement for the previous
+/// `anyhow::Result<_>` returns. `anyhow::Error: From<E>` for any
+/// `E: std::error::Error + 'static` so binary call sites still get
+/// the same `?` ergonomics.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildRunnerError {
+    /// Caller passed an empty command string.
+    #[error("build_command is empty")]
+    EmptyCommand,
+    /// `Command::spawn` failed.
+    #[error("failed to execute build command `{command}` in `{cwd}`: {source}")]
+    SpawnFailed {
+        /// The literal command string.
+        command: String,
+        /// Working directory it was invoked in.
+        cwd: String,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// IO error while reading a child process pipe.
+    #[error("failed reading build command {stream}: {source}")]
+    PipeRead {
+        /// `"stdout"` or `"stderr"`.
+        stream: &'static str,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// IO error while waiting for the child process.
+    #[error("IO error waiting for build command `{command}`: {source}")]
+    Wait {
+        /// The literal command string.
+        command: String,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A spawned `tokio::task::JoinHandle` failed.
+    #[error("build command `{command}` {stream} collector failed: {source}")]
+    CollectorJoin {
+        /// The literal command string.
+        command: String,
+        /// `"stdout"` or `"stderr"`.
+        stream: String,
+        /// Underlying join error.
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct BuildResult {
@@ -22,6 +74,10 @@ pub struct BuildResult {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
 }
+
+/// Convenience alias for the join handle returned by the output
+/// collector tasks.
+type CollectorHandle = tokio::task::JoinHandle<Result<String, BuildRunnerError>>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndividualTestResult {
@@ -86,9 +142,9 @@ pub async fn run_build_command(
     project_dir: &Path,
     build_command: &str,
     output_tx: Option<UnboundedSender<String>>,
-) -> anyhow::Result<BuildResult> {
+) -> Result<BuildResult, BuildRunnerError> {
     if build_command.split_whitespace().next().is_none() {
-        anyhow::bail!("build_command is empty");
+        return Err(BuildRunnerError::EmptyCommand);
     }
 
     info!(
@@ -111,7 +167,7 @@ pub async fn run_build_command(
 fn spawn_build_child(
     project_dir: &Path,
     build_command: &str,
-) -> anyhow::Result<tokio::process::Child> {
+) -> Result<tokio::process::Child, BuildRunnerError> {
     let child = if needs_shell(build_command) {
         #[cfg(target_os = "windows")]
         {
@@ -154,11 +210,10 @@ fn spawn_build_child(
             .stderr(Stdio::piped())
             .spawn()
     }
-    .map_err(|e| {
-        anyhow!(
-            "failed to execute build command `{build_command}` in `{}`: {e}",
-            project_dir.display()
-        )
+    .map_err(|e| BuildRunnerError::SpawnFailed {
+        command: build_command.to_string(),
+        cwd: project_dir.display().to_string(),
+        source: e,
     })?;
     Ok(child)
 }
@@ -198,10 +253,7 @@ fn windows_resolve_program(program: &str, cwd: &Path) -> Option<std::path::PathB
 fn spawn_output_collectors(
     child: &mut tokio::process::Child,
     output_tx: Option<UnboundedSender<String>>,
-) -> (
-    tokio::task::JoinHandle<anyhow::Result<String>>,
-    tokio::task::JoinHandle<anyhow::Result<String>>,
-) {
+) -> (CollectorHandle, CollectorHandle) {
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -218,14 +270,17 @@ async fn collect_lines<R: tokio::io::AsyncRead + Unpin>(
     stream_name: &'static str,
     pipe: Option<R>,
     tx: Option<UnboundedSender<String>>,
-) -> anyhow::Result<String> {
+) -> Result<String, BuildRunnerError> {
     let mut collected = String::new();
     if let Some(pipe) = pipe {
         let mut reader = tokio::io::BufReader::new(pipe).lines();
         while let Some(line) = reader
             .next_line()
             .await
-            .with_context(|| format!("failed reading build command {stream_name}"))?
+            .map_err(|e| BuildRunnerError::PipeRead {
+                stream: stream_name,
+                source: e,
+            })?
         {
             if let Some(ref tx) = tx {
                 let _ = tx.send(format!("{line}\n"));
@@ -240,9 +295,9 @@ async fn collect_lines<R: tokio::io::AsyncRead + Unpin>(
 async fn await_build_result(
     child: &mut tokio::process::Child,
     build_command: &str,
-    stdout_handle: tokio::task::JoinHandle<anyhow::Result<String>>,
-    stderr_handle: tokio::task::JoinHandle<anyhow::Result<String>>,
-) -> anyhow::Result<BuildResult> {
+    stdout_handle: CollectorHandle,
+    stderr_handle: CollectorHandle,
+) -> Result<BuildResult, BuildRunnerError> {
     match tokio::time::timeout(BUILD_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => {
             let stdout_raw = collect_joined_output(stdout_handle, "stdout", build_command).await?;
@@ -255,29 +310,32 @@ async fn await_build_result(
                 timed_out: false,
             })
         }
-        Ok(Err(e)) => {
-            anyhow::bail!("IO error waiting for build command `{build_command}`: {e}");
-        }
+        Ok(Err(e)) => Err(BuildRunnerError::Wait {
+            command: build_command.to_string(),
+            source: e,
+        }),
         Err(_) => handle_build_timeout(child, build_command, stdout_handle, stderr_handle).await,
     }
 }
 
 async fn collect_joined_output(
-    handle: tokio::task::JoinHandle<anyhow::Result<String>>,
+    handle: CollectorHandle,
     stream_name: &str,
     build_command: &str,
-) -> anyhow::Result<String> {
-    handle.await.map_err(|e| {
-        anyhow!("build command `{build_command}` {stream_name} collector failed: {e}")
+) -> Result<String, BuildRunnerError> {
+    handle.await.map_err(|e| BuildRunnerError::CollectorJoin {
+        command: build_command.to_string(),
+        stream: stream_name.to_string(),
+        source: e,
     })?
 }
 
 async fn handle_build_timeout(
     child: &mut tokio::process::Child,
     build_command: &str,
-    stdout_handle: tokio::task::JoinHandle<anyhow::Result<String>>,
-    stderr_handle: tokio::task::JoinHandle<anyhow::Result<String>>,
-) -> anyhow::Result<BuildResult> {
+    stdout_handle: CollectorHandle,
+    stderr_handle: CollectorHandle,
+) -> Result<BuildResult, BuildRunnerError> {
     warn!(
         command = %build_command,
         timeout_secs = BUILD_TIMEOUT.as_secs(),
@@ -315,7 +373,7 @@ async fn handle_build_timeout(
 }
 
 async fn collect_timeout_output(
-    handle: tokio::task::JoinHandle<anyhow::Result<String>>,
+    handle: CollectorHandle,
     stream_name: &str,
     build_command: &str,
 ) -> String {

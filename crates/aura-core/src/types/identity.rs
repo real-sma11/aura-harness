@@ -1,8 +1,8 @@
 //! Agent identity types.
 
 use crate::ids::AgentId;
-use crate::permissions::AgentPermissions;
 use crate::types::tool_permissions::AgentToolPermissions;
+use aura_core_permissions::AgentPermissions;
 use serde::{Deserialize, Serialize};
 
 /// Agent identity information.

@@ -41,6 +41,11 @@ async-trait = { workspace = true }
 resolver = "2"
 members = [
     "crates/aura-core",
+    "crates/aura-core-modes",
+    "crates/aura-core-permissions",
+    "crates/aura-core-types",
+    "crates/aura-core-protocol",
+    "crates/aura-core-auth",
     "crates/aura-config",
     "crates/aura-prompts",
     "crates/aura-store",

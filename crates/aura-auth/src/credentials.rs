@@ -33,8 +33,7 @@
 //!   workspace dep today. Tracked as a TODO below.
 
 use crate::error::AuthError;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+pub use aura_core_auth::StoredSession;
 use std::io;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -43,21 +42,6 @@ use tracing::{debug, warn};
 const KEYRING_SERVICE: &str = "aura";
 /// Keyring username/slot under the service.
 const KEYRING_USER: &str = "credentials";
-
-/// Persisted authentication session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredSession {
-    /// JWT access token for the aura-router proxy.
-    pub access_token: String,
-    /// zOS user ID.
-    pub user_id: String,
-    /// Human-readable display name.
-    pub display_name: String,
-    /// Primary zID (e.g. `0://alice`).
-    pub primary_zid: String,
-    /// When the session was created.
-    pub created_at: DateTime<Utc>,
-}
 
 /// Credential store backed by the OS keyring with a file fallback.
 pub struct CredentialStore;
@@ -333,6 +317,7 @@ fn open_private_for_write(path: &Path) -> io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use tempfile::TempDir;
 
     fn sample_session() -> StoredSession {

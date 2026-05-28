@@ -1,0 +1,18 @@
+[package]
+name = "aura-core-protocol"
+description = "Wire protocol primitives (ProtocolVersion) — Phase 1 placeholder; full wire shapes live in aura-protocol during the split"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aura-core-types = { path = "../aura-core-types" }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

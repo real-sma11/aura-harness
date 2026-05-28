@@ -270,7 +270,7 @@ async fn run_build_step(
         },
     );
 
-    runner::run_build_command(base_path, build_cmd, Some(line_tx)).await
+    Ok(runner::run_build_command(base_path, build_cmd, Some(line_tx)).await?)
 }
 
 async fn handle_build_success(

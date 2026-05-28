@@ -1,0 +1,20 @@
+[package]
+name = "aura-core-permissions"
+description = "Privilege types and pure resolution math for Aura (Capability/Permissions/narrow/intersect/allows)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aura-core-modes = { path = "../aura-core-modes" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

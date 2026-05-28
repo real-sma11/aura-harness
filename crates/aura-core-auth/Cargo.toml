@@ -1,0 +1,20 @@
+[package]
+name = "aura-core-auth"
+description = "Token / session primitives for Aura (no network, no storage)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aura-core-types = { path = "../aura-core-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

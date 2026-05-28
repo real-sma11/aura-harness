@@ -2,10 +2,19 @@
 //!
 //! Authentication client and credential storage for the Aura CLI.
 //!
+//! Layer: core (Phase 1 — narrowing in progress, see crate notes).
+//!
 //! Provides:
 //! - [`ZosClient`] for authenticating against the zOS API (`zosapi.zero.tech`)
 //! - [`CredentialStore`] for persisting JWT tokens to `~/.aura/credentials.json`
-//! - [`StoredSession`] as the serializable session type
+//! - [`StoredSession`] (re-exported from `aura-core-auth`) as the
+//!   serializable session type
+//!
+//! The pure auth primitives ([`StoredSession`], the
+//! [`AccessToken`]/[`RefreshToken`]/[`Token`] enum, and a primitive
+//! [`PrimitiveAuthError`]) live in `aura-core-auth` and are
+//! re-exported here for source compatibility. Backend-flavoured
+//! variants of [`AuthError`] (HTTP + keyring) stay in this crate.
 //!
 //! # Login flow
 //!
@@ -27,3 +36,7 @@ pub use credentials::{CredentialStore, StoredSession};
 pub use error::AuthError;
 pub use redact::redact_error;
 pub use zos_client::ZosClient;
+
+// Re-export the pure primitive types from aura-core-auth so callers
+// can pull token primitives without depending on the backend crate.
+pub use aura_core_auth::{AccessToken, AuthError as PrimitiveAuthError, RefreshToken, Token};
