@@ -207,21 +207,11 @@ fn pub_fields(contents: &str) -> Vec<PubField> {
 
 fn collect_env_var_names(src_dir: &Path) -> Vec<String> {
     let env_rs = src_dir.join("env.rs");
-    let contents = fs::read_to_string(&env_rs).expect("readable env.rs");
-    let mut names = Vec::new();
-    for line in contents.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("pub const AURA_") && trimmed.contains(": &str = \"AURA_") {
-            if let Some(name) = trimmed
-                .split(": &str = \"")
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-            {
-                names.push(name.to_string());
-            }
-        }
-    }
-    names
+    fs::read_to_string(&env_rs).expect("readable env.rs");
+    aura_config::ENV_VAR_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 fn collect_rust_files(root: &Path) -> Vec<PathBuf> {

@@ -20,22 +20,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const OWNED_ENV_VARS: &[&str] = &[
-    "AURA_AGENT_DISABLE_COMPACTION",
-    "AURA_AGENT_IMPLEMENT_NOW",
-    "AURA_AGENT_IMPLEMENT_NOW_THRESHOLD",
-    "AURA_AGENT_IMPLEMENT_NOW_BLOCK",
-    "AURA_AGENT_BOOTSTRAP_SPEC_BYTES",
-    "AURA_AGENT_BOOTSTRAP_STRIP_CODE_FENCES",
-    "AURA_AGENT_BOOTSTRAP_CONTEXT_CHARS",
-    "AURA_TURN_TOOL_HEARTBEAT_INTERVAL_SECS",
-    "AURA_DOD_TEST_COMMAND",
-    "AURA_SIMPLE_MODEL",
-    "AURA_LLM_MAX_RETRIES",
-    "AURA_LLM_BACKOFF_INITIAL_MS",
-    "AURA_LLM_BACKOFF_CAP_MS",
-    "AURA_DEV_LOOP_ENABLED_THINKING",
-];
+const OWNED_ENV_VARS: &[&str] = aura_config::ENV_VAR_NAMES;
 
 /// Per-migrated-const scan: each entry is `(const_name, owning_path)`.
 ///
@@ -111,7 +96,7 @@ fn no_crate_outside_aura_config_reads_owned_env_vars_directly() {
             for pattern in env_var_patterns(env_name) {
                 if contents.contains(pattern.as_str()) {
                     offenders.push(format!(
-                        "{}: contains `{}` — migrate to `aura_config::{}().…` accessor or use `aura_config::install_for_test`",
+                        "{}: contains `{}` — migrate to {} or use `aura_config::install_for_test`",
                         path.display(),
                         pattern,
                         accessor_hint(env_name),
@@ -204,6 +189,8 @@ fn env_var_patterns(name: &str) -> Vec<String> {
     vec![
         format!("std::env::var(\"{name}\")"),
         format!("env::var(\"{name}\")"),
+        format!("std::env::var_os(\"{name}\")"),
+        format!("env::var_os(\"{name}\")"),
         format!("env::set_var(\"{name}\""),
         format!("env::remove_var(\"{name}\")"),
         format!("std::env::set_var(\"{name}\""),
@@ -213,9 +200,17 @@ fn env_var_patterns(name: &str) -> Vec<String> {
 
 fn accessor_hint(env_name: &str) -> &'static str {
     if env_name.starts_with("AURA_LLM_") || env_name == "AURA_DEV_LOOP_ENABLED_THINKING" {
-        "reasoner"
+        "`aura_config::reasoner().…`"
+    } else if env_name.starts_with("AURA_FLEET_") {
+        "`aura_config::loaded().fleet.…`"
+    } else if env_name.starts_with("AURA_SUBAGENT_") {
+        "`aura_config::loaded().subagent.…`"
+    } else if env_name.starts_with("AURA_CONFLICT_") {
+        "`aura_config::loaded().conflict.…`"
+    } else if env_name == "AURA_HOME" || env_name == "CODEX_HOME" {
+        "`aura_config::AuraHome::resolve()`"
     } else {
-        "agent"
+        "`aura_config::agent().…`"
     }
 }
 

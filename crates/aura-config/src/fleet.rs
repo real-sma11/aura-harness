@@ -33,9 +33,10 @@ use aura_core_modes::AgentMode;
 use serde::{Deserialize, Serialize};
 
 use crate::env::{
-    lookup_bool, lookup_numeric, AURA_FLEET_DEFAULT_MODE, AURA_FLEET_EMBEDDED_DAEMON,
-    AURA_FLEET_MAX_CONCURRENT_AGENTS, AURA_FLEET_ORPHAN_ON_PARENT_DEATH,
-    AURA_FLEET_SHUTDOWN_GRACE_MS, FALSY_LITERALS, TRUTHY_LITERALS,
+    lookup_bool, lookup_numeric, lookup_string, AURA_FLEET_DEFAULT_MODE,
+    AURA_FLEET_EMBEDDED_DAEMON, AURA_FLEET_MAX_CONCURRENT_AGENTS,
+    AURA_FLEET_ORPHAN_ON_PARENT_DEATH, AURA_FLEET_SHUTDOWN_GRACE_MS, FALSY_LITERALS,
+    TRUTHY_LITERALS,
 };
 
 const DEFAULT_EMBEDDED_DAEMON: bool = true;
@@ -123,11 +124,7 @@ impl FleetConfig {
             TRUTHY_LITERALS,
             FALSY_LITERALS,
         );
-        if let Some(raw) = std::env::var(AURA_FLEET_DEFAULT_MODE)
-            .ok()
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-        {
+        if let Some(raw) = lookup_string(AURA_FLEET_DEFAULT_MODE).map(|s| s.to_lowercase()) {
             cfg.default_mode = match raw.as_str() {
                 "agent" => AgentMode::Agent,
                 "plan" => AgentMode::Plan,
