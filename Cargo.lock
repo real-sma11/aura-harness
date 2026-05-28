@@ -450,6 +450,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aura-agent",
+ "aura-agent-subagent",
+ "aura-automaton",
+ "aura-compaction",
+ "aura-core",
+ "aura-core-modes",
+ "aura-core-permissions",
+ "aura-fleet-spawn",
+ "aura-kernel",
+ "aura-memory",
+ "aura-prompts",
+ "aura-protocol",
+ "aura-reasoner",
+ "aura-store",
+ "aura-tools",
+ "bytes",
+ "chrono",
+ "dashmap 5.5.3",
+ "futures-util",
+ "insta",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "aura-exec-conflict"
 version = "0.1.0"
 dependencies = [
@@ -616,6 +652,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-fleet-subagent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aura-agent-subagent",
+ "aura-core",
+ "aura-core-modes",
+ "aura-core-permissions",
+ "aura-engine",
+ "aura-fleet-quota",
+ "aura-fleet-registry",
+ "aura-fleet-spawn",
+ "aura-reasoner",
+ "aura-store",
+ "aura-tools",
+ "insta",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "aura-kernel"
 version = "0.1.0"
 dependencies = [
@@ -747,10 +805,12 @@ dependencies = [
  "aura-core",
  "aura-core-modes",
  "aura-core-permissions",
+ "aura-engine",
  "aura-fleet-daemon",
  "aura-fleet-quota",
  "aura-fleet-registry",
  "aura-fleet-spawn",
+ "aura-fleet-subagent",
  "aura-kernel",
  "aura-memory",
  "aura-plugin-core",
@@ -872,6 +932,7 @@ dependencies = [
  "aura-config",
  "aura-core",
  "aura-core-modes",
+ "aura-engine",
  "aura-fleet-daemon",
  "aura-fleet-registry",
  "aura-fleet-spawn",
@@ -950,6 +1011,7 @@ dependencies = [
  "async-trait",
  "aura-core",
  "aura-kernel",
+ "aura-store",
  "bytes",
  "futures-util",
  "glob",

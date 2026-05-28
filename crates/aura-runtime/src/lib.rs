@@ -2,16 +2,31 @@
 //!
 //! Layer: surface
 //!
-//! Runtime crate for Aura (router, scheduler, workers).
+//! HTTP/WS gateway crate for Aura. Hosts the canonical
+//! [`aura_protocol::RuntimeRequest`] entry endpoints (`POST /v1/run`,
+//! `WS /stream/:run_id`) and the management surfaces (skills, memory,
+//! tool defaults, files, transactions). Composes
+//! [`aura_engine`] for orchestration and
+//! [`aura_fleet_subagent::FleetSubagentDispatcher`] for the `task`
+//! tool's child-spawn surface.
 //!
-//! The compiled binary name is declared in `Cargo.toml`'s `[[bin]]`
-//! section and is deliberately decoupled from the crate name to avoid
-//! churn in Dockerfile `CMD` and operator scripts.
+//! The compiled binary name (`aura-node`) is declared in
+//! `Cargo.toml`'s `[[bin]]` section and is deliberately decoupled
+//! from the crate name to avoid churn in Dockerfile `CMD` and
+//! operator scripts.
+//!
+//! Phase B / Commit 3 extracted the orchestration engine into the
+//! `aura-engine` crate. The scheduler, worker, automaton bridge,
+//! memory observer, runtime capabilities, executor factory, JWT
+//! domain wrapper, and `RuntimeChildRunner` live there now. The
+//! subagent dispatcher impl moved to the new `aura-fleet-subagent`
+//! crate (fleet layer); the bundled registry + pure-data adapter
+//! helpers moved to `aura-agent-subagent` (agent layer).
 //!
 //! Provides:
-//! - HTTP router for transaction submission
-//! - Scheduler for agent processing
-//! - Per-agent worker loop with single-writer guarantee
+//! - HTTP router for transaction submission + management endpoints.
+//! - WS handlers attached to a [`aura_engine::Scheduler`].
+//! - Auth, config, files-api helpers shared with surface-cli.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
@@ -36,29 +51,39 @@
 )]
 
 pub mod auth;
-pub(crate) mod automaton_bridge;
 mod config;
 pub mod console_format;
 pub(crate) mod domain;
-pub(crate) mod executor_factory;
 pub mod files_api;
 pub mod inbound_console;
-pub(crate) mod jwt_domain;
-pub mod memory_observer;
 mod node;
 pub(crate) mod protocol;
 pub(crate) mod router;
-pub(crate) mod runtime_capabilities;
-pub mod scheduler;
 pub(crate) mod session;
-pub mod subagent_dispatch;
-pub mod subagent_registry;
 pub(crate) mod terminal;
 pub(crate) mod tool_permissions;
-mod worker;
 
 pub use config::NodeConfig;
 pub use node::Node;
+
+/// Re-exports of orchestration primitives the gateway composes.
+///
+/// External consumers reach into `aura_runtime::scheduler::*` and
+/// `aura_runtime::memory_observer::*` today; Phase B keeps those
+/// paths working by exposing thin re-export modules over the
+/// underlying [`aura_engine`] surface.
+pub mod scheduler {
+    pub use aura_engine::scheduler::{
+        AgentIdentity, AgentIdentityRegistry, ProcessingClaim, Scheduler, SchedulerError,
+    };
+}
+
+/// Memory-observer re-export module. See [`scheduler`] for the
+/// rationale behind keeping the legacy `aura_runtime::*::*` import
+/// paths alive after the Phase B engine extraction.
+pub mod memory_observer {
+    pub use aura_engine::memory_observer::{turn_summary_from_result, MemoryTurnObserver};
+}
 
 /// Phase 10 carve-out 1: surface-layer entry point for the
 /// `aura-node` binary. The root `main.rs` is reduced to a thin
@@ -166,7 +191,7 @@ pub use aura_protocol::{
 #[cfg(feature = "test-support")]
 pub mod test_support {
     pub use crate::router::{create_router, RouterState, RouterStateConfig};
-    pub use crate::scheduler::Scheduler;
+    pub use aura_engine::scheduler::Scheduler;
 }
 
 /// Top-level error type for the aura-runtime crate.

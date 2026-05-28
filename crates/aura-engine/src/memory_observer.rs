@@ -4,7 +4,7 @@
 //! Phase 6c inverted the historical upward edge `aura-context-memory ->
 //! aura-agent`. The memory crate now consumes a layer-neutral
 //! [`aura_memory::TurnSummary`] and exposes no observer trait of its own.
-//! This module lives in the runtime layer — the natural meeting point of
+//! This module lives in the engine layer — the natural meeting point of
 //! `aura-agent` (for the [`aura_agent::TurnObserver`] trait + the
 //! [`aura_agent::AgentLoopResult`] payload) and `aura-context-memory`
 //! (for the [`aura_memory::MemoryManager`] facade) — and supplies the

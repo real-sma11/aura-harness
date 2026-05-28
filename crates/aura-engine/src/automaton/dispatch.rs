@@ -27,7 +27,7 @@ use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;
 use tracing::{info, warn};
 
-use crate::runtime_capabilities;
+use crate::capabilities;
 use aura_protocol::installed_integration_to_core;
 
 use super::{AutomatonBridge, ProjectHandle};
@@ -126,7 +126,7 @@ impl AutomatonBridge {
                 agent_permissions,
             )
             .map_err(|e| format!("failed to build {} kernel: {e}", labels.kernel))?;
-        if let Err(e) = runtime_capabilities::record_runtime_capabilities(
+        if let Err(e) = capabilities::record_runtime_capabilities(
             &kernel,
             "automaton",
             None,
@@ -182,7 +182,7 @@ impl AutomatonBridge {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO(W4): collapse dev-loop kickoff args.
-    pub(crate) async fn start_dev_loop_with_capabilities(
+    pub async fn start_dev_loop_with_capabilities(
         &self,
         project_id: &str,
         workspace_root: Option<PathBuf>,
@@ -326,7 +326,7 @@ impl AutomatonBridge {
     }
 
     #[allow(clippy::too_many_arguments)] // TODO(W4): collapse task-runner args.
-    pub(crate) async fn run_task_with_capabilities(
+    pub async fn run_task_with_capabilities(
         &self,
         project_id: &str,
         task_id: &str,

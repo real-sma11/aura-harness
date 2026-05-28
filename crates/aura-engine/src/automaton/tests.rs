@@ -14,7 +14,8 @@
 //!    via `super::event_channel::EVENT_HISTORY_CAPACITY`.
 
 use super::event_channel::EVENT_HISTORY_CAPACITY;
-use super::{AutomatonBridge, Scheduler};
+use super::AutomatonBridge;
+use crate::scheduler::Scheduler;
 use async_trait::async_trait;
 use aura_automaton::AutomatonRuntime;
 use aura_core::{AgentId, InstalledIntegrationDefinition, TransactionType};
@@ -487,7 +488,6 @@ fn prepare_installed_tools_filters_by_required_integration() {
 // ------------------------------------------------------------------
 
 fn test_bridge() -> AutomatonBridge {
-    use crate::scheduler::Scheduler;
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(RocksStore::open(dir.path().join("db"), false).unwrap());
     let provider: Arc<dyn ModelProvider + Send + Sync> =

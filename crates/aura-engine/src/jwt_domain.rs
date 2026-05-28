@@ -4,6 +4,10 @@
 //! internal services without user context.  This wrapper captures a JWT at
 //! construction time and transparently injects it whenever the caller passes
 //! `None`.
+//!
+//! Phase B / Commit 3 keeps this alongside the engine because the
+//! automaton bridge is its only caller. Phase C lifts both this and
+//! the HTTP `DomainApi` impl into a dedicated `aura-domain-http` crate.
 
 use std::sync::Arc;
 
@@ -13,6 +17,8 @@ use aura_tools::domain_tools::{
     SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
 };
 
+/// Wraps an inner [`DomainApi`] and stamps a captured JWT onto every
+/// call site that did not supply one.
 pub struct JwtDomainApi {
     inner: Arc<dyn DomainApi>,
     jwt: String,

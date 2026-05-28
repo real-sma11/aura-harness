@@ -1,0 +1,31 @@
+[package]
+name = "aura-fleet-subagent"
+description = "Fleet-layer concrete SubagentDispatchHook impl wrapping FleetSpawner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core = { path = "../aura-core" }
+aura-store = { path = "../aura-store" }
+aura-tools = { path = "../aura-tools" }
+aura-agent-subagent = { path = "../aura-agent-subagent" }
+aura-fleet-spawn = { path = "../aura-fleet-spawn" }
+aura-fleet-registry = { path = "../aura-fleet-registry" }
+aura-fleet-quota = { path = "../aura-fleet-quota" }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+aura-engine = { path = "../aura-engine" }
+aura-store = { path = "../aura-store" }
+aura-reasoner = { path = "../aura-reasoner" }
+aura-core-modes = { path = "../aura-core-modes" }
+aura-core-permissions = { path = "../aura-core-permissions" }
+tempfile = { workspace = true }
+insta = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

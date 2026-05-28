@@ -20,7 +20,7 @@
 //! ## Failure recipe
 //!
 //! 1. Inspect the diff in `insta` (UPDATE_SNAPSHOTS=1 cargo test
-//!    -p aura-runtime --test task_tool_subagent_result_snapshot).
+//!    -p aura-fleet-subagent --test task_tool_subagent_result_snapshot).
 //! 2. If the change is intentional, ensure every consumer of the
 //!    `SubagentResult` wire shape (terminal renderer, IDE adapter,
 //!    task tool callers) is updated in the same change.
@@ -33,39 +33,28 @@
 //! `"[child_agent_id]"` token so the snapshot stays stable
 //! across runs while still asserting the field is present and
 //! the surrounding shape is unchanged.
+//!
+//! Phase B / Commit 3 / Step 3a relocated this test alongside the
+//! fleet-layer dispatcher impl.
 
-use std::sync::Arc;
+mod common;
 
 use aura_core::{
     AgentId, AgentPermissions, AgentScope, Capability, SubagentDispatchRequest, SubagentResult,
     UserToolDefaults,
 };
-use aura_reasoner::MockProvider;
-use aura_runtime::scheduler::Scheduler;
-use aura_runtime::subagent_dispatch::RuntimeSubagentDispatch;
-use aura_store::RocksStore;
-use aura_tools::{SubagentDispatchHook, ToolCatalog};
+use aura_tools::SubagentDispatchHook;
+
+use common::build_dispatch_with_response;
 
 #[tokio::test]
 async fn task_tool_subagent_result_json_shape_is_byte_identical() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let workspace = tempfile::tempdir().expect("workspace dir");
-    let store = Arc::new(RocksStore::open(dir.path().join("db"), false).expect("rocks open"));
-    let provider = Arc::new(MockProvider::simple_response("snapshot child output"));
-    let catalog = ToolCatalog::default();
-    let scheduler = Arc::new(Scheduler::new(
-        store.clone(),
-        provider,
-        Vec::new(),
-        catalog.executor_builtin_tools(),
-        workspace.path().to_path_buf(),
-        None,
-    ));
-    let dispatch = RuntimeSubagentDispatch::new(store, scheduler);
+    let (dispatch, _store, _d, _w) = build_dispatch_with_response("snapshot child output");
 
     let parent_agent_id = AgentId::generate();
-    let result: SubagentResult = dispatch
-        .dispatch(SubagentDispatchRequest {
+    let result: SubagentResult = SubagentDispatchHook::dispatch(
+        &dispatch,
+        SubagentDispatchRequest {
             parent_agent_id,
             subagent_type: "explore".into(),
             prompt: "summarize".into(),
@@ -88,9 +77,10 @@ async fn task_tool_subagent_result_json_shape_is_byte_identical() {
             override_tool_subset: None,
             override_isolation_id: None,
             override_budget: None,
-        })
-        .await
-        .expect("dispatch");
+        },
+    )
+    .await
+    .expect("dispatch");
 
     let json = serde_json::to_value(&result).expect("serialize result");
     insta::assert_json_snapshot!(

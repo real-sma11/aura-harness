@@ -1,7 +1,7 @@
 //! Bridge between `AutomatonController` (defined in `aura-tools`) and the
 //! concrete `AutomatonRuntime` + automaton types (from `aura-automaton`).
 //!
-//! This module lives in `aura-runtime` because it depends on both crates.
+//! This module lives in `aura-engine` because it depends on both crates.
 //! It handles: JWT injection, tool executor wiring, event broadcasting,
 //! and non-blocking task execution.
 //!
@@ -207,7 +207,7 @@ impl AutomatonBridge {
             // Anthropic context windows top out around 1M tokens; the
             // `u64` → `usize` cast is bounds-safe on every target
             // architecture we ship to (64-bit only).
-            max_context_tokens: usize::try_from(crate::session::context_window_for_model(model))
+            max_context_tokens: usize::try_from(crate::context_window_for_model(model))
                 .unwrap_or(usize::MAX),
             auth_token: auth_token.map(String::from),
         };
@@ -278,7 +278,7 @@ impl AutomatonBridge {
         // already returns an `InvalidConfig` error when it isn't
         // present in the start request.
         let mut config = AgentRunnerConfig::for_agent(model);
-        config.max_context_tokens = crate::session::context_window_for_model(model);
+        config.max_context_tokens = crate::context_window_for_model(model);
         config.auth_token = auth_token.map(String::from);
         // Forward all four router/billing identifiers from the
         // `POST /automaton/start` payload. These flow into

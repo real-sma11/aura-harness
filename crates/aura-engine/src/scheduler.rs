@@ -117,7 +117,7 @@ impl AgentIdentity {
 /// - `automaton_bridge::start_dev_loop_with_capabilities` /
 ///   `run_task_with_capabilities` — registers the dev-loop / task-run identity
 ///   alongside the existing `AgentRunnerConfig` plumbing (commit `d12fe29`).
-/// - `RuntimeSubagentDispatch::dispatch` — registers a child agent's identity
+/// - `FleetSubagentDispatcher::dispatch` — registers a child agent's identity
 ///   after `spawn_child` allocates the child id, so foreground subagent
 ///   dispatch goes out with the resolved model + parent IDs.
 ///
@@ -187,7 +187,7 @@ pub enum SchedulerError {
 
 /// Local guard that makes store-backed processing claims release on every
 /// normal scheduler exit path, with `Drop` as a panic safety net.
-pub(crate) struct ProcessingClaim {
+pub struct ProcessingClaim {
     store: Arc<dyn Store>,
     agent_id: AgentId,
     released: bool,
@@ -205,7 +205,8 @@ impl ProcessingClaim {
         }))
     }
 
-    fn release(&mut self) -> anyhow::Result<()> {
+    /// Release the underlying store claim. Idempotent.
+    pub fn release(&mut self) -> anyhow::Result<()> {
         if !self.released {
             self.store.release_agent_processing(self.agent_id)?;
             self.released = true;
@@ -306,7 +307,7 @@ impl Scheduler {
     }
 
     /// Attempt to claim exclusive processing for a non-scheduler direct append.
-    pub(crate) fn try_processing_claim(
+    pub fn try_processing_claim(
         &self,
         agent_id: AgentId,
     ) -> anyhow::Result<Option<ProcessingClaim>> {
@@ -315,10 +316,7 @@ impl Scheduler {
 
     /// Wait for exclusive processing, used by short direct append paths that
     /// previously awaited the per-agent mutex.
-    pub(crate) async fn processing_claim(
-        &self,
-        agent_id: AgentId,
-    ) -> anyhow::Result<ProcessingClaim> {
+    pub async fn processing_claim(&self, agent_id: AgentId) -> anyhow::Result<ProcessingClaim> {
         loop {
             if let Some(claim) = self.try_processing_claim(agent_id)? {
                 return Ok(claim);

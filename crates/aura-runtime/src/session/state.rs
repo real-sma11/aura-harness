@@ -12,13 +12,13 @@
 //! on a [`RuntimeRequest`] over HTTP and the session is fully
 //! initialized before the WebSocket attaches.
 
-use crate::scheduler::AgentIdentity as RuntimeAgentIdentity;
 use crate::session::ToolApprovalBroker;
 use aura_agent::AgentLoopConfig;
 use aura_core::{
     AgentId, AgentPermissions, AgentScope, AgentToolPermissions, Capability,
     InstalledIntegrationDefinition, InstalledToolDefinition,
 };
+use aura_engine::scheduler::AgentIdentity as RuntimeAgentIdentity;
 use aura_prompts::{
     default_system_prompt, AgentIdentity as PromptAgentIdentity, ProjectInfo, SystemPromptBuilder,
 };
@@ -618,98 +618,24 @@ fn lexical_normalize(path: &std::path::Path) -> PathBuf {
 }
 
 /// Map a model identifier to its maximum context window in tokens.
-pub(crate) fn context_window_for_model(model: &str) -> u64 {
-    match model {
-        m if m.contains("opus-4") => 1_000_000,
-        m if m.contains("sonnet-4") => 1_000_000,
-        m if m.contains("haiku-4") => 200_000,
-        m if m.starts_with("claude") => 200_000,
-        m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_000_000,
-        m if m.contains("gpt-5.4-mini")
-            || m.contains("gpt-5-4-mini")
-            || m.contains("gpt-5.4-nano")
-            || m.contains("gpt-5-4-nano") =>
-        {
-            400_000
-        }
-        m if m.contains("gpt-5.4") || m.contains("gpt-5-4") => 1_050_000,
-        m if m.contains("gpt-4.1") => 1_047_576,
-        m if m.contains("gpt-4o") || m.contains("gpt-4-turbo") => 128_000,
-        m if m.ends_with("-o1") || m.starts_with("o1") => 200_000,
-        m if m.contains("-o3") || m.starts_with("o3") => 200_000,
-        m if m.contains("-o4") || m.starts_with("o4") => 200_000,
-        m if m.contains("deepseek") => 1_000_000,
-        m if m.contains("kimi") => 262_144,
-        _ => 200_000,
-    }
-}
+///
+/// Phase B / Commit 3: relocated to [`aura_engine::context_window_for_model`].
+/// The gateway-side session bootstrap continues to call into the
+/// engine's helper so the chat WS path and the automaton bridge see
+/// identical token windows for the same model id.
+pub(crate) use aura_engine::context_window_for_model;
 
 #[cfg(test)]
 mod context_window_tests {
     use super::context_window_for_model;
 
     #[test]
-    fn anthropic_aura_aliases() {
-        assert_eq!(context_window_for_model("aura-claude-opus-4-7"), 1_000_000);
-        assert_eq!(context_window_for_model("aura-claude-opus-4-6"), 1_000_000);
-        assert_eq!(
-            context_window_for_model("aura-claude-sonnet-4-6"),
-            1_000_000
-        );
-        assert_eq!(context_window_for_model("aura-claude-haiku-4-5"), 200_000);
-    }
-
-    #[test]
-    fn anthropic_bare_names() {
-        assert_eq!(context_window_for_model("claude-opus-4-6"), 1_000_000);
-        assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
-        assert_eq!(context_window_for_model("claude-haiku-4-5"), 200_000);
-        assert_eq!(context_window_for_model("claude-3-5-sonnet"), 200_000);
-    }
-
-    #[test]
-    fn openai_gpt5_aura_aliases() {
-        assert_eq!(context_window_for_model("aura-gpt-5-5"), 1_000_000);
-        assert_eq!(context_window_for_model("aura-gpt-5-4"), 1_050_000);
-        assert_eq!(context_window_for_model("aura-gpt-5-4-mini"), 400_000);
-        assert_eq!(context_window_for_model("aura-gpt-5-4-nano"), 400_000);
-    }
-
-    #[test]
-    fn openai_gpt5_direct_names() {
-        assert_eq!(context_window_for_model("gpt-5.5"), 1_000_000);
-        assert_eq!(context_window_for_model("gpt-5.4"), 1_050_000);
-        assert_eq!(context_window_for_model("gpt-5.4-mini"), 400_000);
-        assert_eq!(context_window_for_model("gpt-5.4-nano"), 400_000);
-    }
-
-    #[test]
-    fn openai_gpt4_and_reasoning() {
-        assert_eq!(context_window_for_model("aura-gpt-4.1"), 1_047_576);
-        assert_eq!(context_window_for_model("gpt-4.1"), 1_047_576);
-        assert_eq!(context_window_for_model("gpt-4o"), 128_000);
-        assert_eq!(context_window_for_model("gpt-4-turbo"), 128_000);
-        assert_eq!(context_window_for_model("o3"), 200_000);
-        assert_eq!(context_window_for_model("aura-o3"), 200_000);
-        assert_eq!(context_window_for_model("o4-mini"), 200_000);
-        assert_eq!(context_window_for_model("aura-o4-mini"), 200_000);
-        assert_eq!(context_window_for_model("o1"), 200_000);
-    }
-
-    #[test]
-    fn deepseek_and_fireworks() {
-        assert_eq!(context_window_for_model("aura-deepseek-v4-pro"), 1_000_000);
-        assert_eq!(
-            context_window_for_model("aura-deepseek-v4-flash"),
-            1_000_000
-        );
-        assert_eq!(context_window_for_model("deepseek-v4-pro"), 1_000_000);
-        assert_eq!(context_window_for_model("aura-kimi-k2-5"), 262_144);
-        assert_eq!(context_window_for_model("aura-kimi-k2-6"), 262_144);
-    }
-
-    #[test]
-    fn unknown_model_gets_safe_default() {
+    fn context_window_reexport_resolves_via_engine() {
+        // The engine owns the comprehensive table tests; this one
+        // smoke test confirms the local re-export still resolves so
+        // a future refactor that drops the `pub(crate) use` line
+        // breaks loudly here.
+        assert_eq!(context_window_for_model("claude-opus-4-7"), 1_000_000);
         assert_eq!(context_window_for_model("unknown-model-xyz"), 200_000);
     }
 }

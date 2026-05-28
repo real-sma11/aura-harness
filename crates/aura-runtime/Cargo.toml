@@ -21,16 +21,31 @@ aura-core-permissions = { path = "../aura-core-permissions" }
 aura-protocol = { path = "../aura-protocol" }
 aura-store = { path = "../aura-store" }
 aura-tools = { path = "../aura-tools" }
-aura-compaction = { path = "../aura-compaction" }
 aura-reasoner = { path = "../aura-reasoner" }
 aura-kernel = { path = "../aura-kernel" }
 aura-agent = { path = "../aura-agent" }
 aura-agent-subagent = { path = "../aura-agent-subagent" }
-aura-prompts = { path = "../aura-prompts" }
 aura-memory = { path = "../aura-memory" }
 aura-automaton = { path = "../aura-automaton" }
 aura-skills = { path = "../aura-skills" }
-# Phase 7a: route the task tool through the fleet layer.
+# Phase B / Commit 3: the chat-session bootstrap renders a typed
+# `<agent_identity>` block via `aura_prompts::SystemPromptBuilder`
+# and the session state derives the compaction tier via
+# `aura_compaction`. The engine extraction kept these gateway-side
+# imports in `session/state.rs`, so the deps stay direct.
+aura-prompts = { path = "../aura-prompts" }
+aura-compaction = { path = "../aura-compaction" }
+# Phase B / Commit 3 engine extraction. The composition root in
+# `node.rs` instantiates the engine (scheduler + automaton bridge +
+# child runner) and hands it to the gateway router.
+aura-engine = { path = "../aura-engine" }
+# Phase B / Commit 3 / Step 3a: the fleet-layer task dispatcher impl.
+# Wired into the engine's `RuntimeChildRunner` at composition time.
+aura-fleet-subagent = { path = "../aura-fleet-subagent" }
+# Phase 7a: route the task tool through the fleet layer. Phase B
+# keeps these deps because `node.rs` still hand-assembles the
+# fleet spawner inputs (registry, quota, leases, orphans) and
+# passes them to `FleetSubagentDispatcher::with_components`.
 aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }

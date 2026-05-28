@@ -53,13 +53,19 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
 
+pub mod adapters;
 mod derivation;
 mod errors;
 mod manifest;
 mod overrides;
 mod parent;
+pub mod registry;
 mod spec;
 
+pub use adapters::{
+    core_to_modes_kernel, core_to_modes_mode, legacy_permissions_to_modes, narrow_permissions,
+    overrides_from_request, parent_context_from_request,
+};
 pub use derivation::{
     DefaultDerivation, FlowDerivation, SubagentDerivation, SubagentDerivationConfig,
 };
@@ -67,6 +73,7 @@ pub use errors::DerivationError;
 pub use manifest::{OverriddenField, OverrideManifest};
 pub use overrides::{SubagentBudget, SubagentOverrides};
 pub use parent::ParentContext;
+pub use registry::{registry_chars, SubagentRegistry};
 pub use spec::{AuditAttribution, SubagentLineage, SubagentSpec};
 
 #[cfg(test)]

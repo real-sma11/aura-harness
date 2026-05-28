@@ -5,7 +5,7 @@
 //! automaton stream) collapse into a single `/stream/:run_id` route.
 //! Disambiguation happens by run id: chat runs sit in
 //! [`super::RouterState::pending_chat_runs`]; automaton runs are
-//! tracked by the [`crate::automaton_bridge::AutomatonBridge`].
+//! tracked by the [`aura_engine::automaton::AutomatonBridge`].
 
 use super::*;
 use axum::response::Response;
@@ -136,7 +136,7 @@ async fn handle_automaton_ws(
             return;
         }
     };
-    let crate::automaton_bridge::EventSubscription {
+    let aura_engine::automaton::EventSubscription {
         history,
         mut live,
         already_done,

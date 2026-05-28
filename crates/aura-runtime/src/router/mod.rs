@@ -18,17 +18,17 @@
 //! whatever those callers expect, so the diff for them stays empty.
 
 #[allow(unused_imports)]
-use crate::automaton_bridge::AutomatonBridge;
-#[allow(unused_imports)]
 use crate::config::NodeConfig;
-#[allow(unused_imports)]
-use crate::scheduler::Scheduler;
 #[allow(unused_imports)]
 use crate::session::{handle_chat_ws_connection, WsContext};
 #[allow(unused_imports)]
 use crate::terminal;
 #[allow(unused_imports)]
 use aura_core::{Hash, Transaction, TransactionType};
+#[allow(unused_imports)]
+use aura_engine::automaton::AutomatonBridge;
+#[allow(unused_imports)]
+use aura_engine::scheduler::Scheduler;
 #[allow(unused_imports)]
 use aura_reasoner::ModelProvider;
 #[allow(unused_imports)]

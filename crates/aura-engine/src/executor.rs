@@ -5,6 +5,9 @@ use aura_tools::domain_tools::DomainToolExecutor;
 use aura_tools::{ToolCatalog, ToolConfig, ToolResolver};
 use std::sync::Arc;
 
+/// Build a [`ToolResolver`] over the shared catalog + tool config,
+/// optionally wiring a domain executor for `aura-os-server` domain
+/// tools (specs, tasks, etc.).
 pub fn build_tool_resolver(
     catalog: &Arc<ToolCatalog>,
     tool_config: &ToolConfig,
@@ -17,6 +20,8 @@ pub fn build_tool_resolver(
     resolver
 }
 
+/// Wrap a [`ToolResolver`] in an [`ExecutorRouter`] so it can be handed
+/// to [`aura_kernel::Kernel::new`].
 pub fn build_executor_router(resolver: ToolResolver) -> ExecutorRouter {
     let mut router = ExecutorRouter::new();
     router.add_executor(Arc::new(resolver));

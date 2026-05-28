@@ -1,14 +1,14 @@
 //! Node runtime.
 
-use crate::automaton_bridge::AutomatonBridge;
 use crate::config::NodeConfig;
 use crate::domain::HttpDomainApi;
 use crate::router::{create_router, RouterState};
-use crate::scheduler::Scheduler;
 use anyhow::Context;
 use aura_agent::KernelModelGateway;
 use aura_automaton::AutomatonRuntime;
 use aura_core::AgentId;
+use aura_engine::automaton::AutomatonBridge;
+use aura_engine::scheduler::Scheduler;
 use aura_kernel::{Executor, ExecutorRouter, Kernel, KernelConfig};
 use aura_memory::{
     ConsolidationConfig, MemoryManager, ProcedureConfig, RefinerConfig, RetrievalConfig,
@@ -135,7 +135,7 @@ impl Node {
         let tools = catalog.visible_tools(ToolProfile::Core, &tool_config);
         let domain_exec = Arc::new(DomainToolExecutor::new(domain_api.clone()));
         let resolver =
-            crate::executor_factory::build_tool_resolver(&catalog, &tool_config, Some(domain_exec));
+            aura_engine::executor::build_tool_resolver(&catalog, &tool_config, Some(domain_exec));
         let resolver: Arc<dyn Executor> = Arc::new(resolver);
         let executors = vec![resolver];
         info!("Executors configured");

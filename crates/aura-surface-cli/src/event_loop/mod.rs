@@ -67,7 +67,7 @@ pub async fn run_event_loop(ctx: EventLoopContext<'_>) -> anyhow::Result<()> {
 
     if let Some(ref mm) = memory_manager {
         agent_loop.config_mut().observers.push(
-            aura_runtime::memory_observer::MemoryTurnObserver::new(
+            aura_engine::memory_observer::MemoryTurnObserver::new(
                 Arc::clone(mm),
                 agent_id,
                 None,

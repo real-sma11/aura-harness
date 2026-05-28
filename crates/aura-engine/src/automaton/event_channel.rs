@@ -1,6 +1,6 @@
 //! Replay-aware broadcast wrapper for automaton events.
 //!
-//! Splits cleanly out of `automaton_bridge` because every state and
+//! Splits cleanly out of `automaton/mod.rs` because every state and
 //! method here is about one thing: making sure a late WebSocket
 //! subscriber to a fast-terminating automaton can still observe the
 //! events emitted before it finished its handshake. The motivating

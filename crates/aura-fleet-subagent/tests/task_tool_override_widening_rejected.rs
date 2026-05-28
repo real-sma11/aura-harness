@@ -11,6 +11,9 @@
 //! derivation (they don't widen the parent's surface) — they are
 //! audit-stamped instead. Those fields are tested for end-to-end
 //! plumbing in `task_tool_override_e2e.rs`.
+//!
+//! Phase B / Commit 3 / Step 3a relocated this test from
+//! `aura-runtime/tests/` alongside the subagent dispatcher split.
 
 use aura_agent_subagent::{
     DefaultDerivation, DerivationError, ParentContext, SubagentDerivation, SubagentLineage,

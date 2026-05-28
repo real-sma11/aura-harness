@@ -722,8 +722,8 @@ async fn prepare_turn_context(
     // entry on every turn, so the per-turn breakdown attributes those
     // chars to the "Subagents" bucket. Custom registries (e.g. tests)
     // would override this once they're plumbed through `WsContext`.
-    config.subagents_chars = crate::subagent_registry::registry_chars(
-        &crate::subagent_registry::SubagentRegistry::bundled(),
+    config.subagents_chars = aura_agent_subagent::registry::registry_chars(
+        &aura_agent_subagent::registry::SubagentRegistry::bundled(),
     );
 
     // Resolve active skill names before creating the memory observer so we can
@@ -756,7 +756,7 @@ async fn prepare_turn_context(
         mm.prepare_context(mem_id, &mut config.system_prompt).await;
         config
             .observers
-            .push(crate::memory_observer::MemoryTurnObserver::new(
+            .push(aura_engine::memory_observer::MemoryTurnObserver::new(
                 Arc::clone(mm),
                 mem_id,
                 session.auth_token.clone(),
@@ -856,11 +856,11 @@ async fn fetch_attachment_data(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::Scheduler;
     use aura_core::{
         AgentPermissions, Capability, InstalledIntegrationDefinition, InstalledToolDefinition,
         InstalledToolIntegrationRequirement, ToolAuth,
     };
+    use aura_engine::scheduler::Scheduler;
     use aura_reasoner::MockProvider;
     use aura_store::RocksStore;
     use aura_tools::{ToolCatalog, ToolConfig};

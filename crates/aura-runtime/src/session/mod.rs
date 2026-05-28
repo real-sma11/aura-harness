@@ -25,11 +25,12 @@ mod tool_approval;
 mod ws_handler;
 
 pub(crate) use helpers::{prepare_chat_session, ChatRequestError};
+pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;
-pub(crate) use state::{agent_permissions_from_wire, context_window_for_model};
 pub(crate) use tool_approval::ToolApprovalBroker;
 pub(crate) use ws_handler::handle_chat_ws_connection;
 
+use aura_engine::scheduler::Scheduler;
 use aura_reasoner::ModelProvider;
 use aura_skills::SkillManager;
 use aura_store::Store;
@@ -38,8 +39,6 @@ use aura_tools::domain_tools::DomainApi;
 use aura_tools::{ToolCatalog, ToolConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-
-use crate::scheduler::Scheduler;
 
 // ============================================================================
 // WebSocket Handler Context

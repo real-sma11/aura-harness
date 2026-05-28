@@ -18,9 +18,9 @@ use aura_tools::automaton_tools::AutomatonController;
 use aura_tools::domain_tools::DomainApi;
 use aura_tools::{ToolCatalog, ToolConfig};
 
-use crate::automaton_bridge::AutomatonBridge;
 use crate::config::NodeConfig;
-use crate::scheduler::Scheduler;
+use aura_engine::automaton::AutomatonBridge;
+use aura_engine::scheduler::Scheduler;
 
 use super::ws;
 

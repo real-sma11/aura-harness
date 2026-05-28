@@ -3,23 +3,26 @@
 
 use super::ws_handler::populate_tool_definitions;
 use super::{Session, WsContext};
-use crate::executor_factory;
 use crate::protocol::{
     tool_info_from_definition_with_state, AssistantMessageEnd, ContextBreakdown, ErrorMsg,
     FileDiff, FilesChanged, OutboundMessage, SessionReady, SessionUsage, SkillInfo, TextDelta,
     ThinkingDelta, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
 };
-use crate::runtime_capabilities;
 use crate::session::cross_agent_hook::{AuraServerAgentHook, AuraServerSpawnHook};
-use crate::subagent_dispatch::RuntimeSubagentDispatch;
 use async_trait::async_trait;
 use aura_agent::{
     map_agent_loop_event, AgentLoopEvent, AgentLoopResult, DebugEvent, TurnEventSink,
 };
+use aura_agent_subagent::SubagentRegistry;
 use aura_core::{
     is_effectively_full_access, resolve_effective_permission, AgentToolPermissions, ToolState,
     UserToolDefaults,
 };
+use aura_engine::{capabilities, child_runner::RuntimeChildRunner, executor};
+use aura_fleet_quota::QuotaPool;
+use aura_fleet_registry::FleetRegistry;
+use aura_fleet_spawn::{OrphanStore, ParentLeaseRegistry};
+use aura_fleet_subagent::FleetSubagentDispatcher;
 use aura_kernel::{Kernel, KernelConfig, PolicyConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -300,7 +303,7 @@ async fn bootstrap_session(session: &Session, ctx: &WsContext) {
                 );
             }
 
-            if let Err(e) = runtime_capabilities::record_runtime_capabilities(
+            if let Err(e) = capabilities::record_runtime_capabilities(
                 &kernel,
                 "session",
                 Some(&session.session_id),
@@ -351,12 +354,9 @@ pub(super) async fn build_kernel_with_config(
         session.tool_permissions.as_ref(),
     );
 
-    let mut resolver = executor_factory::build_tool_resolver(
-        &ctx.catalog,
-        &session_tool_config,
-        domain_exec.clone(),
-    )
-    .with_installed_tools(session.installed_tools.clone());
+    let mut resolver =
+        executor::build_tool_resolver(&ctx.catalog, &session_tool_config, domain_exec.clone())
+            .with_installed_tools(session.installed_tools.clone());
 
     if let Some(ref controller) = ctx.automaton_controller {
         let project_id = session.project_id.clone().unwrap_or_default();
@@ -387,10 +387,31 @@ pub(super) async fn build_kernel_with_config(
         .with_user_default(user_default.clone())
         .with_agent_override(session.tool_permissions.clone());
 
-    resolver = resolver.with_subagent_dispatch_hook(Arc::new(RuntimeSubagentDispatch::new(
+    // Phase B / Commit 3 / Step 3a: the dispatcher impl moved to
+    // `aura-fleet-subagent`. Build the per-session fleet primitives
+    // inline here (matches the pre-refactor `RuntimeSubagentDispatch::new`
+    // shape — fresh registry / quota / leases / orphan store per
+    // session) and wire the engine's `RuntimeChildRunner` in via the
+    // typed `Arc<dyn ChildRunner>` boundary. Phase C may lift this
+    // wiring into the composition root once the gateway layout
+    // stabilises.
+    let subagent_registry = SubagentRegistry::bundled();
+    let orphan_dir = std::env::temp_dir().join("aura-test-orphans");
+    let child_runner: Arc<dyn aura_fleet_spawn::ChildRunner> = Arc::new(RuntimeChildRunner::new(
         ctx.store.clone(),
         ctx.scheduler.clone(),
-    )));
+        subagent_registry.clone(),
+    ));
+    resolver =
+        resolver.with_subagent_dispatch_hook(Arc::new(FleetSubagentDispatcher::with_components(
+            ctx.store.clone(),
+            subagent_registry,
+            Arc::new(FleetRegistry::new()),
+            Arc::new(QuotaPool::new()),
+            Arc::new(ParentLeaseRegistry::new()),
+            Arc::new(OrphanStore::new(orphan_dir)),
+            child_runner,
+        )));
     if let Some(base_url) = ctx
         .aura_os_server_url
         .as_deref()
@@ -436,7 +457,7 @@ pub(super) async fn build_kernel_with_config(
         }
     }
 
-    let router = executor_factory::build_executor_router(resolver);
+    let router = executor::build_executor_router(resolver);
 
     let config = KernelConfig {
         workspace_base: workspace,
@@ -880,10 +901,10 @@ mod tests {
         summarize_files_changed,
     };
     use crate::protocol::{OutboundMessage, TextDelta};
-    use crate::scheduler::Scheduler;
     use crate::session::{Session, WsContext};
     use aura_agent::{AgentLoopEvent, AgentLoopResult, FileChange, FileChangeKind};
     use aura_core::{AgentToolPermissions, ToolState, UserToolDefaults};
+    use aura_engine::scheduler::Scheduler;
     use aura_protocol::{
         AgentCapabilities, AgentIdentity, AgentPermissionsWire, ModelSelection, RuntimeRequest,
         RuntimeRequestType, SessionModelOverrides, WorkspaceLocation,

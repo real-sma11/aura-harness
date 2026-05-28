@@ -148,6 +148,11 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     // types stay at the core layer in aura-core-auth.
     ("aura-auth", "surface"),
     ("aura-automaton", "surface"),
+    // Phase B / Commit 3 surface-layer extraction: orchestration
+    // engine pulled out of aura-runtime into aura-engine. Both live at
+    // the surface layer — aura-runtime is the HTTP/WS gateway, aura-engine
+    // is the reusable orchestration core the gateway composes.
+    ("aura-engine", "surface"),
     ("aura-runtime", "surface"),
     ("aura-protocol", "core"),
     // Phase 4b plugin layer:
@@ -181,6 +186,11 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-fleet-dispatch", "fleet"),
     ("aura-fleet-mailbox", "fleet"),
     ("aura-fleet-daemon", "fleet"),
+    // Phase B / Commit 3 / Step 3a: fleet-layer concrete
+    // SubagentDispatchHook impl. Wraps FleetSpawner; depends on the
+    // agent-layer registry + adapter helpers in aura-agent-subagent.
+    // All edges downward — no WARN_ONLY_UPWARD_EDGES additions.
+    ("aura-fleet-subagent", "fleet"),
     // Phase 9 surface layer (5 new crates):
     //   aura-surface-cli       — CLI composition root (ModeFlag,
     //                            mode-resolution priority inputs).
@@ -416,6 +426,13 @@ fn parse_package_name(toml: &str) -> Option<String> {
 /// - `dep_name = { path = "../<crate>" }` — the dep name is the key
 ///   and we use it directly.
 /// - `dep_name = "x.y"` form when `dep_name` exists in `layer_map`.
+///
+/// `[dev-dependencies]` blocks are skipped: they only affect the
+/// test compilation graph, not the production crate graph, so a
+/// dev-dep edge cannot violate the runtime layer ordering. Phase B's
+/// `aura-fleet-subagent` integration tests pull `aura-engine` in as
+/// a dev-dep to construct a real `RuntimeChildRunner` — that's a
+/// test-only convenience and explicitly NOT a production upward edge.
 fn parse_workspace_dep_names(
     toml: &str,
     layer_map: &BTreeMap<String, &'static str>,
@@ -425,9 +442,13 @@ fn parse_workspace_dep_names(
     for line in toml.lines() {
         let trimmed = line.trim();
         if let Some(section) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            // [dependencies], [dev-dependencies], [build-dependencies]
-            // [target.'cfg(...)'.dependencies], etc.
-            in_deps_table = section.ends_with("dependencies");
+            // [dependencies], [build-dependencies],
+            // [target.'cfg(...)'.dependencies], etc. — count toward
+            // the production graph. [dev-dependencies] (and the
+            // `target.'cfg(...)'.dev-dependencies` flavour) only
+            // affect tests / benchmarks and are skipped.
+            let is_dev = section == "dev-dependencies" || section.ends_with(".dev-dependencies");
+            in_deps_table = !is_dev && section.ends_with("dependencies");
             continue;
         }
         if !in_deps_table || trimmed.is_empty() || trimmed.starts_with('#') {

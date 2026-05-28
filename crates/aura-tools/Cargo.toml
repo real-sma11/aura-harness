@@ -9,6 +9,12 @@ license.workspace = true
 [dependencies]
 aura-core = { path = "../aura-core" }
 aura-kernel = { path = "../aura-kernel" }
+# Phase B / Commit 3 / Step 6: the `permissions` module moved here
+# from `aura-runtime/src/tool_permissions.rs` reads `Identity`
+# records off the per-agent log to recover the in-effect tool
+# permissions surface. The dep is store-layer (downward) so it
+# does not perturb the layer-boundary topology.
+aura-store = { path = "../aura-store" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

@@ -37,6 +37,7 @@ pub(crate) mod fs_tools;
 pub mod git_tool;
 pub mod http_tool;
 pub mod intent_classifier;
+pub mod permissions;
 pub mod resolver;
 mod sandbox;
 pub mod schema;
@@ -52,6 +53,10 @@ pub use git_tool::{
 };
 pub use http_tool::{HttpAuthSource, HttpMethod, HttpToolDefinition, HttpToolDefinitionBuilder};
 pub use intent_classifier::{ClassifierError, IntentClassifier};
+pub use permissions::{
+    load_agent_tool_context, validate_agent_tool_permissions, validate_user_defaults,
+    AgentToolContext,
+};
 pub use resolver::ToolResolver;
 pub use sandbox::Sandbox;
 pub use schema::{from_claude_json, to_claude_json, SchemaError};

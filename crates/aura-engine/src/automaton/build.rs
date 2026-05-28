@@ -19,7 +19,7 @@ use aura_kernel::{Kernel, KernelConfig, PolicyConfig};
 use aura_tools::domain_tools::{DomainApi, DomainToolExecutor};
 use tracing::warn;
 
-use crate::executor_factory;
+use crate::executor;
 
 use super::AutomatonBridge;
 
@@ -31,7 +31,7 @@ impl AutomatonBridge {
         installed_tools
             .unwrap_or_default()
             .into_iter()
-            .map(crate::protocol::installed_tool_to_core)
+            .map(aura_protocol::installed_tool_to_core)
             .filter(|tool| match tool.required_integration.as_ref() {
                 Some(req) => installed_integrations_satisfy(req, installed_integrations),
                 None => true,
@@ -68,13 +68,13 @@ impl AutomatonBridge {
             project_id.map(String::from),
             Some(workspace.to_string_lossy().into_owned()),
         ));
-        let resolver = executor_factory::build_tool_resolver(
+        let resolver = executor::build_tool_resolver(
             &self.catalog,
             &self.tool_config,
             Some(domain_exec.clone()),
         )
         .with_installed_tools(installed_tools.clone());
-        let router = executor_factory::build_executor_router(resolver);
+        let router = executor::build_executor_router(resolver);
         let agent_id = AgentId::generate();
         let policy = automaton_policy_config(
             &installed_tools,
@@ -98,8 +98,8 @@ impl AutomatonBridge {
             Ok(k) => Ok(Arc::new(k)),
             Err(e) => {
                 warn!(error = %e, "Kernel::new failed, falling back to fresh agent id");
-                let fallback_router = executor_factory::build_executor_router(
-                    executor_factory::build_tool_resolver(&self.catalog, &self.tool_config, None)
+                let fallback_router = executor::build_executor_router(
+                    executor::build_tool_resolver(&self.catalog, &self.tool_config, None)
                         .with_installed_tools(installed_tools.clone()),
                 );
                 // Retry with a fresh `AgentId` and the same config; the only
@@ -131,12 +131,8 @@ impl AutomatonBridge {
                         // already-validated router and the minimum viable
                         // config. If this also fails we surface the error to
                         // the caller instead of panicking the node process.
-                        let last_resort = executor_factory::build_executor_router(
-                            executor_factory::build_tool_resolver(
-                                &self.catalog,
-                                &self.tool_config,
-                                None,
-                            ),
+                        let last_resort = executor::build_executor_router(
+                            executor::build_tool_resolver(&self.catalog, &self.tool_config, None),
                         );
                         match Kernel::new(
                             self.store.clone(),

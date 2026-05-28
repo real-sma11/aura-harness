@@ -25,6 +25,10 @@ aura-agent = { path = "../aura-agent" }
 aura-memory = { path = "../aura-memory" }
 aura-auth = { path = "../aura-auth" }
 aura-runtime = { path = "../aura-runtime" }
+# Phase B / Commit 3: the headless `aura ...` event loop pushes a
+# `MemoryTurnObserver` onto the agent loop. The observer moved out of
+# `aura-runtime::memory_observer` into the engine crate.
+aura-engine = { path = "../aura-engine" }
 aura-plugin-core = { path = "../aura-plugin-core" }
 aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }

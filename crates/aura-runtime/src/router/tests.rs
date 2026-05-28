@@ -754,6 +754,18 @@ async fn test_memory_bulk_delete_events_alias() {
         .unwrap();
     let _ = app.clone().oneshot(req).await.unwrap();
 
+    // Phase B / Commit 3 follow-up: `delete_events_before` truncates
+    // the cutoff to millisecond resolution before comparing with the
+    // event key, so the test must guarantee `before > event.timestamp`
+    // at that resolution. The pre-Phase-B run was lucky to fall on a
+    // millisecond boundary every time; the engine extraction
+    // re-ordered the test schedule enough that the cutoff and the
+    // event sometimes landed in the same millisecond and the deletion
+    // saw zero matches. A 5ms sleep is comfortably above Windows'
+    // ~1ms timer resolution and adds nothing meaningful to the suite
+    // wall clock.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
     let bulk_delete_body = serde_json::json!({
         "before": chrono::Utc::now().to_rfc3339()
     });

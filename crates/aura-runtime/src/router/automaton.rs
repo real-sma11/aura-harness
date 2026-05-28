@@ -252,7 +252,7 @@ async fn start_task_run(
 fn automaton_bridge(
     state: &RouterState,
 ) -> Result<
-    std::sync::Arc<crate::automaton_bridge::AutomatonBridge>,
+    std::sync::Arc<aura_engine::automaton::AutomatonBridge>,
     (StatusCode, Json<serde_json::Value>),
 > {
     state.automaton_bridge.clone().ok_or_else(|| {

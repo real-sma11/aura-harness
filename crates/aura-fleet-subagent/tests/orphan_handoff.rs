@@ -1,6 +1,10 @@
 //! Phase 7b: when a parent's task future is dropped mid-flight (the
 //! moral equivalent of a parent panic) the in-flight Detached child
 //! is observable in the orphan store and survives to completion.
+//!
+//! Phase B / Commit 3 / Step 3a moved this from `aura-runtime/tests/`
+//! to `aura-fleet-subagent/tests/` because the fleet-layer surface
+//! is the natural home for the test.
 
 use std::sync::Arc;
 use std::time::Duration;

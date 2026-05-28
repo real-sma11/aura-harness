@@ -1,10 +1,25 @@
+//! Runtime-capability recording helper used by the automaton bridge.
+//!
+//! When a dev-loop or task-run automaton boots, the bridge records a
+//! `SystemKind::CapabilityInstall` entry that pins the
+//! `installed_tools` + `installed_integrations` it negotiated with the
+//! upstream `RuntimeRequest`. That entry preserves the per-run
+//! capability inventory in the audit log so post-hoc debugging can tell
+//! "this dev-loop saw exactly these tools at startup" from a record-log
+//! scan.
+
 use aura_core::{
     InstalledIntegrationDefinition, InstalledToolCapability, InstalledToolDefinition,
     RuntimeCapabilityInstall, SystemKind, Transaction, TransactionType,
 };
 use aura_kernel::{Kernel, KernelError};
 
-pub(crate) async fn record_runtime_capabilities(
+/// Record a `SessionStart` followed by a `CapabilityInstall` system
+/// entry on the supplied kernel. The bridge calls this for every
+/// automaton kickoff before handing control to the model loop, so the
+/// audit log carries an unambiguous "session began" + "tools/integrations
+/// at session start" pair.
+pub async fn record_runtime_capabilities(
     kernel: &Kernel,
     scope: &str,
     session_id: Option<&str>,

@@ -1,0 +1,52 @@
+[package]
+name = "aura-engine"
+description = "Aura runtime orchestration engine — scheduler, worker, automaton bridge, memory observer, child runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core = { path = "../aura-core" }
+aura-core-modes = { path = "../aura-core-modes" }
+aura-core-permissions = { path = "../aura-core-permissions" }
+aura-protocol = { path = "../aura-protocol" }
+aura-store = { path = "../aura-store" }
+aura-tools = { path = "../aura-tools" }
+aura-reasoner = { path = "../aura-reasoner" }
+aura-kernel = { path = "../aura-kernel" }
+aura-agent = { path = "../aura-agent" }
+aura-agent-subagent = { path = "../aura-agent-subagent" }
+aura-memory = { path = "../aura-memory" }
+aura-automaton = { path = "../aura-automaton" }
+aura-compaction = { path = "../aura-compaction" }
+aura-prompts = { path = "../aura-prompts" }
+aura-fleet-spawn = { path = "../aura-fleet-spawn" }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
+
+# Phase B / Commit 3: the engine pulls in aura-prompts + aura-compaction
+# transitively through the agent loop wiring inside `worker.rs` and
+# `scheduler.rs`. Cargo-machete sometimes can't see those uses because
+# they're routed through the public agent-loop surface; pin the deps
+# so the deny-warnings lint doesn't trip on the indirect edges.
+[package.metadata.cargo-machete]
+ignored = ["aura-prompts", "aura-compaction"]
+
+[lints]
+workspace = true

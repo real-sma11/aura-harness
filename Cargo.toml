@@ -74,6 +74,12 @@ members = [
     "crates/aura-agent-steering",
     "crates/aura-auth",
     "crates/aura-automaton",
+    # Phase B / Commit 3 surface-layer extraction: the orchestration
+    # engine (scheduler / worker / automaton bridge / memory observer /
+    # capabilities / executor / RuntimeChildRunner) lives in
+    # `aura-engine`; `aura-runtime` is shrinking toward the gateway-only
+    # composition root.
+    "crates/aura-engine",
     "crates/aura-runtime",
     "crates/aura-protocol",
     # Phase 4b plugin layer (in-process API + on-disk manifest pipeline)
@@ -97,6 +103,11 @@ members = [
     "crates/aura-fleet-dispatch",
     "crates/aura-fleet-mailbox",
     "crates/aura-fleet-daemon",
+    # Phase B / Commit 3 / Step 3a: fleet-layer concrete
+    # SubagentDispatchHook impl. Was `RuntimeSubagentDispatch` in
+    # aura-runtime; now sits at the fleet layer so the agent layer
+    # (`aura-agent-subagent`) stays free of fleet deps.
+    "crates/aura-fleet-subagent",
     # Phase 9 surface layer:
     #   aura-surface-cli       — CLI composition root + ModeFlag
     #   aura-surface-sdk       — external AuraClient/AuraSession SDK

@@ -1,9 +1,33 @@
+//! Gateway-side tool-permission helpers.
+//!
+//! Phase B / Commit 3 / Step 6 moved the pure helpers
+//! (`load_agent_tool_context`, `validate_user_defaults`,
+//! `validate_agent_tool_permissions`) into
+//! [`aura_tools::permissions`]. What stays here:
+//!
+//! - [`EffectiveToolInfo`] — the wire-format DTO returned by
+//!   `GET /v1/agents/:id/tools`. Carries `protocol::ToolStateWire` so
+//!   the protocol crate stays the only place that knows the wire
+//!   serialization shape.
+//! - [`effective_tool_definitions`] / [`effective_tool_infos`] — fold
+//!   the user / agent / kind permission stack into per-tool
+//!   [`aura_reasoner::ToolDefinition`] (or [`EffectiveToolInfo`])
+//!   lists. Used by the chat-WS bootstrap path + the REST tools
+//!   handler.
+//! - [`enforce_monotonic_update`] — reject attempts to widen an
+//!   existing per-tool override past the user default.
+//! - [`append_agent_tool_permissions_entry`] — append the System
+//!   record for an HTTP-driven `agent_tool_permissions` update.
+//!   Acquires the engine-side [`crate::scheduler::Scheduler`]
+//!   processing claim so the write serializes with the scheduler's
+//!   inbox-drain on the same agent.
+
 use crate::protocol;
 use crate::scheduler::Scheduler;
 use aura_core::{
-    installed_integrations_satisfy, resolve_effective_permission, AgentId, AgentPermissions,
-    AgentToolPermissions, Identity, InstalledIntegrationDefinition, InstalledToolDefinition,
-    RecordEntry, ToolState, Transaction, TransactionType, UserDefaultMode, UserToolDefaults,
+    installed_integrations_satisfy, AgentId, AgentPermissions, AgentToolPermissions,
+    InstalledIntegrationDefinition, InstalledToolDefinition, ToolState, Transaction,
+    TransactionType, UserToolDefaults,
 };
 use aura_reasoner::ToolDefinition;
 use aura_store::Store;
@@ -12,52 +36,18 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-pub(crate) struct AgentToolContext {
-    pub tool_permissions: Option<AgentToolPermissions>,
-    pub agent_permissions: AgentPermissions,
-    pub originating_user_id: Option<String>,
-}
+/// Re-export the moved pure helpers under the legacy in-crate import
+/// path so the gateway handlers continue to read straight against
+/// `crate::tool_permissions::*`.
+pub(crate) use aura_tools::permissions::{
+    load_agent_tool_context, validate_agent_tool_permissions, validate_user_defaults,
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct EffectiveToolInfo {
     pub name: String,
     pub description: String,
     pub effective_state: protocol::ToolStateWire,
-}
-
-pub(crate) fn validate_user_defaults(
-    defaults: &UserToolDefaults,
-    catalog: &ToolCatalog,
-) -> Result<(), String> {
-    if let UserDefaultMode::DefaultPermissions { per_tool, .. } = &defaults.mode {
-        validate_tool_names(per_tool.keys().map(String::as_str), catalog)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_agent_tool_permissions(
-    permissions: &AgentToolPermissions,
-    catalog: &ToolCatalog,
-) -> Result<(), String> {
-    validate_tool_names(permissions.per_tool.keys().map(String::as_str), catalog)
-}
-
-fn validate_tool_names<'a>(
-    names: impl Iterator<Item = &'a str>,
-    catalog: &ToolCatalog,
-) -> Result<(), String> {
-    let known = catalog
-        .tools_for_profile_with_permissions(ToolProfile::Agent, None)
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect::<HashSet<_>>();
-    for name in names {
-        if !known.contains(name) {
-            return Err(format!("unknown tool '{name}'"));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn effective_tool_definitions(
@@ -74,7 +64,8 @@ pub(crate) fn effective_tool_definitions(
     for tool in
         catalog.visible_tools_with_permissions(ToolProfile::Agent, tool_config, agent_permissions)
     {
-        let state = resolve_effective_permission(user_default, agent_override, &tool.name);
+        let state =
+            aura_core::resolve_effective_permission(user_default, agent_override, &tool.name);
         if state != ToolState::Deny && seen.insert(tool.name.clone()) {
             tools.push((tool, state));
         }
@@ -85,7 +76,8 @@ pub(crate) fn effective_tool_definitions(
                 continue;
             }
         }
-        let state = resolve_effective_permission(user_default, agent_override, &tool.name);
+        let state =
+            aura_core::resolve_effective_permission(user_default, agent_override, &tool.name);
         if state != ToolState::Deny && seen.insert(tool.name.clone()) {
             tools.push((
                 ToolDefinition::new(&tool.name, &tool.description, tool.input_schema.clone()),
@@ -107,7 +99,8 @@ pub(crate) fn effective_tool_infos(
         .visible_tools_with_permissions(ToolProfile::Agent, tool_config, agent_permissions)
         .into_iter()
         .filter_map(|tool| {
-            let state = resolve_effective_permission(user_default, agent_override, &tool.name);
+            let state =
+                aura_core::resolve_effective_permission(user_default, agent_override, &tool.name);
             (state != ToolState::Deny).then(|| EffectiveToolInfo {
                 name: tool.name,
                 description: tool.description,
@@ -115,58 +108,6 @@ pub(crate) fn effective_tool_infos(
             })
         })
         .collect()
-}
-
-pub(crate) fn load_agent_tool_context(
-    store: &Arc<dyn Store>,
-    agent_id: AgentId,
-) -> Result<AgentToolContext, String> {
-    let head = store
-        .get_head_seq(agent_id)
-        .map_err(|e| format!("get_head_seq: {e}"))?;
-    if head == 0 {
-        return Ok(AgentToolContext {
-            tool_permissions: None,
-            agent_permissions: AgentPermissions::empty(),
-            originating_user_id: None,
-        });
-    }
-    let from_seq = head.saturating_sub(255).max(1);
-    let entries = store
-        .scan_record(agent_id, from_seq, 256)
-        .map_err(|e| format!("scan_record: {e}"))?;
-    Ok(context_from_entries(entries))
-}
-
-fn context_from_entries(entries: Vec<RecordEntry>) -> AgentToolContext {
-    let mut originating_user_id = None;
-    let mut tool_permissions = None;
-    let mut agent_permissions = AgentPermissions::empty();
-    for entry in entries {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.tx.payload) else {
-            continue;
-        };
-        if let Some(parsed) = value
-            .get("identity")
-            .and_then(|v| serde_json::from_value::<Identity>(v.clone()).ok())
-        {
-            tool_permissions = parsed.tool_permissions.clone();
-            agent_permissions = parsed.permissions;
-        }
-        if let Some(user_id) = value.get("originating_user_id").and_then(|v| v.as_str()) {
-            originating_user_id = Some(user_id.to_string());
-        }
-        if value.get("kind").and_then(|v| v.as_str()) == Some("agent_tool_permissions") {
-            tool_permissions = value
-                .get("tool_permissions")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-        }
-    }
-    AgentToolContext {
-        tool_permissions,
-        agent_permissions,
-        originating_user_id,
-    }
 }
 
 /// Append an `agent_tool_permissions` System entry to the agent's log.
@@ -217,7 +158,7 @@ pub(crate) fn enforce_monotonic_update(
     next: &AgentToolPermissions,
 ) -> Result<(), String> {
     for (tool, next_state) in &next.per_tool {
-        let current_state = resolve_effective_permission(user_default, current, tool);
+        let current_state = aura_core::resolve_effective_permission(user_default, current, tool);
         if !next_state.is_subset_of(current_state) {
             return Err(format!(
                 "tool '{tool}' cannot be widened from {} to {}",
@@ -240,7 +181,7 @@ fn state_label(state: ToolState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aura_core::Capability;
+    use aura_core::ToolState;
     use std::collections::BTreeMap;
 
     fn defaults(entries: &[(&str, ToolState)], fallback: ToolState) -> UserToolDefaults {
@@ -263,23 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_user_defaults_rejects_unknown_tool_names() {
-        let catalog = ToolCatalog::new();
-        let unknown = defaults(&[("not_a_real_tool", ToolState::Allow)], ToolState::Deny);
-
-        let err = validate_user_defaults(&unknown, &catalog).expect_err("unknown tool rejected");
-        assert!(err.contains("unknown tool 'not_a_real_tool'"));
-    }
-
-    #[test]
-    fn validate_agent_permissions_accepts_catalog_tool_names() {
-        let catalog = ToolCatalog::new();
-        let permissions = overrides(&[("read_file", ToolState::Ask)]);
-
-        validate_agent_tool_permissions(&permissions, &catalog).expect("known tool accepted");
-    }
-
-    #[test]
     fn monotonic_update_rejects_widening_and_allows_narrowing() {
         let user_default = defaults(&[("run_command", ToolState::Ask)], ToolState::Allow);
         let current = overrides(&[("read_file", ToolState::Ask)]);
@@ -298,41 +222,5 @@ mod tests {
         ]);
         enforce_monotonic_update(&user_default, Some(&current), &narrowing)
             .expect("narrowing should be accepted");
-    }
-
-    #[test]
-    fn context_from_entries_recovers_identity_agent_permissions() {
-        let agent_id = AgentId::new([7; 32]);
-        let permissions = AgentPermissions {
-            scope: Default::default(),
-            capabilities: vec![Capability::ControlAgent],
-        };
-        let identity = Identity::new("0://Agent07", "Agent07")
-            .with_permissions(permissions.clone())
-            .with_tool_permissions(Some(overrides(&[("read_file", ToolState::Ask)])));
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "identity": identity,
-            "originating_user_id": "user-1",
-        }))
-        .expect("serialize identity payload");
-        let tx = Transaction::new_chained(
-            agent_id,
-            TransactionType::System,
-            Bytes::from(payload),
-            None,
-        );
-        let entry = RecordEntry::builder(1, tx).build();
-
-        let context = context_from_entries(vec![entry]);
-
-        assert_eq!(context.agent_permissions, permissions);
-        assert_eq!(context.originating_user_id.as_deref(), Some("user-1"));
-        assert_eq!(
-            context
-                .tool_permissions
-                .as_ref()
-                .and_then(|perms| perms.per_tool.get("read_file")),
-            Some(&ToolState::Ask)
-        );
     }
 }

@@ -2,6 +2,11 @@
 //!
 //! V1 intentionally uses fixed Rust data. Custom file-backed agents can layer
 //! on this API later without changing the `task` tool contract.
+//!
+//! Phase B / Commit 3 / Step 3a relocated this module from
+//! `aura-runtime/src/subagent_registry.rs` so the agent layer owns the
+//! pure-data subagent surface. No fleet deps are added — the
+//! `aura-core` types are sufficient.
 
 use aura_core::{Capability, SubagentBudget, SubagentKindSpec};
 
