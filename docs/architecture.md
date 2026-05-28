@@ -450,7 +450,7 @@ Composition roots. Each surface assembles dependencies from the lower layers int
 
 #### [`aura-surface-cli`](../crates/aura-surface-cli)
 
-CLI composition root. Owns the clap `Cli` / `Commands` / `RunArgs` definitions, the `ModeFlag` global flag (top of the `AgentMode` resolution chain), the event-loop wiring (`event_loop/`), the record-loader utility, and the surface-layer `session_helpers` that chain `aura_auth::CredentialStore` onto `aura_agent::session_bootstrap`. The body migration of `src/main.rs` and `aura-runtime/src/main.rs` into `aura_surface_cli::run` is incremental (Phase 10).
+CLI composition root. Owns the clap `Cli` / `Commands` / `RunArgs` definitions, the `ModeFlag` global flag (top of the `AgentMode` resolution chain), the event-loop wiring (`event_loop/`), the record-loader utility, and the surface-layer `session_helpers` that chain `aura_auth::CredentialStore` onto `aura_agent::session_bootstrap`. The workspace root `src/main.rs` is now a thin binary that delegates to `aura_surface_cli::run`; the `aura-node` binary still enters through `aura_runtime::run_node` and is re-exported as `aura_surface_cli::run_node` to avoid a dependency cycle.
 
 #### [`aura-surface-sdk`](../crates/aura-surface-sdk)
 
@@ -476,7 +476,7 @@ The HTTP/WS **gateway crate** plus the composition root for the `aura-node` bina
 
 Layout:
 
-- `lib.rs` — re-exports + `run_node()` entry point (calls `Node::run`). Phase 10 carve-out 1 owns the binary body here so `src/main.rs` is a ≤10-line shim.
+- `lib.rs` — re-exports + `run_node()` entry point (calls `Node::run`). Phase 10 carve-out 1 owns the `aura-node` binary body here so `crates/aura-runtime/src/main.rs` is a ≤10-line shim.
 - `main.rs` — `tokio::main` shim that calls `run_node()`.
 - `node.rs` — `Node` composition root: binds the TCP listener, opens the store, builds the `aura-engine::Engine`, builds the `aura-fleet-subagent::FleetSubagentDispatcher` over the engine's `ChildRunner`, builds the `aura-domain-http::HttpDomainApi`, builds the gateway `Router`, and runs the axum server with graceful shutdown.
 - `config/` — `NodeConfig::from_env`: env loading, paths, auth-token resolution. Module path unchanged across the refactor.

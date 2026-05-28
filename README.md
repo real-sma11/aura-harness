@@ -85,7 +85,7 @@ This workspace ships two binaries:
 
 | Binary | Entry point | Purpose |
 |--------|-------------|---------|
-| `aura` | [`src/main.rs`](src/main.rs) | **Canonical CLI entry point.** TUI by default; headless node with `run --ui none`; also hosts `login` / `logout` / `whoami` / `hello`. |
+| `aura` | [`src/main.rs`](src/main.rs) | **Canonical CLI entry point.** Thin root binary that delegates to `aura_surface_cli::run`; TUI by default; headless node with `run --ui none`; also hosts `login` / `logout` / `whoami` / `hello`. |
 | `aura-node` | [`crates/aura-runtime/src/main.rs`](crates/aura-runtime/src/main.rs) | Standalone headless server (HTTP + WebSocket API). Binary name `aura-node` shipped from the `aura-runtime` crate (the HTTP/WS gateway + composition root). Orchestration lives in [`crates/aura-engine/`](crates/aura-engine), HTTP `DomainApi` in [`crates/aura-domain-http/`](crates/aura-domain-http), and the concrete subagent dispatcher in [`crates/aura-fleet-subagent/`](crates/aura-fleet-subagent). |
 
 > **Historical:** earlier design drafts and the v0.1.0 specs referred

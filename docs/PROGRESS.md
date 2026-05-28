@@ -82,10 +82,10 @@ RocksDB implementation with column families and atomic commits.
 
 ---
 
-### Phase 3: Executor Framework (`aura-executor`)
+### Phase 3: Executor Framework (now `aura-exec-*` + `aura-agent-kernel`)
 **Status:** 🟢 Complete
 
-Executor trait and router for dispatching actions.
+Executor trait and router for dispatching actions. The original milestone name predated the layered split; there is no current `aura-executor` crate. Execution is now spread across the exec-layer crates (`aura-exec-*`, `aura-tools`) and the agent-layer kernel traits (`aura-agent-kernel`, re-exported by `aura-kernel`).
 
 - [x] `Executor` trait definition
 - [x] `ExecuteContext` struct
@@ -169,6 +169,8 @@ HTTP/WS gateway, scheduler, and worker management. The original scheduler/worker
 - [x] `GET /health` endpoint
 - [x] Per-agent processing claim in `aura-engine::Scheduler`
 - [x] Worker loop implementation in `aura-engine::process_agent`
+- [x] HTTP `DomainApi` implementation in `aura-domain-http`
+- [x] Concrete `FleetSubagentDispatcher` in `aura-fleet-subagent`
 - [x] `NodeConfig` struct
 
 ---
@@ -265,7 +267,7 @@ Approval flow for sensitive operations.
 
 ---
 
-### Phase 15: CLI (`aura-cli`)
+### Phase 15: CLI (root `aura` binary + `aura-surface-cli`)
 **Status:** ⛔ Superseded (2026, Wave 4 refactor)
 
 Interactive command-line interface. **The separate `aura-cli` crate
@@ -277,7 +279,7 @@ headless server half lives in `aura-runtime`. See
 point.
 
 - [x] ~~Create `aura-cli` crate~~ — dropped; root `aura` binary
-  covers this.
+  is a thin shim into `aura_surface_cli::run`.
 - [x] REPL loop with prompt — delivered by the ratatui TUI in
   `src/event_loop/` and `aura-terminal`.
 - [x] Transaction submission — delivered by `aura run` / the TUI's
@@ -445,7 +447,8 @@ One-paragraph summary per phase:
 - Implemented reasoner client with mock for testing
 - Implemented deterministic kernel with policy engine
 - Implemented swarm runtime with HTTP API and scheduler
-- Build verified for non-native crates (aura-core, aura-executor, aura-reasoner)
+- Build verified for the then-current non-native crates. Historical references to
+  `aura-executor` now map to the exec-layer crates plus `aura-agent-kernel`.
 - RocksDB crates require LLVM/Clang installation on Windows
 
 ### Key Design Decisions
