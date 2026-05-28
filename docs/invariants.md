@@ -242,7 +242,6 @@ Sanctioned `Command::new(...)` call sites:
 |---|---|---|
 | [`crates/aura-tools/src/git_tool/`](../crates/aura-tools/src/git_tool/) (`commit.rs`, `push.rs`, `commit_push.rs`, `executor.rs`) | Mutating `git add` / `commit` / `push` | Funnels through the kernel's `ToolExecutor`; allowlisted by `Command::new("git")` band. |
 | [`crates/aura-agent/src/git.rs`](../crates/aura-agent/src/git.rs) | Read-only `git log` / `git status` helpers (`is_git_repo`, `list_unpushed_commits`) | No external side effect; declared exception. |
-| [`crates/aura-automaton/src/builtins/dev_loop/tick.rs`](../crates/aura-automaton/src/builtins/dev_loop/tick.rs) | Single `git init` bootstrap for a fresh workspace | Has no remote, analogous to `RocksStore::open`; declared exception. |
 | [`crates/aura-exec-isolation/src/lib.rs`](../crates/aura-exec-isolation/src/lib.rs) | `git worktree add` / `worktree remove` for parallel-safe subagent workspaces | Sandbox/isolation infrastructure, not a mutating commit/push; declared exception. |
 | [`crates/aura-plugin-hooks/src/engine.rs`](../crates/aura-plugin-hooks/src/engine.rs) | Lifecycle hook scripts (PreToolUse, PostToolUse, PermissionRequest, …) | Scrubbed env per §14; never touches `append_entry_*` or `ModelProvider`. |
 | [`crates/aura-plugin-mcp/src/client.rs`](../crates/aura-plugin-mcp/src/client.rs) | MCP server stdio JSON-RPC clients | Scrubbed env per §14; tool calls reaching models must still route through the kernel gateway. |
@@ -903,9 +902,8 @@ The following operations intentionally do NOT route through `Kernel::process_*`:
 | Server listeners (`TcpListener::bind`) | Inbound edge, not an outbound state change. |
 | Interactive PTY ([`crates/aura-runtime/src/terminal.rs`](../crates/aura-runtime/src/terminal.rs)) | User-driven interactive shell; different execution model. |
 | Tool sandbox setup (`sandbox.rs` directory creation in `aura-exec-sandbox` / `aura-tools`) | Infrastructure for the kernel-managed tool pipeline. |
-| Read-only `git` operations in [`crates/aura-agent/src/git.rs`](../crates/aura-agent/src/git.rs) (`git diff`, `git status`, `git log`) | No external side effect. `is_git_repo` filesystem probe and `list_unpushed_commits` (`git log` scan) stay in `aura-agent` as read-only helpers. Every mutating `git` subprocess (`add`, `commit`, `push`) lives behind the `GitExecutor` in [`crates/aura-tools/src/git_tool/`](../crates/aura-tools/src/git_tool/) and routes through the kernel's `ToolExecutor`. |
-| `git init` bootstrap in [`crates/aura-automaton/src/builtins/dev_loop/tick.rs`](../crates/aura-automaton/src/builtins/dev_loop/tick.rs) | One-time creation of a local `.git/` directory when a fresh workspace is first driven by the dev-loop automaton. Has no remote, cannot leak state across agents, and is strictly analogous to `RocksStore::open`. The call-site is pinned by the `Command::new("git")` band in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh); any second `git init` anywhere else is a CI failure. |
-| `git worktree add` / `worktree remove` in [`crates/aura-exec-isolation/src/lib.rs`](../crates/aura-exec-isolation/src/lib.rs) (`WorktreeIsolation::provision` / `teardown`) | Workspace-isolation primitive for parallel-safe subagent dispatch. No remote, no commit/push mutation; analogous to sandbox directory creation. Bandable in CI alongside the dev-loop `git init` exception. |
+| Read-only `git` operations in [`crates/aura-agent/src/git.rs`](../crates/aura-agent/src/git.rs) (`git diff`, `git status`, `git log`) | No external side effect. `is_git_repo` filesystem probe and `list_unpushed_commits` (`git log` scan) stay in `aura-agent` as read-only helpers. Every mutating `git` subprocess (`add`, `commit`, `push`) lives behind the `GitExecutor` in [`crates/aura-tools/src/git_tool/`](../crates/aura-tools/src/git_tool/) and routes through the kernel's `ToolExecutor`. Pinned by the `Command::new("git")` band in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh). |
+| `git worktree add` / `worktree remove` in [`crates/aura-exec-isolation/src/lib.rs`](../crates/aura-exec-isolation/src/lib.rs) (`WorktreeIsolation::provision` / `teardown`) | Workspace-isolation primitive for parallel-safe subagent dispatch. No remote, no commit/push mutation; analogous to sandbox directory creation. Allowlisted in the `Command::new("git")` band in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh). |
 | HTTP-driven `write_system_record` in [`crates/aura-runtime/src/tool_permissions.rs`](../crates/aura-runtime/src/tool_permissions.rs) | Tool-permissions PUT handler appends a `System` record entry via `aura_kernel::write_system_record` so the operator's UI write is durable on the response. Acquires the scheduler's per-agent processing claim first (§12.a) so it interleaves correctly with the kernel's own writes for the same agent. Pinned by the §2 allowlist in [`scripts/check_invariants.sh`](../scripts/check_invariants.sh); any other non-kernel/non-store `append_entry_*` call is a CI failure. |
 | Fleet-spawn `write_system_record` callers in [`crates/aura-fleet-spawn/src/spawner.rs`](../crates/aura-fleet-spawn/src/spawner.rs) (`SubagentSpawn` audit rows, `promote_to_orphan`) | Spawn composition writes audit rows directly via `aura_agent_kernel::write_system_record`. Each call holds the per-parent `ParentLeaseRegistry` lease (§12.b) so sibling spawns of the same parent linearise. Not a raw `append_entry_*` call — the entry is built by the kernel helper and committed via the sealed `WriteStore` surface. |
 | Read-only `DomainApi` calls (`list_tasks`, `get_project`, `get_spec`) | No external mutation. Only mutating calls require kernel mediation. |
@@ -917,15 +915,29 @@ Any addition to this list requires explicit justification and documentation.
 
 ---
 
-## CI script lag
+## CI enforcement
 
-[`scripts/check_invariants.sh`](../scripts/check_invariants.sh) and
+[`scripts/check_invariants.sh`](../scripts/check_invariants.sh) is the
+ripgrep-band gate that backs the §1, §2, §3, §9, and §10 enforcement rows
+in the Enforcement Map. It runs from
 [`.github/workflows/invariants.yml`](../.github/workflows/invariants.yml)
-still encode some pre-Phase-6a paths (e.g. `crates/aura-kernel/` instead of
-`crates/aura-agent-kernel/`, `crates/aura-store/tests/` instead of
-`crates/aura-store-db/tests/`) and do not yet have explicit bands for the
-fleet/plugin surfaces this document contracts. The script's allowlists work
-today because the legacy crates are re-export shells, but tightening them to
-match this document is a separate follow-up. This was intentionally left out
-of the doc-refresh change so reviewers can read the architectural delta
-independently of the script churn.
+on every push and pull request to `main`, and is also runnable locally:
+
+```bash
+bash scripts/check_invariants.sh
+```
+
+The script's allowlists are kept in lockstep with this document. If you
+add or relocate a sanctioned call-site (for example a new `Arc<dyn Store>`
+holder, or a new crate that funnels through `aura_agent_kernel::write_system_record`),
+**update both the script's allowlist and this document in the same PR**.
+The script's header comment enumerates the active crate layout
+(`aura-agent-kernel`, `aura-store-db`, `aura-store-record`, `aura-store-snapshot`,
+`aura-model-reasoner`, `aura-context-memory`) alongside the legacy
+re-export shells (`aura-kernel`, `aura-store`, `aura-reasoner`, `aura-memory`)
+so contributors know which path to allowlist.
+
+The remaining §4 (Policy), §5 (Audit), §6 (Determinism), §7 (Sequencing),
+§8 (Gateway), §11 (Session), §12 (Single Writer), §13 (Layered Architecture),
+§14 (Plugin Sandbox), and §15 (Parallelism) invariants are enforced via the
+Rust test suites cited in their `Enforcement:` lines, not via `rg` bands.
