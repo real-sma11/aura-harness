@@ -512,7 +512,7 @@ Layout:
 - `executor.rs` — shared `ToolResolver` / `ExecutorRouter` construction helpers (formerly `executor_factory.rs`).
 - `child_runner.rs` — `RuntimeChildRunner`: the surface-layer impl of `aura_fleet_spawn::ChildRunner`. Exposed as `Engine::child_runner() -> Arc<dyn ChildRunner>`; consumed by the fleet-layer `FleetSubagentDispatcher`.
 - `model_context.rs` — `context_window_for_model` lookup used by the automaton bridge and the gateway-side session config.
-- `lib.rs` — re-exports `AutomatonBridge`, `RuntimeChildRunner`, `MemoryTurnObserver`, `Scheduler`, `AgentIdentity`, `AgentIdentityRegistry`, `context_window_for_model`, `process_agent_detailed`, `ProcessedAgent`.
+- `lib.rs` — re-exports `AutomatonBridge`, `EventSubscription`, `RuntimeChildRunner`, `MemoryTurnObserver`, `turn_summary_from_result`, `context_window_for_model`, `Scheduler`, `SchedulerError`, `AgentIdentity`, `AgentIdentityRegistry`, `process_agent_detailed`, `ProcessedAgent`.
 
 Library crate, so it ships typed `thiserror` errors (rules.md §4.2) — `aura-runtime`'s binary `aura-node` still uses `anyhow` at the top-level `main`.
 
