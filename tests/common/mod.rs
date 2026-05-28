@@ -7,7 +7,7 @@
 //! via `POST /v1/run` + `WS /stream/:run_id`. The helpers in this module
 //! build [`aura_protocol::RuntimeRequest`]-shaped JSON payloads, post
 //! them to the gateway, and attach a [`WsClient`] to the freshly minted
-//! run id — collapsing the previous "open WS + send SessionInit + wait
+//! run id — collapsing the previous "open WS + send init frame + wait
 //! SessionReady" three-step dance into a single call.
 
 #![allow(dead_code)]

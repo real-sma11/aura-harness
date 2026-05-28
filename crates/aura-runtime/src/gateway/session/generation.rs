@@ -70,7 +70,7 @@ pub(super) fn start_generation(
         );
         let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
             code: "not_initialized".into(),
-            message: "Send session_init before generation_request".into(),
+            message: "Start a run before sending generation_request".into(),
             recoverable: true,
             support_id: None,
         }));

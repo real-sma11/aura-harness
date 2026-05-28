@@ -229,3 +229,165 @@ fn installed_tool_roundtrip_protocol_to_core() {
             .and_then(|req| req.kind.as_deref())
     );
 }
+
+#[test]
+fn aura_os_contract_includes_current_additive_wire_fields() {
+    let request = aura_protocol::RuntimeRequest {
+        r#type: aura_protocol::RuntimeRequestType::TaskRun {
+            task_id: "task-1".into(),
+            prior_failure: Some("previous assertion failed".into()),
+            work_log: vec!["implemented parser".into()],
+        },
+        agent_identity: aura_protocol::AgentIdentity {
+            template_id: Some("template-1".into()),
+            partition_id: Some("template-1::instance-1::session-1".into()),
+            ..Default::default()
+        },
+        model: aura_protocol::ModelSelection::default(),
+        workspace: aura_protocol::WorkspaceLocation::default(),
+        project: Some(aura_protocol::ProjectContext {
+            project_id: "project-1".into(),
+            aura_org_id: Some("org-1".into()),
+            aura_session_id: Some("session-1".into()),
+            aura_agent_id: Some("agent-1".into()),
+            ..Default::default()
+        }),
+        agent_permissions: aura_protocol::AgentPermissionsWire::default(),
+        tool_permissions: None,
+        agent_capabilities: aura_protocol::AgentCapabilities {
+            installed_tools: vec![aura_protocol::InstalledTool {
+                name: "trusted_search".into(),
+                description: "Search through an app provider".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                endpoint: "app://provider/search".into(),
+                auth: aura_protocol::ToolAuth::None,
+                timeout_ms: Some(3_000),
+                namespace: Some("search".into()),
+                required_integration: Some(aura_protocol::InstalledToolIntegrationRequirement {
+                    integration_id: Some("integration-1".into()),
+                    provider: Some("brave_search".into()),
+                    kind: Some("workspace_integration".into()),
+                }),
+                runtime_execution: Some(aura_protocol::InstalledToolRuntimeExecution::AppProvider(
+                    aura_protocol::InstalledToolRuntimeProviderExecution {
+                        provider: "brave_search".into(),
+                        base_url: "https://api.search.brave.com".into(),
+                        static_headers: HashMap::new(),
+                        integrations: vec![aura_protocol::InstalledToolRuntimeIntegration {
+                            integration_id: "integration-1".into(),
+                            base_url: None,
+                            auth: aura_protocol::InstalledToolRuntimeAuth::Header {
+                                name: "X-Subscription-Token".into(),
+                                value: "secret".into(),
+                            },
+                            provider_config: HashMap::new(),
+                        }],
+                    },
+                )),
+                metadata: HashMap::new(),
+            }],
+            installed_integrations: vec![aura_protocol::InstalledIntegration {
+                integration_id: "integration-1".into(),
+                name: "Brave Search".into(),
+                provider: "brave_search".into(),
+                kind: "workspace_integration".into(),
+                metadata: HashMap::new(),
+            }],
+            intent_classifier: None,
+        },
+        auth_jwt: Some("jwt".into()),
+        user_id: "user-1".into(),
+    };
+
+    let request_json = serde_json::to_value(&request).unwrap();
+    assert_eq!(request_json["type"]["kind"], "task_run");
+    assert_eq!(
+        request_json["type"]["params"]["work_log"],
+        serde_json::json!(["implemented parser"])
+    );
+    assert_eq!(
+        request_json["project"]["aura_org_id"],
+        serde_json::json!("org-1")
+    );
+    assert_eq!(
+        request_json["agent_capabilities"]["installed_tools"][0]["required_integration"]
+            ["provider"],
+        serde_json::json!("brave_search")
+    );
+    assert_eq!(
+        request_json["agent_capabilities"]["installed_tools"][0]["runtime_execution"]["type"],
+        serde_json::json!("app_provider")
+    );
+
+    let ready = aura_protocol::OutboundMessage::SessionReady(aura_protocol::SessionReady {
+        session_id: "run-1".into(),
+        tools: vec![aura_protocol::ToolInfo {
+            name: "trusted_search".into(),
+            description: "Search through an app provider".into(),
+            effective_state: aura_protocol::ToolStateWire::Ask,
+        }],
+        skills: vec![],
+    });
+    let ready_json = serde_json::to_value(&ready).unwrap();
+    assert_eq!(ready_json["tools"][0]["effective_state"], "ask");
+
+    let end = aura_protocol::OutboundMessage::AssistantMessageEnd(Box::new(
+        aura_protocol::AssistantMessageEnd {
+            message_id: "msg-1".into(),
+            stop_reason: "end_turn".into(),
+            usage: aura_protocol::SessionUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                estimated_context_tokens: 20,
+                cache_creation_input_tokens: 3,
+                cache_read_input_tokens: 7,
+                cumulative_input_tokens: 100,
+                cumulative_output_tokens: 50,
+                cumulative_cache_creation_input_tokens: 30,
+                cumulative_cache_read_input_tokens: 70,
+                context_utilization: 0.25,
+                model: "claude-opus-4-7".into(),
+                provider: "anthropic".into(),
+                context_breakdown: aura_protocol::ContextBreakdown {
+                    system_prompt_tokens: 1,
+                    tools_tokens: 2,
+                    skills_tokens: 3,
+                    mcp_tokens: 0,
+                    subagents_tokens: 4,
+                    conversation_tokens: 10,
+                    cache_read_tokens: 7,
+                    cache_creation_tokens: 3,
+                },
+            },
+            files_changed: aura_protocol::FilesChanged {
+                created: vec!["new.txt".into()],
+                modified: vec!["changed.txt".into()],
+                deleted: vec![],
+                diffs: vec![aura_protocol::FileDiff {
+                    path: "changed.txt".into(),
+                    lines_added: 2,
+                    lines_removed: 1,
+                }],
+            },
+            originating_user_id: Some("origin-user-1".into()),
+        },
+    ));
+    let end_json = serde_json::to_value(&end).unwrap();
+    assert_eq!(end_json["usage"]["estimated_context_tokens"], 20);
+    assert_eq!(end_json["usage"]["cache_read_input_tokens"], 7);
+    assert_eq!(
+        end_json["usage"]["context_breakdown"]["cache_creation_tokens"],
+        3
+    );
+    assert_eq!(end_json["files_changed"]["diffs"][0]["lines_added"], 2);
+    assert_eq!(end_json["originating_user_id"], "origin-user-1");
+
+    let err = aura_protocol::OutboundMessage::Error(aura_protocol::ErrorMsg {
+        code: "agent_stalled".into(),
+        message: "Agent made no progress".into(),
+        recoverable: true,
+        support_id: Some("abc123def456".into()),
+    });
+    let err_json = serde_json::to_value(&err).unwrap();
+    assert_eq!(err_json["support_id"], "abc123def456");
+}

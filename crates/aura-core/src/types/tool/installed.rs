@@ -84,7 +84,7 @@ pub enum InstalledToolRuntimeExecution {
 /// Definition for an installed tool (replaces `ExternalToolDefinition`).
 ///
 /// Installed tools are dispatched via HTTP POST to an endpoint.
-/// They can come from `tools.toml`, the HTTP install API, or `session_init`.
+/// They can come from `tools.toml`, the HTTP install API, or `RuntimeRequest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledToolIntegrationRequirement {
     #[serde(default, skip_serializing_if = "Option::is_none")]

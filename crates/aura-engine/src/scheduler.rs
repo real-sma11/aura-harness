@@ -112,8 +112,8 @@ impl AgentIdentity {
 /// In-memory registry of [`AgentIdentity`] entries.
 ///
 /// Populated in three places:
-/// - `Session::apply_init` (chat WS) — registers the session model + IDs the
-///   moment they land in `SessionState`, before the first turn dispatches.
+/// - `Session::apply_chat_runtime_request` (chat run bootstrap) — registers
+///   the session model + IDs before the first turn dispatches.
 /// - `automaton_bridge::start_dev_loop_with_capabilities` /
 ///   `run_task_with_capabilities` — registers the dev-loop / task-run identity
 ///   alongside the existing `AgentRunnerConfig` plumbing (commit `d12fe29`).
@@ -142,9 +142,9 @@ impl AgentIdentityRegistry {
     }
 
     /// Register or replace the identity for `agent_id`. Replacing on
-    /// `apply_init` re-keys is intentional — a repeat session_init for
-    /// the same agent_id (legitimate WS reconnect) must be allowed to
-    /// rotate the model + IDs without leaking the previous bundle.
+    /// chat-run bootstrap re-keys are intentional — reconnecting an existing
+    /// run must be allowed to refresh the model + IDs without leaking the
+    /// previous bundle.
     pub fn register(&self, agent_id: AgentId, identity: AgentIdentity) {
         self.inner.insert(agent_id, identity);
     }

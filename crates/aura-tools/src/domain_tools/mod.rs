@@ -27,7 +27,7 @@ use helpers::domain_err;
 // ---------------------------------------------------------------------------
 //
 // An earlier "unify on DomainApi" plan proposed adding a
-// `domain_tools: Vec<String>` field to `aura_protocol::SessionInit` so
+// `domain_tools: Vec<String>` field to the run-start protocol so
 // aura-os-server could advertise the domain-tool set and the harness would
 // treat that wire-shipped list as the source of truth instead of this slice.
 // That change was evaluated and intentionally skipped. The reasoning, left
@@ -50,13 +50,13 @@ use helpers::domain_err;
 // 3. The effective catalog and resolver already get the full set from the
 //    live `DomainToolExecutor`, which is derived from this same slice via
 //    `tool_names()`. That is exactly the behavior a wire-shipped
-//    `SessionInit.domain_tools` field would have produced — with no wire
+//    run-start `domain_tools` field would have produced — with no wire
 //    coupling.
 //
 // If you ever need the server to advertise this list for *diagnostic*
 // purposes (e.g. a debug endpoint that shows "what can this harness
 // handle?"), drive it from the harness via `SessionReady` rather than
-// reintroducing it on `SessionInit`. See `DomainToolExecutor::tool_names`.
+// reintroducing it on `RuntimeRequest`. See `DomainToolExecutor::tool_names`.
 const DOMAIN_TOOL_NAMES: &[&str] = &[
     "list_specs",
     "get_spec",

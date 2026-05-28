@@ -166,7 +166,7 @@ async fn test_scan_record() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_ws_session_init() {
+async fn test_ws_runtime_request_bootstrap() {
     let server = TestServer::start().await;
     let ws_path = server.workspaces_path().join("test-agent");
     std::fs::create_dir_all(&ws_path).unwrap();
@@ -811,7 +811,7 @@ async fn test_ws_files_changed_after_write() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_ws_session_init_with_system_prompt() {
+async fn test_ws_runtime_request_with_system_prompt() {
     let _ = dotenvy::dotenv();
     let token = require_llm!();
     let server = TestServer::start().await;
@@ -848,7 +848,7 @@ async fn test_ws_session_init_with_system_prompt() {
 }
 
 #[tokio::test]
-async fn test_ws_session_init_with_model() {
+async fn test_ws_runtime_request_with_model() {
     let _ = dotenvy::dotenv();
     let token = require_llm!();
     let server = TestServer::start().await;
@@ -878,7 +878,7 @@ async fn test_ws_session_init_with_model() {
 }
 
 #[tokio::test]
-async fn test_ws_session_init_with_max_turns() {
+async fn test_ws_runtime_request_with_max_turns() {
     let _ = dotenvy::dotenv();
     let token = require_llm!();
     let server = TestServer::start().await;

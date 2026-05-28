@@ -145,15 +145,15 @@ impl ToolExecutor {
     /// (`aura-os-server`'s `agents.agent_id`) that identifies this agent
     /// on the OS REST surface. The harness's internal
     /// [`aura_core::AgentId`] is a 32-byte blake3 hash of that UUID
-    /// (see `aura_core::AgentId::from_uuid` and the harness session-init
-    /// fallback in `crates/aura-runtime/src/session/state.rs`), and its
+    /// (see `aura_core::AgentId::from_uuid` and the harness runtime-request
+    /// fallback in `crates/aura-runtime/src/gateway/session/state.rs`), and its
     /// `Display` impl truncates to 16 hex chars — so passing
     /// `caller_agent_id.to_string()` to `aura-os-server` as
     /// `originating_agent_id` is unparseable as a UUID at the
     /// `Path<AgentId>` extractor and silently fails the cross-agent
     /// async-reply callback. Wire this with the un-hashed UUID
-    /// (typically `SessionState::skill_agent_id` /
-    /// `template_agent_id`) so `send_to_agent` ships a value the
+    /// (typically `SessionState::skill_agent_id` populated from
+    /// `RuntimeRequest.agent_identity.template_id`) so `send_to_agent` ships a value the
     /// server can route.
     #[must_use]
     pub fn with_caller_external_agent_id(mut self, agent_id: impl Into<String>) -> Self {

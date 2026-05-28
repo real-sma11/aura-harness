@@ -5,9 +5,10 @@
 //!
 //! ## Layout
 //!
-//! - [`state`] — the `Session` struct, its `new` / `apply_init` lifecycle,
-//!   the wire→core permission + intent-classifier conversions. Split out
-//!   in Wave 6 / T3 so this file can stay a thin facade.
+//! - [`state`] — the `Session` struct, its `new` /
+//!   `apply_chat_runtime_request` lifecycle, the wire→core permission +
+//!   intent-classifier conversions. Split out in Wave 6 / T3 so this file can
+//!   stay a thin facade.
 //! - [`generation`] — SSE proxy for generation (images / 3D).
 //! - [`helpers`] — turn execution helpers shared by the WebSocket path.
 //! - [`partial_json`] — partial-JSON repair used during streaming.

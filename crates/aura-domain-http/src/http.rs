@@ -112,7 +112,7 @@ impl HttpDomainApi {
     // -------------------------------------------------------------------------
 
     fn require_jwt(jwt: Option<&str>) -> anyhow::Result<&str> {
-        jwt.ok_or_else(|| anyhow!("JWT required for this operation but not provided — ensure the front-end sends a token in session_init"))
+        jwt.ok_or_else(|| anyhow!("JWT required for this operation but not provided — ensure the front-end sends a token in RuntimeRequest.auth_jwt"))
     }
 
     async fn send_with_retry(
