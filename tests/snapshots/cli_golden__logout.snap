@@ -1,0 +1,20 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Clear stored authentication credentials
+
+Usage: aura logout [OPTIONS]
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+  -h, --help
+          Print help (see a summary with '-h')

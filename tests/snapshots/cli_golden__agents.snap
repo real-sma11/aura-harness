@@ -1,0 +1,27 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Inspect / manage live + orphaned subagents (Phase 7b).
+
+Subcommands `inspect` and `reap` read the on-disk orphan store at `~/.aura/state/orphans/` and (when the daemon is running in-process) the [`aura_fleet_registry::FleetRegistry`].
+
+Usage: aura agents [OPTIONS] <COMMAND>
+
+Commands:
+  inspect  List live + orphaned subagents in tabular form
+  reap     Reap a specific orphan or every orphan
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+  -h, --help
+          Print help (see a summary with '-h')

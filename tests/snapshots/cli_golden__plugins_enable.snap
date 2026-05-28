@@ -1,0 +1,32 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Enable a plugin in `AURA_HOME/config.toml` (`enabled = true`).
+
+When the cached manifest has `trust.require_explicit_trust = true` and the plugin is not already trusted in operator config, the flow prompts the operator on the TTY. `--yes` skips the prompt and accepts trust; `--no` skips the prompt and declines (the plugin is NOT enabled).
+
+Usage: aura plugins enable [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Plugin id (matches the manifest `id` field)
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+      --yes
+          Bypass the trust prompt and accept trust automatically. Mutually exclusive with `--no`
+
+      --no
+          Bypass the trust prompt and decline trust automatically. Mutually exclusive with `--yes`
+
+  -h, --help
+          Print help (see a summary with '-h')

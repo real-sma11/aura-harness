@@ -1,0 +1,31 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+AURA CLI - Autonomous Universal Reasoning Architecture
+
+Usage: aura [OPTIONS] [COMMAND]
+
+Commands:
+  run      Run the agent (default when no subcommand is given)
+  login    Authenticate with zOS to obtain a JWT for proxy mode
+  logout   Clear stored authentication credentials
+  whoami   Show current authentication status
+  hello    Print "Hello, World!" and exit (Spec 01)
+  migrate  Phase 4a stub: migrate aura state (no-op today)
+  plugins  Manage declarative plugins (Phase 4b)
+  agents   Inspect / manage live + orphaned subagents (Phase 7b)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+  -h, --help
+          Print help (see a summary with '-h')

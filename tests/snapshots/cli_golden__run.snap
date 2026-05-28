@@ -1,0 +1,48 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Run the agent (default when no subcommand is given)
+
+Usage: aura run [OPTIONS]
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+      --ui <UI>
+          UI mode (terminal or none)
+
+          Possible values:
+          - terminal: Full terminal UI (default)
+          - none:     No UI, run as swarm server
+          
+          [default: terminal]
+
+      --theme <THEME>
+          Theme (cyber, matrix, synthwave, minimal)
+          
+          [default: cyber]
+
+  -d, --dir <DIR>
+          Working directory
+
+      --provider <PROVIDER>
+          Model provider (anthropic or mock)
+          
+          [default: anthropic]
+
+  -v, --verbose
+          Enable verbose output
+
+      --allow-unrestricted-full-access
+          Permit FullAccess sessions to bypass command allowlists
+
+  -h, --help
+          Print help (see a summary with '-h')

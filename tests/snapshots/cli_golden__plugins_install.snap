@@ -1,0 +1,29 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Install a plugin from a local source directory.
+
+The source must contain a `.aura-plugin/`, `.codex-plugin/`, or `.claude-plugin/` subdirectory with a `manifest.toml`. The install pipeline copies the source tree into the `AURA_HOME/plugins/<id>/<version>/` cache layout and writes a normalised `.aura-plugin.toml` regardless of which alias the source used.
+
+Usage: aura plugins install [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>
+          Path to the plugin source directory
+
+Options:
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+      --trust
+          Bypass `trust.require_explicit_trust = true` manifests
+
+  -h, --help
+          Print help (see a summary with '-h')

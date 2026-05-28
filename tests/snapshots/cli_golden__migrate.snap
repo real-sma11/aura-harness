@@ -1,0 +1,25 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Phase 4a stub: migrate aura state (no-op today).
+
+Future phases will populate this with Codex → Aura state migration. The stub exists so the CLI surface is stable when `aura-store-db` and `aura-plugin-core` (Phase 4b+) start producing migration-aware on-disk layouts.
+
+Usage: aura migrate [OPTIONS]
+
+Options:
+      --dry-run
+          Run as a dry preview without making changes
+
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -1,0 +1,30 @@
+---
+source: tests/cli_golden.rs
+expression: help
+---
+Reap a specific orphan or every orphan
+
+Usage: aura agents reap [OPTIONS] [AGENT_ID]
+
+Arguments:
+  [AGENT_ID]
+          Hex-encoded child agent id to reap. Mutually exclusive with `--all-orphans`
+
+Options:
+      --all-orphans
+          Reap every orphan currently under the orphan-store root
+
+      --mode <MODE>
+          Phase 9: top-level `AgentMode` override. Highest rung of the documented resolution priority chain (CLI > TUI slash > SDK field > daemon default > `AgentMode::Agent` fallback). The flag is resolved at session start by the fleet daemon's `resolve_session_mode` helper
+
+          Possible values:
+          - agent: Full unrestricted operation subject to user permissions
+          - plan:  Read + markdown writes + read-only subprocesses
+          - ask:   Read-only
+          - debug: Read + sandboxed probes only
+
+      --orphan-root <ORPHAN_ROOT>
+          Override the orphan-store root directory
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -288,6 +288,29 @@ aura-agent = { path = "crates/aura-agent" }
 aura-automaton = { path = "crates/aura-automaton" }
 aura-tools = { path = "crates/aura-tools" }
 aura-protocol = { path = "crates/aura-protocol" }
+# Phase 9 SDK smoke test (`tests/sdk_smoke.rs`) consumes the
+# external `aura-surface-sdk` crate from this workspace's root test
+# harness, so the SDK type surface is verified from an out-of-crate
+# perspective.
+aura-surface-sdk = { path = "crates/aura-surface-sdk" }
+aura-core-modes = { path = "crates/aura-core-modes" }
+aura-core-protocol = { path = "crates/aura-core-protocol" }
+# Phase 9 daemon-shutdown integration test
+# (`tests/daemon_shutdown.rs`) wires the fleet daemon, mailbox,
+# spawner, and orphan store from the root harness.
+aura-fleet-daemon = { path = "crates/aura-fleet-daemon" }
+aura-fleet-spawn = { path = "crates/aura-fleet-spawn" }
+aura-fleet-registry = { path = "crates/aura-fleet-registry" }
+aura-store-record = { path = "crates/aura-store-record" }
+aura-core-types = { path = "crates/aura-core-types" }
+aura-core-permissions = { path = "crates/aura-core-permissions" }
+aura-agent-subagent = { path = "crates/aura-agent-subagent" }
+tokio-util = { workspace = true }
+parking_lot = { workspace = true }
+# Phase 9 golden CLI help-text snapshot test
+# (`tests/cli_golden.rs`) uses `insta` to pin the `--help` output
+# of every documented `aura ...` subcommand.
+insta = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
