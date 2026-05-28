@@ -84,6 +84,39 @@ impl ConnectorRegistry {
             .map(|g| g.values().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Phase 10 last-wins API. Replace any existing entry for
+    /// `entry.id` with `entry`, returning the previous value (if
+    /// any). Unlike [`Self::register`], this method never errors
+    /// on duplicates — it implements the documented
+    /// plugin-supplied-overrides-built-in semantics from the
+    /// Phase 8 spec.
+    ///
+    /// Call sites that want first-active-wins continue to use
+    /// [`Self::register`]; the Phase 8 plugin materialiser uses
+    /// [`Self::replace`] so plugin-supplied connectors win over
+    /// any earlier-registered built-in.
+    pub fn replace(&self, entry: ConnectorEntry) -> Option<ConnectorEntry> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(entry.id.clone(), entry)
+    }
+
+    /// Phase 10 last-wins API. Remove the entry under `id`,
+    /// returning the removed value (if any). Used by the
+    /// materialiser to drop a built-in slot before
+    /// [`Self::register`]-ing the plugin contribution in its
+    /// place when the caller wants the registration to fail loudly
+    /// on a subsequent duplicate.
+    pub fn remove(&self, id: &str) -> Option<ConnectorEntry> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.remove(id)
+    }
 }
 
 #[cfg(test)]

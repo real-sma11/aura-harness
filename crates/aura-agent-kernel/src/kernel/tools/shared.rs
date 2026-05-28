@@ -120,6 +120,32 @@ impl Kernel {
             return Ok(verdict);
         };
 
+        // Phase 10 carve-out 5b: fire the PermissionRequest hook
+        // BEFORE the interactive prompter. A registered handler may
+        // short-circuit with Approve (→ allow) or Deny (→ deny);
+        // any other outcome (Continue / TimedOut / Block / Replace)
+        // falls through to the interactive prompt path below.
+        if let Some(host) = self.config.plugin_hooks.as_ref() {
+            use aura_plugin_hooks::HookOutcome;
+            let args_text = serde_json::to_string(&prompt.args).unwrap_or_default();
+            let outcome =
+                host.fire_permission_request(&prompt.tool_name, &args_text, "ask", &reason);
+            match outcome.decision {
+                HookOutcome::Approve => return Ok(PolicyVerdict::Allow),
+                HookOutcome::Deny {
+                    reason: hook_reason,
+                } => {
+                    return Ok(PolicyVerdict::Deny {
+                        reason: hook_reason,
+                    });
+                }
+                HookOutcome::Continue
+                | HookOutcome::TimedOut
+                | HookOutcome::Block { .. }
+                | HookOutcome::Replace { .. } => {}
+            }
+        }
+
         let Some(prompter) = self.config.tool_approval_prompter.as_ref() else {
             return Ok(PolicyVerdict::Deny { reason });
         };

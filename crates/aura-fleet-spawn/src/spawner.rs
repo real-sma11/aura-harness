@@ -31,19 +31,24 @@ use crate::lease::{DedupedSpawn, ParentLeaseRegistry};
 use crate::orphan::{OrphanRecord, OrphanStore};
 use crate::runner::{ChildRunContext, ChildRunError, ChildRunner};
 
-/// Stable kind tag stamped on the JSON envelope written for every
-/// successful spawn. Phase 7b adds the matching
-/// [`aura_store_record::RecordKind::SubagentSpawn`] variant; the
-/// audit-log record header now uses it directly while this constant
-/// remains the in-payload discriminator for forward compatibility
-/// with consumers that still inspect the envelope body.
+/// Stable kind tag historically stamped on the JSON envelope
+/// written for every successful spawn under the Phase 7a
+/// workaround. Phase 10 schema-v2 retires this in-payload
+/// discriminator — the audit row's `TransactionType::SubagentSpawn`
+/// header is the single source of truth now — but the constant is
+/// retained for any consumer still string-matching the legacy
+/// envelope when reading a v1 log alongside a v2 log.
 pub const RECORD_KIND_SUBAGENT_SPAWN: &str = "subagent_spawn";
 
 /// Wire shape of the `SubagentSpawn` audit record's payload.
+///
+/// Phase 10 schema-v2 dropped the embedded `kind` discriminator —
+/// the `TransactionType::SubagentSpawn` variant on the transaction
+/// header is now the canonical discriminator. The remaining fields
+/// match the Phase 7a shape so a v1 reader applying `serde(default)`
+/// on a v2 row still recovers the spawn metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRecordPayload {
-    /// Discriminator for the System-record envelope (`"subagent_spawn"`).
-    pub kind: String,
     /// Parent agent that requested the spawn.
     pub parent_agent_id: AgentId,
     /// Freshly-allocated child agent id (pre-assigned by the spawner
@@ -298,9 +303,11 @@ impl FleetSpawner {
         })?;
 
         // (6) SubagentSpawn audit record write under the parent's
-        //     lease (linearised seq numbers).
+        //     lease (linearised seq numbers). Phase 10 schema-v2:
+        //     the transaction is stamped with
+        //     `TransactionType::SubagentSpawn` so the discriminator
+        //     lives on the header instead of inside the payload.
         let manifest_payload = SubagentSpawnRecordPayload {
-            kind: RECORD_KIND_SUBAGENT_SPAWN.to_string(),
             parent_agent_id,
             child_agent_id,
             override_manifest: manifest.clone(),
@@ -310,7 +317,7 @@ impl FleetSpawner {
             .map_err(|e| SpawnError::Serialization(format!("manifest: {e}")))?;
         let audit_tx = Transaction::new_chained(
             parent_agent_id,
-            TransactionType::System,
+            TransactionType::SubagentSpawn,
             Bytes::from(manifest_bytes),
             None,
         );
@@ -579,7 +586,6 @@ impl FleetSpawner {
                 token_budget: Some(u64::from(spec.budget.max_tokens)),
             })?;
             let manifest_payload = SubagentSpawnRecordPayload {
-                kind: RECORD_KIND_SUBAGENT_SPAWN.to_string(),
                 parent_agent_id,
                 child_agent_id,
                 override_manifest: manifest.clone(),
@@ -589,7 +595,7 @@ impl FleetSpawner {
                 .map_err(|e| SpawnError::Serialization(format!("manifest: {e}")))?;
             let audit_tx = Transaction::new_chained(
                 parent_agent_id,
-                TransactionType::System,
+                TransactionType::SubagentSpawn,
                 Bytes::from(manifest_bytes),
                 None,
             );

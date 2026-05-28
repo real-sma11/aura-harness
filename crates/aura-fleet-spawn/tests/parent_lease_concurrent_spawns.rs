@@ -17,8 +17,7 @@ use aura_core_modes::{AgentMode, SpawnMode};
 use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
 use aura_fleet_spawn::{
-    FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnRequest,
-    SubagentSpawnRecordPayload, RECORD_KIND_SUBAGENT_SPAWN,
+    FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnRequest, SubagentSpawnRecordPayload,
 };
 
 use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
@@ -89,12 +88,9 @@ async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
         .expect("scan parent record log");
     let spawn_entries: Vec<_> = entries
         .iter()
-        .filter(|entry| entry.tx.tx_type == TransactionType::System)
+        .filter(|entry| entry.tx.tx_type == TransactionType::SubagentSpawn)
         .filter(|entry| {
-            serde_json::from_slice::<SubagentSpawnRecordPayload>(&entry.tx.payload)
-                .ok()
-                .filter(|p| p.kind == RECORD_KIND_SUBAGENT_SPAWN)
-                .is_some()
+            serde_json::from_slice::<SubagentSpawnRecordPayload>(&entry.tx.payload).is_ok()
         })
         .collect();
 

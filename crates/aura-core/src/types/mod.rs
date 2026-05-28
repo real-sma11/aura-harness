@@ -96,6 +96,7 @@ mod tests {
             Just(TransactionType::ToolExecution),
             Just(TransactionType::ProcessComplete),
             Just(TransactionType::Reasoning),
+            Just(TransactionType::SubagentSpawn),
         ]
     }
 
@@ -387,6 +388,7 @@ mod tests {
             TransactionType::ToolExecution,
             TransactionType::ProcessComplete,
             TransactionType::Reasoning,
+            TransactionType::SubagentSpawn,
         ];
 
         for tx_type in types {

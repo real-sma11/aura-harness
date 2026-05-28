@@ -14,7 +14,7 @@ use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
 use aura_fleet_spawn::{
     FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnHandle, SpawnRequest,
-    SubagentSpawnRecordPayload, RECORD_KIND_SUBAGENT_SPAWN,
+    SubagentSpawnRecordPayload,
 };
 
 use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
@@ -85,12 +85,9 @@ async fn same_parent_and_tool_call_id_produces_one_child_and_one_audit_record() 
         .expect("scan parent record log");
     let spawn_entries: Vec<_> = entries
         .iter()
-        .filter(|entry| entry.tx.tx_type == TransactionType::System)
+        .filter(|entry| entry.tx.tx_type == TransactionType::SubagentSpawn)
         .filter(|entry| {
-            serde_json::from_slice::<SubagentSpawnRecordPayload>(&entry.tx.payload)
-                .ok()
-                .filter(|p| p.kind == RECORD_KIND_SUBAGENT_SPAWN)
-                .is_some()
+            serde_json::from_slice::<SubagentSpawnRecordPayload>(&entry.tx.payload).is_ok()
         })
         .collect();
     assert_eq!(

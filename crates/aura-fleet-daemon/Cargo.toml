@@ -19,14 +19,20 @@ aura-config = { path = "../aura-config" }
 aura-context-skills = { path = "../aura-context-skills" }
 aura-plugin-core = { path = "../aura-plugin-core" }
 aura-plugin-hooks = { path = "../aura-plugin-hooks" }
+# Phase 10 carve-out 2/4: SessionStop audit rows + shutdown-token
+# wiring go through aura-agent-kernel::write_system_record so the
+# fleet daemon does not introduce a parallel record-write path.
+aura-agent-kernel = { path = "../aura-agent-kernel" }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 # Phase 9: `aura-core` is re-exported through `aura-fleet-spawn`
 # and used by call sites that consume the daemon handle, so

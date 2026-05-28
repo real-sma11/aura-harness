@@ -11,7 +11,10 @@ use crate::context::hash_tx_with_window;
 use crate::executor::ExecuteContext;
 use crate::kernel::{Kernel, ProcessResult};
 use crate::policy::PolicyVerdict;
-use aura_core::{Action, ActionId, ActionKind, Effect, Proposal, ToolProposal, Transaction};
+use aura_core::{
+    Action, ActionId, ActionKind, Effect, EffectKind, Proposal, ToolProposal, Transaction,
+};
+use bytes::Bytes;
 
 pub(super) async fn process_many(
     kernel: &Kernel,
@@ -48,10 +51,26 @@ pub(super) async fn process_many(
         .await
         .map_err(|e| crate::KernelError::Internal(format!("create workspace: {e}")))?;
 
-    let mut exec_contexts: Vec<ExecuteContext> = Vec::new();
-    let mut exec_actions: Vec<Action> = Vec::new();
+    // Phase 10 carve-out 5a: fire `PreToolUse` per-proposal BEFORE
+    // executor dispatch. Any handler returning
+    // `HookOutcome::Block` causes us to skip the executor for
+    // that slot and substitute a synthetic failed
+    // [`aura_core::Effect`] carrying the block reason; a parallel
+    // `tool_call_blocked_by_hook` System audit row is written by
+    // [`fire_pre_tool_use_for_batch`] so the audit log can
+    // distinguish the block from a normal executor failure.
+    //
+    // We pre-allocate per-proposal slots so the post-execution
+    // pairing loop walks the same `(proposal, action, effect)`
+    // tuples without a side index map.
+    let total = tool_proposals.len();
+    let mut per_slot_action: Vec<Option<Action>> = vec![None; total];
+    let mut per_slot_effect: Vec<Option<Effect>> = vec![None; total];
+    let mut dispatch_indices: Vec<usize> = Vec::new();
+    let mut dispatch_contexts: Vec<ExecuteContext> = Vec::new();
+    let mut dispatch_actions: Vec<Action> = Vec::new();
 
-    for (i, _proposal) in tool_proposals.iter().enumerate() {
+    for (i, proposal) in tool_proposals.iter().enumerate() {
         let verdict = &verdicts[i];
         if !verdict.is_allowed() {
             continue;
@@ -62,25 +81,36 @@ pub(super) async fn process_many(
             ActionKind::Delegate,
             kernel_proposals[i].payload.clone(),
         );
-        let ctx = ExecuteContext::new(kernel.agent_id, action_id, workspace.clone());
 
-        exec_contexts.push(ctx);
-        exec_actions.push(action);
+        if let Some(host) = kernel.config.plugin_hooks.as_ref() {
+            if let Some(effect) = fire_pre_tool_use_for_batch(host, proposal, action_id)? {
+                per_slot_action[i] = Some(action);
+                per_slot_effect[i] = Some(effect);
+                continue;
+            }
+        }
+
+        per_slot_action[i] = Some(action.clone());
+        let ctx = ExecuteContext::new(kernel.agent_id, action_id, workspace.clone());
+        dispatch_indices.push(i);
+        dispatch_contexts.push(ctx);
+        dispatch_actions.push(action);
     }
 
-    let exec_futures = exec_contexts
+    let exec_futures = dispatch_contexts
         .iter()
-        .zip(exec_actions.iter())
+        .zip(dispatch_actions.iter())
         .map(|(ctx, action)| kernel.execute_with_timeout(ctx, action));
+    let dispatched_effects: Vec<Effect> = futures_util::future::join_all(exec_futures).await;
 
-    let effects: Vec<Effect> = futures_util::future::join_all(exec_futures).await;
+    for (slot, effect) in dispatch_indices.iter().zip(dispatched_effects.into_iter()) {
+        per_slot_effect[*slot] = Some(effect);
+    }
 
-    let total = tool_proposals.len();
     let base_seq = kernel.reserve_seq_range(total)?;
 
     let mut results = Vec::with_capacity(total);
     let mut entries = Vec::with_capacity(total);
-    let mut approved_idx = 0;
 
     for (i, proposal) in tool_proposals.into_iter().enumerate() {
         let seq = base_seq + i as u64;
@@ -93,9 +123,12 @@ pub(super) async fn process_many(
 
         let verdict = &verdicts[i];
         let executed = if verdict.is_allowed() {
-            let action = exec_actions[approved_idx].clone();
-            let effect = effects[approved_idx].clone();
-            approved_idx += 1;
+            let action = per_slot_action[i]
+                .take()
+                .expect("allowed verdict must have produced an action");
+            let effect = per_slot_effect[i]
+                .take()
+                .expect("allowed verdict must have produced an effect");
             Some((action, effect))
         } else {
             None
@@ -123,4 +156,41 @@ pub(super) async fn process_many(
         .map_err(|e| crate::KernelError::Store(format!("append_entries_batch: {e}")))?;
 
     Ok(results)
+}
+
+/// Phase 10 carve-out 5a — `PreToolUse` pre-dispatch firing for the
+/// batch flow. Mirrors `single::fire_pre_tool_use_and_maybe_block`:
+/// the synthetic [`Effect`] carries a `tool_call_blocked_by_hook`
+/// JSON-discriminated payload so a single deterministic sequence
+/// number is consumed per blocked slot (no parallel
+/// `write_system_record` write that would race the batch's
+/// `reserve_seq_range`).
+fn fire_pre_tool_use_for_batch(
+    host: &aura_plugin_hooks::PluginHookHost,
+    proposal: &ToolProposal,
+    action_id: ActionId,
+) -> Result<Option<Effect>, crate::KernelError> {
+    if host.is_empty(aura_plugin_hooks::HookEvent::PreToolUse) {
+        return Ok(None);
+    }
+    let args_text = serde_json::to_string(&proposal.args).unwrap_or_default();
+    let outcome = host.fire_pre_tool_use(&proposal.tool, &args_text, &proposal.tool_use_id);
+    if let aura_plugin_hooks::HookOutcome::Block { reason } = outcome.decision {
+        let payload = serde_json::json!({
+            "kind": "tool_call_blocked_by_hook",
+            "tool_name": proposal.tool,
+            "tool_use_id": proposal.tool_use_id,
+            "reason": reason,
+        });
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|e| crate::KernelError::Serialization(format!("block payload: {e}")))?;
+        tracing::info!(
+            tool_name = %proposal.tool,
+            tool_use_id = %proposal.tool_use_id,
+            "PreToolUse hook returned Block; dispatch aborted (Phase 10 5a, batch path)"
+        );
+        let effect = Effect::failed(action_id, EffectKind::Agreement, Bytes::from(bytes));
+        return Ok(Some(effect));
+    }
+    Ok(None)
 }

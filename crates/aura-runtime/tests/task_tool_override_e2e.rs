@@ -3,6 +3,12 @@
 //! [`OverrideManifest`]. The manifest is written into the
 //! `RecordKind::SubagentSpawn` audit payload; this test inspects the
 //! audit log to assert the round-trip.
+//!
+//! Phase 10 carve-out 3: the on-disk wire format moved from
+//! `TransactionType::System` + JSON discriminator to the typed
+//! `TransactionType::SubagentSpawn` variant; the payload no
+//! longer carries the `kind: "subagent_spawn"` field. The
+//! [`applied_fields`] scanner below is updated to match.
 
 use std::sync::Arc;
 
@@ -71,15 +77,12 @@ fn base_request(parent_agent_id: AgentId) -> SubagentDispatchRequest {
 fn applied_fields(store: &RocksStore, parent_agent_id: AgentId) -> Vec<OverriddenField> {
     let records = store.scan_record(parent_agent_id, 1, 100).expect("scan");
     for entry in records {
-        if entry.tx.tx_type != aura_core::TransactionType::System {
+        if entry.tx.tx_type != aura_core::TransactionType::SubagentSpawn {
             continue;
         }
         let Ok(payload) = serde_json::from_slice::<Value>(&entry.tx.payload) else {
             continue;
         };
-        if payload.get("kind").and_then(Value::as_str) != Some("subagent_spawn") {
-            continue;
-        }
         let manifest = payload
             .get("override_manifest")
             .cloned()

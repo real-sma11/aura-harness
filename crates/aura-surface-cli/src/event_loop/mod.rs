@@ -1,11 +1,11 @@
 //! Event processing loop for the terminal UI mode.
 
-mod agent_events;
-mod handlers;
-mod record_ui;
+pub(crate) mod agent_events;
+pub(crate) mod handlers;
+pub(crate) mod record_ui;
 
-use agent_events::forward_agent_events;
-use record_ui::send_record_to_ui;
+pub(crate) use agent_events::forward_agent_events;
+pub(crate) use record_ui::send_record_to_ui;
 
 use aura_agent::{AgentLoop, KernelModelGateway, KernelToolGateway, ProcessManager};
 use aura_core::{AgentId, Transaction};

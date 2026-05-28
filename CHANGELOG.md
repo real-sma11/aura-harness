@@ -7,6 +7,104 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Architecture refactor — Phase 10 residual cleanup
+
+`refactor(arch-phase-10)` consolidates the five carve-outs the
+prior subagents flagged but couldn't cleanly fit into the
+tightened scopes of Phases 7b, 8, and 9. Each carve-out is paired
+with a fresh test pin, and the closed-taxonomy schema bump is
+done in one combined increment so the on-disk audit log never
+sees an intermediate half-migrated shape.
+
+- **Carve-out 1 — Binary body migration.** The full body of
+  `src/main.rs` (the `aura` binary) and
+  `crates/aura-runtime/src/main.rs` (the `aura-node` binary) is
+  lifted out of the binary crates. The new entry points
+  [`aura_surface_cli::run`] and [`aura_runtime::run_node`]
+  (re-exported as [`aura_surface_cli::run_node`] to keep the
+  documented surface path callable) own every line of useful
+  logic. The two `main.rs` files are reduced to ≤ 10 lines
+  apiece — a `tokio::main`, a `dotenvy::dotenv` call, optional
+  tracing-subscriber init, and the delegated `run().await` /
+  `run_node().await`. The `tests/cli_golden.rs` pins remain
+  byte-identical across the rename.
+- **Carve-out 2 — `RecordKind::SessionStop`.** A new variant
+  emitted by [`FleetDaemon::run`] at session-end via
+  [`aura_agent_kernel::write_system_record`]. Carries
+  `session_id`, `agent_id`, `total_iterations`,
+  `total_input_tokens`, `total_output_tokens`, `duration_ms`,
+  and `clean_shutdown: bool`. Sessions registered through the
+  new `FleetDaemon::record_session` API are emitted as one row
+  each on shutdown.
+- **Carve-out 3 — Spawn-record on-disk wire format.**
+  `SubagentSpawn` audit rows now use the typed
+  `TransactionType::SubagentSpawn` variant instead of the
+  Phase 7a `TransactionType::System` + JSON discriminator
+  workaround. The payload retains the same `OverrideManifest`
+  shape but no longer carries the `kind: "subagent_spawn"`
+  field. The `SubagentResult` Phase 7a guarantee (byte-identical
+  to callers who don't override anything) is preserved — only
+  the on-disk audit row changes shape.
+- **Carve-out 4 — `daemon.run()` external shutdown token.**
+  [`FleetDaemon::run`] reshapes to
+  `pub async fn run(&self, shutdown: CancellationToken) -> Result<(), FleetDaemonError>`.
+  The mailbox loop selects on `shutdown.cancelled()` alongside
+  the receiver; on shutdown it cancels every in-flight child
+  through the daemon-owned `fleet_shutdown` token, polls
+  [`FleetRegistry::running_count`] for cooperative drain inside
+  the configurable grace window (default 30s,
+  [`DaemonConfig::shutdown_grace`]), hands off
+  `SpawnMode::Detached` survivors to the [`OrphanStore`], and
+  emits one `RecordKind::SessionStop { clean_shutdown }` per
+  tracked session.
+- **Carve-out 5a — `PreToolUse` mid-flight cancellation.**
+  `PreToolUse` hooks now fire BEFORE tool dispatch inside the
+  kernel (`crates/aura-agent-kernel/src/kernel/tools/single.rs`
+  + `batch.rs`). `HookOutcome::Block` aborts the dispatch and
+  produces a synthetic `Effect::failed` whose payload embeds the
+  documented `{"kind": "tool_call_blocked_by_hook", "tool_name":
+  ..., "tool_use_id": ..., "reason": ...}` JSON discriminator so
+  the audit log captures the block without consuming a separate
+  sequence number (the single tool-proposal `RecordEntry` is the
+  one source of truth). The agent loop sees a clean rejection
+  through the synthetic effect.
+- **Carve-out 5b — `PermissionRequest` kernel-side wiring.**
+  [`KernelConfig`] gains a `pub plugin_hooks:
+  Option<Arc<PluginHookHost>>` field (defaulting to `None` for
+  backward compat). When set, `Kernel::resolve_prompt_verdict`
+  fires `PermissionRequest` hooks BEFORE the interactive
+  `ToolApprovalPrompter` runs. `HookOutcome::Approve`
+  short-circuits to `PolicyVerdict::Allow`; `HookOutcome::Deny`
+  short-circuits to `PolicyVerdict::Deny`; any other outcome
+  falls through to the interactive prompt.
+- **Carve-out 5c — `ConnectorRegistry` last-wins API.**
+  [`ConnectorRegistry`] gains `replace` and `remove` methods.
+  The Phase 8 plugin materialiser
+  (`aura-plugin-core::runtime::load_plugin_contributions`) now
+  calls `replace` instead of `register` when a plugin-supplied
+  connector conflicts with an existing one, logging the
+  displacement with `tracing::info!`.
+
+#### Schema-version bump — `aura-store-record::SCHEMA_VERSION`
+
+The closed-taxonomy enum additions are combined into a single
+schema-version increment: `SCHEMA_VERSION` advances from `1`
+(implicit in Phases 1 through 9 — the constant did not yet
+exist) to `2`. The new variants are
+`RecordKind::SessionStop`,
+`RecordKind::ToolCallBlockedByHook`, and
+`TransactionType::SubagentSpawn`. Pre-bump audit rows continue
+to deserialize: serde-default arms for `RecordKind` and
+`TransactionType` fall back to the Phase 2 forward-compat
+`Unknown` variants, so an older `aura-node` reading a
+schema-v2 log degrades to "I don't know that variant, skip it"
+rather than panicking. The kernel WRITES only the new format
+going forward. Operators with mixed-version fleets should
+upgrade readers before writers; otherwise pre-bump readers
+will treat all SessionStop / ToolCallBlockedByHook /
+SubagentSpawn rows as `Unknown`-class — recoverable but not
+queryable. There is no destructive migration step.
+
 ### Architecture refactor — Phases 1 through 9
 
 The architecture refactor lands the 10-layer crate stack (`core` →

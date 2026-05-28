@@ -12,8 +12,46 @@ aura-config = { path = "../aura-config" }
 aura-surface-sdk = { path = "../aura-surface-sdk" }
 aura-surface-terminal = { path = "../aura-surface-terminal" }
 aura-surface-auth = { path = "../aura-surface-auth" }
+# Phase 10 carve-out 1: the binary body migration moves the full
+# `aura` and `aura-node` entrypoint logic into this crate, so we
+# now pull in every dep the binaries previously named directly.
+aura-core = { path = "../aura-core" }
+aura-terminal = { path = "../aura-terminal" }
+aura-kernel = { path = "../aura-kernel" }
+aura-store = { path = "../aura-store" }
+aura-reasoner = { path = "../aura-reasoner" }
+aura-tools = { path = "../aura-tools" }
+aura-agent = { path = "../aura-agent" }
+aura-memory = { path = "../aura-memory" }
+aura-auth = { path = "../aura-auth" }
+aura-runtime = { path = "../aura-runtime" }
+aura-plugin-core = { path = "../aura-plugin-core" }
+aura-fleet-spawn = { path = "../aura-fleet-spawn" }
+aura-fleet-registry = { path = "../aura-fleet-registry" }
+aura-fleet-daemon = { path = "../aura-fleet-daemon" }
 clap = { version = "4.5", features = ["derive"] }
 thiserror = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+colored = { workspace = true }
+rpassword = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+tabwriter = "1.4"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
 
 # Phase 9: aura-surface-cli is the surface-layer composition root.
 # The sibling surface crates are listed as direct dependencies so
@@ -23,7 +61,7 @@ thiserror = { workspace = true }
 # `aura-config` is similarly held here for the incremental
 # migration of the daemon-config wiring.
 [package.metadata.cargo-machete]
-ignored = ["aura-config", "aura-surface-sdk", "aura-surface-terminal", "aura-surface-auth"]
+ignored = ["aura-surface-sdk", "aura-surface-terminal", "aura-surface-auth", "aura-fleet-daemon", "aura-fleet-registry"]
 
 [lints]
 workspace = true

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 /// Tracks forwarder lifecycle so the caller can finalize streaming/thinking.
-pub(super) struct ForwarderState {
+pub(crate) struct ForwarderState {
     pub streaming_active: bool,
     pub thinking_active: bool,
     pub had_text: bool,
@@ -116,7 +116,7 @@ impl TurnEventSink for UiCommandSink {
 }
 
 /// Reads [`AgentLoopEvent`]s and translates them into [`UiCommand`]s.
-pub(super) async fn forward_agent_events(
+pub(crate) async fn forward_agent_events(
     mut rx: tokio::sync::mpsc::Receiver<AgentLoopEvent>,
     commands: mpsc::Sender<UiCommand>,
 ) -> ForwarderState {

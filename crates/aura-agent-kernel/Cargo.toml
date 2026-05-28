@@ -13,6 +13,7 @@ aura-store = { path = "../aura-store" }
 aura-store-record = { path = "../aura-store-record" }
 aura-store-snapshot = { path = "../aura-store-snapshot" }
 aura-reasoner = { path = "../aura-reasoner" }
+aura-plugin-hooks = { path = "../aura-plugin-hooks" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

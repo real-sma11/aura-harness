@@ -294,29 +294,25 @@ fn materialise_one(
         }
     }
 
-    // (4) Connectors: last-wins per the spec. The Phase 4c registry
-    //     is first-active-wins; for plugin-supplied overrides of
-    //     built-in connectors we re-register by removing the old
-    //     entry first. The connector registry doesn't expose a
-    //     `remove`; we instead document this as best-effort and log
-    //     the conflict.
+    // (4) Connectors: last-wins per the Phase 8 spec, fully wired
+    //     in Phase 10. Plugin-supplied contributions replace any
+    //     existing entry under the same connector id (built-in or
+    //     earlier-plugin) via [`ConnectorRegistry::replace`]. The
+    //     displaced entry is logged at `info!` so operators can
+    //     trace where a connector slot's owner changed.
     for connector in &manifest.contributes.connectors {
         let entry = ConnectorEntry {
             id: connector.id.clone(),
             plugin_id: plugin_ref.id.clone(),
             endpoint: connector.endpoint.clone(),
         };
-        if let Err(err) = connectors.register(entry) {
-            warn!(
+        if let Some(previous) = connectors.replace(entry) {
+            info!(
                 plugin_id = %plugin_ref.id,
                 connector_id = %connector.id,
-                error = %err,
-                "connector registration rejected (already registered)"
+                previous_plugin_id = %previous.plugin_id,
+                "connector slot replaced by later-loaded plugin (last-wins)"
             );
-            // Phase 8 documents last-wins for plugin-vs-builtin
-            // overrides; the current registry does not expose a
-            // remove. Tracked as a follow-up; for now we log and
-            // continue (the existing entry keeps the slot).
         }
     }
 }

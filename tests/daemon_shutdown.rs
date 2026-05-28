@@ -1,48 +1,32 @@
-//! Phase 9 — daemon shutdown integration test.
+//! Phase 10 — daemon shutdown integration test.
 //!
 //! Exercises the three documented SIGINT-style shutdown scenarios
-//! against an in-process [`FleetDaemon`]:
+//! against an in-process [`FleetDaemon`] driven through the
+//! reshaped [`FleetDaemon::run(shutdown)`] entry. Each scenario
+//! asserts that a [`aura_store_record::RecordKind::SessionStop`]
+//! audit row is written via [`aura_agent_kernel::write_system_record`]
+//! with the documented `clean_shutdown` boolean.
 //!
 //! 1. **Mid-turn cancellation** — a Wait-mode child observes the
-//!    parent-supplied [`CancellationToken`] cancel and short-circuits
-//!    with a [`SubagentExit::Cancelled`] tag. The dispatcher then
-//!    returns control to the caller (the in-process simulation of
-//!    "current iteration completes, then daemon exits with code 0").
+//!    daemon-supplied [`CancellationToken`] cancel inside its
+//!    `tokio::select!` arm and short-circuits with a
+//!    [`SubagentExit::Cancelled`] tag. The daemon's shutdown
+//!    sequence emits a `SessionStop { clean_shutdown: true }`.
 //!
 //! 2. **Mid-tool-call cancellation with grace period** — a slow
-//!    child runner is cancelled before its 30 s grace deadline; the
-//!    runner finishes gracefully inside the cancellation arm of its
-//!    `tokio::select!` and the dispatcher returns the cancelled
-//!    [`SubagentResult`].
+//!    child runner is cancelled before its 30 s grace deadline;
+//!    the runner finishes inside the cancellation arm of its
+//!    `tokio::select!` and the daemon emits
+//!    `SessionStop { clean_shutdown: true }`.
 //!
-//! 3. **Detached children survive as orphans** — a `SpawnMode::Detached`
-//!    child writes an orphan record before its parent's task future
-//!    is dropped. The orphan is still readable via
-//!    [`OrphanStore::list`] after the parent goes away — i.e.
-//!    reapable through the `aura agents reap` surface (Phase 7b
-//!    machinery).
-//!
-//! ## Deviations from the original spec
-//!
-//! The Phase 9 task description references a
-//! `RecordKind::SessionStop` audit record. That variant is not
-//! present in the closed [`aura_store_record::RecordKind`]
-//! taxonomy today (only `ChildOrphanedByParentDeath`,
-//! `ChildCancelledByParentDeath`, `OrphanReaped`, etc.). This test
-//! asserts the **structural** shutdown contract — cooperative
-//! cancellation propagation + persisted orphan surface — rather than
-//! the specific kind tag, so the test remains valid until a future
-//! phase grows the taxonomy. The deviation is documented here so the
-//! test can be tightened in Phase 10 once `RecordKind::SessionStop`
-//! lands.
-//!
-//! The test also operates against the dispatcher's `spawn_one` seam
-//! rather than the full [`FleetDaemon::run`] mailbox loop. The
-//! daemon's run loop holds a sender clone via its own
-//! [`FleetDaemonHandle`] for the duration of `&self`, so the loop
-//! cannot terminate without dropping the daemon itself — which we
-//! cannot do mid-run. Phase 10 will reshape `run()` to accept an
-//! external shutdown token and the test will be re-pointed.
+//! 3. **Detached children survive as orphans** — a
+//!    `SpawnMode::Detached` child writes an orphan record before
+//!    its parent's task future is dropped. The orphan is still
+//!    readable via [`OrphanStore::list`] after the daemon exits,
+//!    and the daemon emits
+//!    `SessionStop { clean_shutdown: true }` because the orphan
+//!    handoff is the documented clean-shutdown path for detached
+//!    children.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -50,10 +34,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use aura_agent_subagent::{ParentContext, SubagentLineage, SubagentOverrides};
-use aura_core::{AgentId, SubagentExit, SubagentResult};
+use aura_core::{AgentId, SubagentExit, SubagentResult, TransactionType};
 use aura_core_modes::{AgentMode, KernelMode, ModeProfile, ReplayMode, SandboxMode, SpawnMode};
 use aura_core_permissions::{Capability, Permissions};
-use aura_fleet_daemon::{AgentJob, DaemonConfig, FleetDaemon};
+use aura_fleet_daemon::{
+    AgentJob, DaemonConfig, FleetDaemon, SessionRecord, SessionStopRecordPayload,
+    RECORD_KIND_SESSION_STOP,
+};
 use aura_fleet_spawn::{
     ChildRunContext, ChildRunError, ChildRunner, OrphanStore, SpawnHandle, SpawnRequest,
 };
@@ -150,56 +137,108 @@ fn open_test_store(dir: &std::path::Path) -> Arc<dyn aura_store::Store> {
 
 /// Helper: build a fully-wired [`FleetDaemon`] backed by the supplied
 /// runner with an explicit orphan root inside the supplied tempdir.
+/// Returns the daemon, the underlying store handle (so the test can
+/// scan it for `SessionStop` audit rows after shutdown), and the
+/// orphan root path.
 fn make_daemon(
     tempdir: &std::path::Path,
     runner: Arc<dyn ChildRunner>,
-) -> (Arc<FleetDaemon>, std::path::PathBuf) {
+) -> (
+    Arc<FleetDaemon>,
+    Arc<dyn aura_store::Store>,
+    std::path::PathBuf,
+) {
     let orphan_root = tempdir.join("orphans");
     let store = open_test_store(tempdir);
     let daemon = Arc::new(FleetDaemon::new(
-        store,
+        store.clone(),
         runner,
         DaemonConfig {
             orphan_root: Some(orphan_root.clone()),
+            // Short grace so the test stays fast even when the
+            // runner is non-cooperative.
+            shutdown_grace: Duration::from_secs(2),
             ..DaemonConfig::default()
         },
     ));
-    (daemon, orphan_root)
+    (daemon, store, orphan_root)
+}
+
+/// Scan the agent's record log for a `SessionStop` System audit
+/// row and return the parsed payload. Returns `None` if no row was
+/// written.
+fn find_session_stop(
+    store: &Arc<dyn aura_store::Store>,
+    agent_id: AgentId,
+) -> Option<SessionStopRecordPayload> {
+    let entries = store.scan_record(agent_id, 1, 200).ok()?;
+    for entry in entries {
+        if entry.tx.tx_type != TransactionType::System {
+            continue;
+        }
+        let payload: SessionStopRecordPayload = match serde_json::from_slice(&entry.tx.payload) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if payload.kind == RECORD_KIND_SESSION_STOP {
+            return Some(payload);
+        }
+    }
+    None
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigint_during_in_flight_turn_cancels_cooperatively() {
-    // Scenario 1: an in-flight Wait turn observes a cancel-token fire
-    // and short-circuits cooperatively. The dispatcher returns the
-    // child's `SubagentExit::Cancelled` result — the in-process
-    // simulation of "running turn completes the current iteration,
-    // then daemon exits".
+    // Scenario 1: an in-flight Wait turn observes the daemon's
+    // fleet-shutdown cancel-token fire and short-circuits
+    // cooperatively. After `run(shutdown)` returns, the audit
+    // log contains a `SessionStop { clean_shutdown: true }` row
+    // for the registered session.
     let tempdir = tempfile::tempdir().expect("temp dir");
     let runner = Arc::new(CooperativeRunner::new(Duration::from_secs(60)));
-    let (daemon, _orphans) = make_daemon(tempdir.path(), runner.clone());
+    let (daemon, store, _orphans) = make_daemon(tempdir.path(), runner.clone());
 
-    let cancel_token = CancellationToken::new();
+    let session_id = "session-mid-turn";
+    let parent_ctx = parent_at(AgentMode::Agent);
+    let session_agent = parent_ctx.agent_id;
+    daemon
+        .record_session(SessionRecord {
+            session_id: session_id.to_string(),
+            agent_id: session_agent,
+            total_iterations: 3,
+            total_input_tokens: 100,
+            total_output_tokens: 50,
+            started_at: std::time::Instant::now(),
+        })
+        .await;
+
+    let shutdown = CancellationToken::new();
+    let daemon_for_run = daemon.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_handle = tokio::spawn(async move { daemon_for_run.run(shutdown_for_run).await });
+
+    // Spawn a Wait-mode child against the dispatcher so the
+    // daemon-owned fleet shutdown token can cancel it when
+    // `shutdown.cancel()` fires.
     let dispatcher = daemon.handle().dispatcher();
-
-    let job_cancel = cancel_token.clone();
-    let dispatcher_for_task = dispatcher.clone();
     let spawn_task = tokio::spawn(async move {
-        dispatcher_for_task
+        dispatcher
             .spawn_one(AgentJob {
                 request: SpawnRequest {
-                    parent: parent_at(AgentMode::Agent),
+                    parent: parent_ctx,
                     overrides: SubagentOverrides::default(),
                     prompt: "in-flight-turn".to_string(),
                     originating_user_id: Some("user".to_string()),
                     tool_call_id: None,
-                    cancellation: Some(job_cancel),
+                    cancellation: None,
                 },
                 mode: SpawnMode::Wait,
             })
             .await
     });
 
-    // Wait for the child runner to be in-flight before firing cancel.
+    // Wait for the child runner to be in-flight before firing the
+    // external shutdown token.
     for _ in 0..200 {
         if runner.invocations() >= 1 {
             break;
@@ -207,9 +246,9 @@ async fn sigint_during_in_flight_turn_cancels_cooperatively() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(runner.invocations(), 1);
-    cancel_token.cancel();
+    shutdown.cancel();
 
-    let handle = tokio::time::timeout(Duration::from_secs(5), spawn_task)
+    let handle = tokio::time::timeout(Duration::from_secs(10), spawn_task)
         .await
         .expect("spawn_one returns inside the grace window")
         .expect("join handle")
@@ -224,34 +263,66 @@ async fn sigint_during_in_flight_turn_cancels_cooperatively() {
         result.exit
     );
     assert_eq!(runner.cancelled_invocations(), 1);
+
+    tokio::time::timeout(Duration::from_secs(10), run_handle)
+        .await
+        .expect("daemon.run returns inside the grace window")
+        .expect("daemon join")
+        .expect("daemon.run ok");
+
+    // Carve-out 2 acceptance: the audit log contains a
+    // `SessionStop { clean_shutdown: true }` row for the
+    // registered session.
+    let session_stop =
+        find_session_stop(&store, session_agent).expect("SessionStop audit row written");
+    assert!(
+        session_stop.clean_shutdown,
+        "cooperative cancellation must produce clean_shutdown: true"
+    );
+    assert_eq!(session_stop.session_id, session_id);
+    assert_eq!(session_stop.total_iterations, 3);
+    assert_eq!(session_stop.total_input_tokens, 100);
+    assert_eq!(session_stop.total_output_tokens, 50);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigint_during_in_flight_tool_call_uses_grace_period() {
     // Scenario 2: tool-call inside the runner sleeps; cancellation
-    // fires inside the documented 30 s grace window and the runner
+    // fires inside the documented grace window and the runner
     // unwinds gracefully through its select-on-cancel arm.
     let tempdir = tempfile::tempdir().expect("temp dir");
-    let grace_period = Duration::from_secs(30);
-    // Initial duration deliberately exceeds the grace window so the
-    // cancel-arm is the only successful exit path.
-    let runner = Arc::new(CooperativeRunner::new(grace_period * 2));
-    let (daemon, _orphans) = make_daemon(tempdir.path(), runner.clone());
+    let runner = Arc::new(CooperativeRunner::new(Duration::from_secs(60)));
+    let (daemon, store, _orphans) = make_daemon(tempdir.path(), runner.clone());
 
-    let cancel_token = CancellationToken::new();
+    let parent_ctx = parent_at(AgentMode::Agent);
+    let session_agent = parent_ctx.agent_id;
+    daemon
+        .record_session(SessionRecord {
+            session_id: "session-tool-call".to_string(),
+            agent_id: session_agent,
+            total_iterations: 5,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            started_at: std::time::Instant::now(),
+        })
+        .await;
+
+    let shutdown = CancellationToken::new();
+    let daemon_for_run = daemon.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_handle = tokio::spawn(async move { daemon_for_run.run(shutdown_for_run).await });
+
     let dispatcher = daemon.handle().dispatcher();
-    let job_cancel = cancel_token.clone();
-    let dispatcher_for_task = dispatcher.clone();
     let spawn_task = tokio::spawn(async move {
-        dispatcher_for_task
+        dispatcher
             .spawn_one(AgentJob {
                 request: SpawnRequest {
-                    parent: parent_at(AgentMode::Agent),
+                    parent: parent_ctx,
                     overrides: SubagentOverrides::default(),
                     prompt: "in-flight-tool-call".to_string(),
                     originating_user_id: Some("user".to_string()),
                     tool_call_id: None,
-                    cancellation: Some(job_cancel),
+                    cancellation: None,
                 },
                 mode: SpawnMode::Wait,
             })
@@ -265,16 +336,16 @@ async fn sigint_during_in_flight_tool_call_uses_grace_period() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let cancel_at = std::time::Instant::now();
-    cancel_token.cancel();
+    shutdown.cancel();
 
-    let handle = tokio::time::timeout(Duration::from_secs(5), spawn_task)
+    let handle = tokio::time::timeout(Duration::from_secs(10), spawn_task)
         .await
         .expect("spawn_one returns inside the grace window")
         .expect("join handle")
         .expect("spawn_one ok");
     let drained_in = cancel_at.elapsed();
     assert!(
-        drained_in < grace_period,
+        drained_in < Duration::from_secs(30),
         "child must observe cancel inside grace window (drained_in={drained_in:?})"
     );
     let SpawnHandle::Completed(result) = handle else {
@@ -282,26 +353,54 @@ async fn sigint_during_in_flight_tool_call_uses_grace_period() {
     };
     assert!(matches!(result.exit, SubagentExit::Cancelled));
     assert_eq!(runner.cancelled_invocations(), 1);
+
+    tokio::time::timeout(Duration::from_secs(10), run_handle)
+        .await
+        .expect("daemon.run returns inside the grace window")
+        .expect("daemon join")
+        .expect("daemon.run ok");
+
+    let session_stop =
+        find_session_stop(&store, session_agent).expect("SessionStop audit row written");
+    assert!(
+        session_stop.clean_shutdown,
+        "grace-window settle must produce clean_shutdown: true"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigint_with_detached_children_alive_persists_orphans_and_is_reapable() {
-    // Scenario 3: a `SpawnMode::Detached` child must write an orphan
-    // record before its parent's task future is dropped. After the
-    // parent goes away, the orphan record is reapable via
-    // `aura agents reap` (the on-disk surface `OrphanStore::list()`
-    // walks).
+    // Scenario 3: a `SpawnMode::Detached` child writes an orphan
+    // record. After daemon shutdown the orphan record persists so
+    // `aura agents reap` can clean it up; the audit log carries a
+    // `SessionStop { clean_shutdown: true }` row.
     let tempdir = tempfile::tempdir().expect("temp dir");
-    // Long-running detached child so the orphan record is visible
-    // before the runner returns.
     let runner = Arc::new(CooperativeRunner::new(Duration::from_secs(30)));
-    let (daemon, orphan_root) = make_daemon(tempdir.path(), runner.clone());
+    let (daemon, store, orphan_root) = make_daemon(tempdir.path(), runner.clone());
+
+    let parent_ctx = parent_at(AgentMode::Agent);
+    let session_agent = parent_ctx.agent_id;
+    daemon
+        .record_session(SessionRecord {
+            session_id: "session-detached".to_string(),
+            agent_id: session_agent,
+            total_iterations: 1,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            started_at: std::time::Instant::now(),
+        })
+        .await;
+
+    let shutdown = CancellationToken::new();
+    let daemon_for_run = daemon.clone();
+    let shutdown_for_run = shutdown.clone();
+    let run_handle = tokio::spawn(async move { daemon_for_run.run(shutdown_for_run).await });
 
     let dispatcher = daemon.handle().dispatcher();
     let handle = dispatcher
         .spawn_one(AgentJob {
             request: SpawnRequest {
-                parent: parent_at(AgentMode::Agent),
+                parent: parent_ctx,
                 overrides: SubagentOverrides::default(),
                 prompt: "detached-child".to_string(),
                 originating_user_id: Some("user".to_string()),
@@ -317,9 +416,8 @@ async fn sigint_with_detached_children_alive_persists_orphans_and_is_reapable() 
         panic!("Detached spawn returns SpawnHandle::Detached");
     };
 
-    // The spawner writes the orphan record before returning from the
-    // detached path. The on-disk surface is the source of truth that
-    // `aura agents reap` reads after a daemon restart.
+    // The spawner writes the orphan record before returning from
+    // the detached path.
     let inspect_store = OrphanStore::new(orphan_root.clone());
     let orphan = inspect_store
         .load(detached.agent_id)
@@ -329,12 +427,16 @@ async fn sigint_with_detached_children_alive_persists_orphans_and_is_reapable() 
     assert_eq!(orphan.mode, AgentMode::Agent);
     assert_eq!(orphan.agent_id, detached.agent_id);
 
-    // Simulate parent death: drop every dispatcher / detached handle
-    // the parent owned. The orphan record persists.
     drop(detached);
-    drop(dispatcher);
-    drop(daemon);
 
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), run_handle)
+        .await
+        .expect("daemon.run returns inside the grace window")
+        .expect("daemon join")
+        .expect("daemon.run ok");
+
+    // Orphan record persists across daemon shutdown.
     let post = inspect_store.list().expect("list orphans post-shutdown");
     assert_eq!(
         post.len(),
@@ -342,9 +444,16 @@ async fn sigint_with_detached_children_alive_persists_orphans_and_is_reapable() 
         "orphan record must survive parent death so `aura agents reap` can clean it up"
     );
 
+    // Carve-out 2 acceptance.
+    let session_stop =
+        find_session_stop(&store, session_agent).expect("SessionStop audit row written");
+    assert!(
+        session_stop.clean_shutdown,
+        "detached children handed to orphan store is the documented clean-shutdown path"
+    );
+
     // Reap via the public OrphanStore surface (the same one
-    // `aura agents reap` calls). Idempotency check: a second reap
-    // is a no-op.
+    // `aura agents reap` calls). Idempotency check.
     inspect_store
         .remove(post[0].agent_id)
         .expect("first reap ok");
@@ -356,7 +465,5 @@ async fn sigint_with_detached_children_alive_persists_orphans_and_is_reapable() 
         "orphan store must be empty after reap"
     );
 
-    // Sanity: at least one in-flight detached invocation was started
-    // before the parent dropped.
     assert!(runner.invocations() >= 1);
 }

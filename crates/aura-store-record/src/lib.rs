@@ -57,5 +57,30 @@ pub use log::{RecordLog, RecordLogError};
 pub use payload::{summarize_payload, RecordPayload, DEFAULT_SUMMARY_CHUNK_BYTES};
 pub use record::{RecordEntry, RecordEntryBuilder, KERNEL_VERSION};
 
+/// Schema version of the on-disk record / transaction wire format.
+///
+/// Phase 10 bump (v1 → v2) consolidates three closed-enum additions:
+///
+/// - [`RecordKind::SessionStop`] — session-lifecycle audit row
+///   emitted by the fleet daemon's shutdown path.
+/// - [`RecordKind::ToolCallBlockedByHook`] — audit row replacing
+///   `ToolCallResult` when a `PreToolUse` hook blocks dispatch.
+/// - [`aura_core::TransactionType::SubagentSpawn`] — typed wire
+///   variant replacing the Phase 7a `TransactionType::System +
+///   "kind": "subagent_spawn"` JSON-discriminator workaround.
+///
+/// **Migration policy**: pre-bump (v1) records continue to parse
+/// without churn — every unknown `RecordKind` tag falls through to
+/// [`RecordKind::Unknown`] (Phase 2 forward-compat variant) so an
+/// older binary reading a v2 log gracefully degrades on the new
+/// variants. The kernel WRITES only v2 going forward. Operators
+/// rolling back a binary must accept that v2-only audit rows
+/// (`SessionStop`, `ToolCallBlockedByHook`, `SubagentSpawn`) will
+/// appear as `Unknown` instead of being lost.
+///
+/// See `CHANGELOG.md` Phase 10 entry for the operator-facing
+/// migration note.
+pub const SCHEMA_VERSION: u32 = 2;
+
 #[cfg(test)]
 mod tests;

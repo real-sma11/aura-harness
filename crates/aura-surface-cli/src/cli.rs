@@ -1,6 +1,6 @@
 //! CLI argument definitions and parsing.
 
-use aura_surface_cli::ModeFlag;
+use crate::ModeFlag;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 

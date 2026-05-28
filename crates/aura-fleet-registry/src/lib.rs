@@ -245,6 +245,21 @@ impl FleetRegistry {
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
     }
+
+    /// Number of slots whose lifecycle phase is
+    /// [`AgentState::Running`]. Phase 10 carve-out 4 polls this
+    /// from the fleet daemon's shutdown sequence to decide when
+    /// the grace window can end early (count == 0) and to emit
+    /// `clean_shutdown: false` when the grace window expires
+    /// while the count is still > 0.
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.inner
+            .read()
+            .values()
+            .filter(|slot| slot.state == AgentState::Running)
+            .count()
+    }
 }
 
 #[cfg(test)]

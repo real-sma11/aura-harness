@@ -31,6 +31,7 @@ use crate::ExecutorRouter;
 use async_trait::async_trait;
 use aura_core::{AgentId, RecordEntry, RuntimeCapabilityInstall, ToolState};
 use aura_core_modes::KernelMode;
+use aura_plugin_hooks::PluginHookHost;
 use aura_reasoner::ModelProvider;
 use aura_store::Store;
 use aura_store_record::DEFAULT_SUMMARY_CHUNK_BYTES;
@@ -119,6 +120,20 @@ pub struct KernelConfig {
     /// [`aura_store_record::DEFAULT_SUMMARY_CHUNK_BYTES`] (1 KiB).
     /// Ignored when `kernel_mode == KernelMode::Audited`.
     pub audited_lite_threshold_bytes: usize,
+    /// Phase 10 carve-out 5b: optional [`PluginHookHost`] consulted
+    /// by [`Kernel::resolve_prompt_verdict`] before the interactive
+    /// `ToolApprovalPrompter` is invoked. A registered
+    /// `PermissionRequest` handler that returns
+    /// [`aura_plugin_hooks::HookOutcome::Approve`] short-circuits
+    /// the prompt with `PolicyVerdict::Allow`, and `Deny` with
+    /// `PolicyVerdict::Deny { reason }`. Any other outcome
+    /// (`Continue` / `TimedOut`) falls through to the interactive
+    /// prompt.
+    ///
+    /// `None` (default) preserves Phase 8 behaviour exactly — the
+    /// kernel never fires `PermissionRequest` hooks and the
+    /// interactive prompt is always reached when configured.
+    pub plugin_hooks: Option<Arc<PluginHookHost>>,
 }
 
 impl Default for KernelConfig {
@@ -136,6 +151,7 @@ impl Default for KernelConfig {
             originating_user_id: None,
             kernel_mode: KernelMode::Audited,
             audited_lite_threshold_bytes: DEFAULT_SUMMARY_CHUNK_BYTES,
+            plugin_hooks: None,
         }
     }
 }

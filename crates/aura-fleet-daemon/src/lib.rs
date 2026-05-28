@@ -49,9 +49,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use aura_config::{FleetConfig, PluginsConfig};
 use aura_context_skills::SkillRegistry;
+use aura_core::{AgentId, Transaction, TransactionType};
 use aura_core_modes::AgentMode;
 use aura_fleet_dispatch::FleetDispatcher;
 use aura_fleet_quota::QuotaPool;
@@ -62,9 +64,78 @@ use aura_fleet_spawn::{
 use aura_plugin_core::{load_enabled_plugins, PluginRuntime};
 use aura_plugin_hooks::{CtxMeta, HookEngine, HookEvent, SessionStartHookCtx};
 use aura_store::Store;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::info;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+/// Default wall-clock grace period applied during
+/// [`FleetDaemon::run`] cooperative shutdown.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Phase 10 carve-out 2 — on-wire payload shape of the
+/// [`aura_store_record::RecordKind::SessionStop`] audit record.
+///
+/// The struct lives here (the fleet-layer crate) rather than in
+/// `aura-store-record` because the fleet daemon is the sole
+/// producer; the store crate continues to own only the closed
+/// `RecordKind` taxonomy. Consumers wishing to parse the on-disk
+/// shape can deserialise the [`Transaction::payload`] bytes back
+/// into [`SessionStopRecordPayload`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionStopRecordPayload {
+    /// Stable on-disk discriminator string; pinned to
+    /// `"session_stop"` to make Phase 7a / Phase 10 audit
+    /// consumers' string-match path unambiguous even if a future
+    /// schema bump retitles the wrapping `RecordKind` enum.
+    pub kind: String,
+    /// Session identifier supplied by the surface caller (e.g.
+    /// the WebSocket session id, or the TUI session uuid).
+    pub session_id: String,
+    /// Root agent for the session (hex-encoded).
+    pub agent_id: String,
+    /// Total iterations (model calls) consumed.
+    pub total_iterations: u32,
+    /// Total prompt tokens summed across every model call.
+    pub total_input_tokens: u64,
+    /// Total completion tokens summed across every model call.
+    pub total_output_tokens: u64,
+    /// Wall-clock session duration in milliseconds.
+    pub duration_ms: u64,
+    /// `true` when the session drained cleanly (every in-flight
+    /// child cooperatively cancelled inside the grace window),
+    /// `false` when at least one in-flight child timed out under
+    /// the configured grace period.
+    pub clean_shutdown: bool,
+}
+
+/// Stable in-payload discriminator for [`SessionStopRecordPayload`].
+pub const RECORD_KIND_SESSION_STOP: &str = "session_stop";
+
+/// Per-session telemetry handed back to [`FleetDaemon::run`] when
+/// the shutdown token fires so a `SessionStop` audit row can be
+/// written with accurate totals. Surface code populates this
+/// struct as turns complete and passes it via
+/// [`FleetDaemon::record_session`] before invoking `run`.
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    /// Session id (the same string used in `prepare_session`).
+    pub session_id: String,
+    /// Root agent id of the session.
+    pub agent_id: AgentId,
+    /// Iterations consumed so far.
+    pub total_iterations: u32,
+    /// Input tokens consumed so far.
+    pub total_input_tokens: u64,
+    /// Output tokens consumed so far.
+    pub total_output_tokens: u64,
+    /// Wall-clock start (the timestamp the session was first
+    /// registered). `duration_ms` in the audit row is computed
+    /// from this against `Instant::now()` at shutdown.
+    pub started_at: std::time::Instant,
+}
 
 pub use aura_fleet_dispatch::AgentJob;
 pub use aura_fleet_mailbox::{Mailbox, MailboxConfig, MailboxError, MailboxSender};
@@ -118,7 +189,7 @@ pub fn daemon_default_mode(fleet: &FleetConfig) -> AgentMode {
 }
 
 /// Wiring config consumed at daemon construction time.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// Per-spawn config forwarded to the [`FleetSpawner`].
     pub spawner: FleetSpawnerConfig,
@@ -127,6 +198,26 @@ pub struct DaemonConfig {
     /// Override the orphan store root. `None` uses
     /// [`OrphanStore::default_root`] (`~/.aura/state/orphans/`).
     pub orphan_root: Option<PathBuf>,
+    /// Phase 10 carve-out 4: wall-clock grace period the
+    /// shutdown loop waits for in-flight children to settle after
+    /// the external [`CancellationToken`] fires. Defaults to
+    /// [`DEFAULT_SHUTDOWN_GRACE`] (30 s). Sessions whose children
+    /// survive past this window are tagged `clean_shutdown: false`
+    /// on their emitted `SessionStop` audit row; surviving
+    /// `SpawnMode::Detached` agents are already handed off to the
+    /// orphan store by the spawner itself.
+    pub shutdown_grace: Duration,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            spawner: FleetSpawnerConfig::default(),
+            mailbox: MailboxConfig::default(),
+            orphan_root: None,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+        }
+    }
 }
 
 /// Errors surfaced by [`FleetDaemon`] APIs.
@@ -246,6 +337,23 @@ pub struct FleetDaemon {
     handle: FleetDaemonHandle,
     config: DaemonConfig,
     receiver: Mutex<Option<aura_fleet_mailbox::MailboxReceiver>>,
+    /// Sessions currently running on the daemon. Populated via
+    /// [`FleetDaemon::record_session`] and drained at shutdown to
+    /// emit one [`aura_store_record::RecordKind::SessionStop`]
+    /// audit row per session.
+    sessions: Mutex<Vec<SessionRecord>>,
+    /// Store handle used by [`FleetDaemon::run`] to write the
+    /// `SessionStop` audit rows through
+    /// [`aura_agent_kernel::write_system_record`]. Same `Arc` the
+    /// spawner sees, so the writes go through the kernel's single
+    /// record-write path.
+    store: Arc<dyn Store>,
+    /// Fleet-wide cancellation token cloned into every spawn's
+    /// [`FleetSpawnerConfig::fleet_shutdown`] slot when the
+    /// external shutdown token fires. Stored on the daemon so the
+    /// shutdown path can reach every in-flight child without
+    /// needing to enumerate them.
+    fleet_shutdown: CancellationToken,
 }
 
 impl FleetDaemon {
@@ -268,14 +376,23 @@ impl FleetDaemon {
             .clone()
             .unwrap_or_else(|| OrphanStore::default_root().unwrap_or_else(|_| PathBuf::from(".")));
         let orphans = Arc::new(OrphanStore::new(orphan_root));
+        let fleet_shutdown = CancellationToken::new();
+        // Phase 10 carve-out 4: derive a spawner config that wires
+        // the daemon-owned fleet-wide cancellation token. Any
+        // overrides the caller supplied are preserved by
+        // `fleet_shutdown.or(existing)`.
+        let mut spawner_config = config.spawner.clone();
+        if spawner_config.fleet_shutdown.is_none() {
+            spawner_config.fleet_shutdown = Some(fleet_shutdown.clone());
+        }
         let spawner = Arc::new(FleetSpawner::with_default_derivation(
-            store,
+            store.clone(),
             registry.clone(),
             quota.clone(),
             leases.clone(),
             orphans.clone(),
             child_runner,
-            config.spawner.clone(),
+            spawner_config,
         ));
         let dispatcher = Arc::new(FleetDispatcher::new(spawner.clone()));
         let mailbox = Mailbox::with_config(config.mailbox);
@@ -293,7 +410,20 @@ impl FleetDaemon {
             },
             config,
             receiver: Mutex::new(Some(mailbox_receiver)),
+            sessions: Mutex::new(Vec::new()),
+            store,
+            fleet_shutdown,
         }
+    }
+
+    /// Register a session for shutdown bookkeeping. Surface code
+    /// calls this when a new top-level session boots; the daemon
+    /// emits one [`aura_store_record::RecordKind::SessionStop`]
+    /// audit row per registered session when the shutdown token
+    /// fires.
+    pub async fn record_session(&self, session: SessionRecord) {
+        let mut guard = self.sessions.lock().await;
+        guard.push(session);
     }
 
     /// Cheap-clone handle to the daemon's subsystems.
@@ -386,17 +516,37 @@ impl FleetDaemon {
         })
     }
 
-    /// Phase 7b: drain the mailbox until every sender is dropped.
-    /// Each [`AgentJob`] dequeued is routed through the shared
-    /// [`FleetDispatcher::spawn_one`].
+    /// Phase 10 carve-out 4: drive the mailbox until the external
+    /// [`CancellationToken`] fires OR the mailbox is drained
+    /// because every sender has dropped.
     ///
-    /// Calling `run` a second time after the first run consumed the
-    /// receiver returns [`FleetDaemonError::ReceiverAlreadyTaken`].
+    /// When `shutdown` fires:
+    ///
+    /// 1. Stop accepting new jobs (the mailbox receiver is dropped
+    ///    so subsequent `MailboxSender::send` calls fail with a
+    ///    closed-channel error).
+    /// 2. Cancel every in-flight child via the daemon-owned
+    ///    `fleet_shutdown` token cloned into each spawn's
+    ///    [`FleetSpawnerConfig::fleet_shutdown`] slot.
+    /// 3. Wait up to [`DaemonConfig::shutdown_grace`] for the
+    ///    in-flight children to settle.
+    /// 4. Emit one
+    ///    [`aura_store_record::RecordKind::SessionStop`] audit row
+    ///    per registered session through
+    ///    [`aura_agent_kernel::write_system_record`]. Sessions
+    ///    whose children survived past the grace window are
+    ///    flagged `clean_shutdown: false`.
+    /// 5. `SpawnMode::Detached` survivors persist in the
+    ///    [`OrphanStore`] (already written by the spawn path) so
+    ///    `aura agents reap` can pick them up later.
+    ///
+    /// Calling `run` a second time after the first run consumed
+    /// the receiver returns [`FleetDaemonError::ReceiverAlreadyTaken`].
     ///
     /// # Errors
     ///
     /// See [`FleetDaemonError`].
-    pub async fn run(&self) -> Result<(), FleetDaemonError> {
+    pub async fn run(&self, shutdown: CancellationToken) -> Result<(), FleetDaemonError> {
         let mut receiver = self
             .receiver
             .lock()
@@ -404,13 +554,111 @@ impl FleetDaemon {
             .take()
             .ok_or(FleetDaemonError::ReceiverAlreadyTaken)?;
         let dispatcher = self.handle.dispatcher();
-        info!("fleet daemon: mailbox loop entered");
-        while let Some(job) = receiver.recv().await {
-            if let Err(err) = dispatcher.spawn_one(job).await {
-                tracing::warn!(error = %err, "fleet daemon: dispatch error");
+        info!("fleet daemon: mailbox loop entered (Phase 10 carve-out 4 shutdown wiring)");
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    info!("fleet daemon: external shutdown observed; draining in-flight children");
+                    break;
+                }
+                maybe_job = receiver.recv() => {
+                    let Some(job) = maybe_job else {
+                        info!("fleet daemon: mailbox drained — exiting cleanly");
+                        self.emit_session_stop_records(true).await;
+                        return Ok(());
+                    };
+                    if let Err(err) = dispatcher.spawn_one(job).await {
+                        warn!(error = %err, "fleet daemon: dispatch error");
+                    }
+                }
             }
         }
-        info!("fleet daemon: mailbox drained — exiting");
+        // Phase 10 5/4 shutdown sequence: cancel children, await
+        // the grace window, then emit `SessionStop` rows.
+        drop(receiver);
+        self.fleet_shutdown.cancel();
+        let registry = self.handle.registry();
+        let grace = self.config.shutdown_grace;
+        let drained_cleanly = wait_for_registry_drain(&registry, grace).await;
+        self.emit_session_stop_records(drained_cleanly).await;
+        info!(
+            clean_shutdown = drained_cleanly,
+            "fleet daemon: shutdown complete"
+        );
         Ok(())
+    }
+
+    /// Emit a `RecordKind::SessionStop` audit row through
+    /// [`aura_agent_kernel::write_system_record`] for every
+    /// session that was registered via [`Self::record_session`].
+    ///
+    /// `clean_shutdown` carries the Phase 10 carve-out 2 contract:
+    /// `true` when every in-flight child cooperatively settled
+    /// inside the grace window; `false` otherwise.
+    async fn emit_session_stop_records(&self, clean_shutdown: bool) {
+        let sessions = {
+            let mut guard = self.sessions.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        for session in sessions {
+            let duration_ms =
+                u64::try_from(session.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let payload = SessionStopRecordPayload {
+                kind: RECORD_KIND_SESSION_STOP.to_string(),
+                session_id: session.session_id.clone(),
+                agent_id: session.agent_id.to_hex(),
+                total_iterations: session.total_iterations,
+                total_input_tokens: session.total_input_tokens,
+                total_output_tokens: session.total_output_tokens,
+                duration_ms,
+                clean_shutdown,
+            };
+            let bytes = match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "fleet daemon: failed to serialize SessionStop payload");
+                    continue;
+                }
+            };
+            let tx = Transaction::new_chained(
+                session.agent_id,
+                TransactionType::System,
+                Bytes::from(bytes),
+                None,
+            );
+            if let Err(e) =
+                aura_agent_kernel::write_system_record(&self.store, session.agent_id, tx)
+            {
+                warn!(
+                    session_id = %session.session_id,
+                    agent_id = %session.agent_id,
+                    error = %e,
+                    "fleet daemon: write_system_record(SessionStop) failed"
+                );
+            }
+        }
+    }
+}
+
+/// Poll the [`FleetRegistry`] until [`FleetRegistry::running_count`]
+/// is zero, bounded by `grace`. Returns `true` when the registry
+/// drained cleanly inside the window, `false` when the timeout
+/// elapsed first.
+///
+/// Implementation note: we poll at 50 ms intervals rather than
+/// subscribe to a registry signal because the registry's shape is
+/// intentionally lock-light. A subscription-based API is tracked
+/// as a Phase 11 follow-up.
+async fn wait_for_registry_drain(registry: &FleetRegistry, grace: Duration) -> bool {
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        if registry.running_count() == 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

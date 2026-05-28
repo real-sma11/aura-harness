@@ -313,33 +313,20 @@ pub(crate) async fn process_tool_results(
         cached_ids,
     } = prepared;
 
-    // Phase 8: fire `PreToolUse` + `PostToolUse` hooks for each
-    // call in the batch. The `is_empty(event)` short-circuit
-    // guarantees zero overhead for empty installs.
+    // Phase 8 + Phase 10 carve-out 5a: `PreToolUse` mid-flight
+    // cancellation now lives in the kernel's
+    // `aura_agent_kernel::kernel::tools::{single,batch}` pre-
+    // dispatch site — a `HookOutcome::Block` there aborts the
+    // executor and surfaces a synthetic failed effect tagged
+    // `tool_call_blocked_by_hook`. The streaming pump's
+    // `process_tool_results` runs AFTER the executor (PreExecuted
+    // batch), so re-firing `PreToolUse` here would double-fire
+    // the hook and is intentionally OMITTED.
     //
-    // **Deviation note**: `process_tool_results` is called *after*
-    // the executor has already run the batch (the `PreExecuted`
-    // batch type confirms this). Wiring `PreToolUse` to *block*
-    // dispatch mid-flight requires threading the hook host
-    // through the streaming pump's `spawn_tool_with_timeout` site
-    // — that is intentionally deferred to a follow-up patch so
-    // this commit stays surgical. `PreToolUse` fires here with
-    // the correct ctx so plugins can observe; `Block` decisions
-    // are surfaced in `tracing::warn!` only for now.
+    // `PostToolUse` continues to fire here (observer-only) because
+    // it is by definition post-dispatch and the streaming pump
+    // owns the batch of `(call, result)` pairs at this site.
     if let Some(host) = agent.config.plugin_hooks.as_ref() {
-        if !host.is_empty(aura_plugin_hooks::HookEvent::PreToolUse) {
-            for tc in &tool_calls {
-                let args = serde_json::to_string(&tc.input).unwrap_or_default();
-                let outcome = host.fire_pre_tool_use(&tc.name, &args, &tc.id);
-                if outcome.is_blocked() {
-                    tracing::warn!(
-                        tool_name = %tc.name,
-                        tool_use_id = %tc.id,
-                        "PreToolUse hook returned Block — observer-only in this revision"
-                    );
-                }
-            }
-        }
         if !host.is_empty(aura_plugin_hooks::HookEvent::PostToolUse) {
             for r in &all_results {
                 let tc_name = tool_calls

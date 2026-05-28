@@ -8,57 +8,16 @@ publish = false
 name = "aura"
 path = "src/main.rs"
 
-# Phase 9: `aura-fleet-daemon` and `aura-fleet-registry` are kept
-# as direct deps of the root binary so the embedded-daemon code
-# path can opt in without touching the manifest. The fleet daemon
-# is reached today through `aura-runtime`; the direct deps are a
-# Phase 10 wiring affordance — and the doc comment in `src/cli.rs`
-# already names `aura_fleet_registry::FleetRegistry` so the type
-# remains discoverable.
-[package.metadata.cargo-machete]
-ignored = ["aura-fleet-daemon", "aura-fleet-registry"]
-
+# Phase 10 carve-out 1: the binary body migration moves every
+# line of useful logic out of `src/main.rs` and into
+# `aura_surface_cli::run`. The root binary now depends on the
+# surface-layer composition root and only the minimum set of
+# crates needed to call `aura_surface_cli::run().await`.
 [dependencies]
-aura-terminal = { path = "crates/aura-terminal" }
-aura-core = { path = "crates/aura-core" }
-aura-kernel = { path = "crates/aura-kernel" }
-aura-store = { path = "crates/aura-store" }
-aura-reasoner = { path = "crates/aura-reasoner" }
-aura-tools = { path = "crates/aura-tools" }
-aura-agent = { path = "crates/aura-agent" }
-aura-memory = { path = "crates/aura-memory" }
-aura-auth = { path = "crates/aura-auth" }
-aura-runtime = { path = "crates/aura-runtime" }
-aura-config = { path = "crates/aura-config" }
-aura-plugin-core = { path = "crates/aura-plugin-core" }
-aura-fleet-spawn = { path = "crates/aura-fleet-spawn" }
-aura-fleet-registry = { path = "crates/aura-fleet-registry" }
-aura-fleet-daemon = { path = "crates/aura-fleet-daemon" }
-# Phase 9: the root binary pulls in the surface-layer composition
-# root for the `--mode <agent|plan|ask|debug>` flag type and the
-# AgentMode resolution-priority helpers. Full migration of the CLI
-# body into aura-surface-cli is incremental — see crate-level
-# docs and CHANGELOG.md Phase 9 section.
 aura-surface-cli = { path = "crates/aura-surface-cli" }
 anyhow = { workspace = true }
-toml = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing = { workspace = true }
-clap = { version = "4.5", features = ["derive"] }
-colored = { workspace = true }
-rpassword = { workspace = true }
-uuid = { workspace = true }
-chrono = { workspace = true }
-hex = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 dotenvy = { workspace = true }
-axum = { workspace = true }
-tower-http = { workspace = true }
-tokio-util = { workspace = true }
-async-trait = { workspace = true }
-tabwriter = "1.4"
 
 [workspace]
 resolver = "2"
@@ -305,6 +264,15 @@ aura-store-record = { path = "crates/aura-store-record" }
 aura-core-types = { path = "crates/aura-core-types" }
 aura-core-permissions = { path = "crates/aura-core-permissions" }
 aura-agent-subagent = { path = "crates/aura-agent-subagent" }
+# Phase 10 carve-out 1: the root binary no longer holds these deps
+# directly (its body lives in `aura-surface-cli`), but the legacy
+# `tests/proptest_tests.rs`, `tests/e2e_*.rs` integration tests at
+# the root harness still consume the agent/terminal/auth surfaces
+# directly. Promoting them to dev-deps keeps the binary surface
+# slim without dropping the existing test coverage.
+aura-auth = { path = "crates/aura-auth" }
+aura-terminal = { path = "crates/aura-terminal" }
+axum = { workspace = true }
 tokio-util = { workspace = true }
 parking_lot = { workspace = true }
 # Phase 9 golden CLI help-text snapshot test

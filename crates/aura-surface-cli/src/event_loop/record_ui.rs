@@ -7,7 +7,7 @@ use aura_terminal::{
 use tokio::sync::mpsc;
 
 /// Send a record summary to the UI (matching the stored format).
-pub(super) async fn send_record_to_ui(
+pub(crate) async fn send_record_to_ui(
     commands: &mpsc::Sender<UiCommand>,
     seq: u64,
     tx: &Transaction,
@@ -89,7 +89,7 @@ pub(super) async fn send_record_to_ui(
 }
 
 /// Create a response transaction for the assistant's message.
-pub(super) fn create_response_transaction(agent_id: AgentId, response_text: &str) -> Transaction {
+pub(crate) fn create_response_transaction(agent_id: AgentId, response_text: &str) -> Transaction {
     Transaction::new_chained(
         agent_id,
         TransactionType::AgentMsg,

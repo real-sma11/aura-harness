@@ -112,6 +112,25 @@ impl Kernel {
                     tool_decision: None,
                 })
             }
+            TransactionType::SubagentSpawn => {
+                // Phase 10 schema-v2: the SubagentSpawn audit row is
+                // a typed transaction-header variant. The kernel
+                // path is identical to the generic catch-all (build
+                // a context-hashed record entry); we surface an
+                // explicit arm so the closed-enum match remains
+                // exhaustive for documentation.
+                let entry = RecordEntry::builder(seq, tx.clone())
+                    .context_hash(context_hash)
+                    .build();
+                Ok(ProcessResult {
+                    entry,
+                    tool_output: None,
+                    had_failures: false,
+                    runtime_capability_update: None,
+                    clear_runtime_capabilities: false,
+                    tool_decision: None,
+                })
+            }
             _ => {
                 let entry = RecordEntry::builder(seq, tx.clone())
                     .context_hash(context_hash)

@@ -32,6 +32,13 @@ pub enum TransactionType {
     ProcessComplete,
     /// LLM call record (model request + response metadata)
     Reasoning,
+    /// Phase 10 schema-v2: typed wire variant for the
+    /// `SubagentSpawn` audit row that Phase 7a wrote under
+    /// `TransactionType::System + JSON-discriminator`. The payload
+    /// carries the spawner's override-manifest bytes (no embedded
+    /// `"kind"` field — the discriminator now lives in the
+    /// transaction header itself).
+    SubagentSpawn,
 }
 
 /// Sub-categorization for System transactions.

@@ -60,6 +60,99 @@ mod worker;
 pub use config::NodeConfig;
 pub use node::Node;
 
+/// Phase 10 carve-out 1: surface-layer entry point for the
+/// `aura-node` binary. The root `main.rs` is reduced to a thin
+/// shim that installs tracing + calls this function.
+///
+/// Installs the Phase D Ctrl+C / Ctrl+Break belt-and-suspenders
+/// signal handlers, builds the [`NodeConfig`] from environment
+/// variables, and drives [`Node::run`] to its conclusion. Always
+/// emits an "exiting cleanly" log line on success so log tails
+/// never see a silent process death.
+///
+/// Lives in `aura-runtime` (rather than `aura-surface-cli`, which
+/// the original Phase 10 spec named) because moving it to
+/// `aura-surface-cli` would create a dependency cycle:
+/// `aura-runtime` owns the `aura-node` binary and would need to
+/// depend on `aura-surface-cli` to call into the function, while
+/// `aura-surface-cli` already depends on `aura-runtime` for the
+/// headless-mode wiring. The `aura_surface_cli::run_node`
+/// documented path is preserved through a `pub use` re-export at
+/// the surface-cli crate root.
+///
+/// # Errors
+///
+/// Surfaces any error from [`Node::run`]. The root binary's
+/// `main` bubbles it to the process exit code.
+pub async fn run_node() -> anyhow::Result<()> {
+    // Phase D (harness v2.2): top-level signal handler so external
+    // Ctrl+C produces a deterministic log line + exit code 130
+    // instead of the mysterious `0xFFFFFFFF` (= -1 unsigned) that
+    // previously appeared with zero panic/abort/unwind diagnostics —
+    // indistinguishable from a real crash. `Node::run` already
+    // installs its own `with_graceful_shutdown(shutdown_signal())`
+    // on the axum server (see `node::shutdown_signal`), which drains
+    // in-flight HTTP requests on the first Ctrl+C; this handler is
+    // the belt-and-suspenders hard deadline: if axum has not drained
+    // within 2s, we exit(130) anyway so the process never silently
+    // hangs and the operator always sees an exit cause in the log.
+    //
+    // `tokio::signal::ctrl_c` on Windows wraps `SetConsoleCtrlHandler`
+    // for CTRL_C_EVENT; no platform `#[cfg]` is needed for the basic
+    // case. The Windows-only Ctrl+Break branch below covers
+    // CTRL_BREAK_EVENT for parity with the axum shutdown signal.
+    //
+    // Future improvement: thread a single top-level
+    // `CancellationToken` through `Node::run` -> `RouterState` ->
+    // per-session generation tokens so this handler can `.cancel()`
+    // active LLM requests before the 2s timeout, instead of the per-
+    // session tokens that live inside `session::ws_handler` /
+    // `session::generation` today. Not in scope for Phase D — the
+    // hard exit alone fixes the diagnosability problem.
+    tokio::spawn(async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::warn!("received Ctrl+C; initiating graceful shutdown");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::warn!("graceful shutdown timeout reached; exiting with code 130");
+                std::process::exit(130);
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to install Ctrl+C handler");
+            }
+        }
+    });
+
+    #[cfg(windows)]
+    {
+        match tokio::signal::windows::ctrl_break() {
+            Ok(mut stream) => {
+                tokio::spawn(async move {
+                    if stream.recv().await.is_some() {
+                        tracing::warn!("received Ctrl+Break; initiating graceful shutdown");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        tracing::warn!("graceful shutdown timeout reached; exiting with code 130");
+                        std::process::exit(130);
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to install Ctrl+Break handler");
+            }
+        }
+    }
+
+    let config = NodeConfig::from_env();
+    let result = Node::new(config).run().await;
+
+    // Phase D: always emit a clean-exit line so log tails show a
+    // cause for the process going away — either the Ctrl+C warning
+    // above or this info line. Never silence.
+    tracing::info!("aura-node exiting cleanly");
+
+    result
+}
+
 pub use aura_protocol::{
     ApprovalResponse, AssistantMessageEnd, AssistantMessageStart, ConversationMessage, ErrorMsg,
     FileOp, FilesChanged, InboundMessage, InstalledTool, OutboundMessage, SessionInit,
