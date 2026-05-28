@@ -24,9 +24,8 @@ use aura_core::{
     AgentId, AgentPermissions, AgentToolPermissions, Identity, RecordEntry, UserDefaultMode,
     UserToolDefaults,
 };
-use aura_store::Store;
+use aura_store::ReadStore;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Replayed snapshot of the per-agent tool-permission state used by
 /// the gateway-side router handlers.
@@ -91,7 +90,7 @@ fn validate_tool_names<'a>(
 /// rebuild the [`AgentToolContext`] snapshot. Used by the gateway's
 /// chat-WS bootstrap path and by the REST tool-permissions handlers.
 pub fn load_agent_tool_context(
-    store: &Arc<dyn Store>,
+    store: &dyn ReadStore,
     agent_id: AgentId,
 ) -> Result<AgentToolContext, String> {
     let head = store

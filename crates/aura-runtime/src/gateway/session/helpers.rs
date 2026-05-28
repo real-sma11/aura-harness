@@ -163,7 +163,9 @@ pub(crate) async fn prepare_chat_session(
     }
 
     if session.tool_permissions.is_none() {
-        match crate::tool_permissions::load_agent_tool_context(&ctx.store, session.agent_id) {
+        let tool_context =
+            crate::tool_permissions::load_agent_tool_context(ctx.store.as_ref(), session.agent_id);
+        match tool_context {
             Ok(agent_ctx) => {
                 session.tool_permissions = agent_ctx.tool_permissions;
             }

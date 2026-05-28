@@ -298,6 +298,20 @@ fn every_crate_carries_a_matching_layer_doc_tag() {
     );
 }
 
+/// External-consumer invariant: the current wire flow must be reachable from
+/// the `aura-runtime` Cargo surface alone. If these re-exports disappear,
+/// external consumers would have to depend on `aura-protocol` or lower
+/// orchestration crates directly, which the architecture forbids.
+#[test]
+fn aura_runtime_reexports_canonical_wire_types() {
+    fn assert_external_wire_type<T: Send + Sync + 'static>() {}
+
+    assert_external_wire_type::<aura_runtime::RuntimeRequest>();
+    assert_external_wire_type::<aura_runtime::RuntimeRunResponse>();
+    assert_external_wire_type::<aura_runtime::InboundMessage>();
+    assert_external_wire_type::<aura_runtime::OutboundMessage>();
+}
+
 #[test]
 fn warn_on_upward_layer_dependencies() {
     let workspace_root = workspace_root();

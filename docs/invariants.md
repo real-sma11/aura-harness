@@ -669,7 +669,9 @@ band. Production holders:
 - [`crates/aura-fleet-subagent/src/dispatch.rs`](../crates/aura-fleet-subagent/src/dispatch.rs)
   — `FleetSubagentDispatcher` carries the store handle along with the
   `Arc<dyn ChildRunner>` produced by `aura-engine`.
-- [`src/main.rs`](../src/main.rs) — top-level binary wiring.
+- [`crates/aura-surface-cli/src/runner.rs`](../crates/aura-surface-cli/src/runner.rs)
+  — the interactive TUI composition root constructs a per-agent kernel for
+  local sessions.
 
 Test-only holders (filenames don't match `*test*.rs` but hits live inside
 `#[cfg(test)] mod tests`): [`crates/aura-agent/src/kernel_gateway.rs`](../crates/aura-agent/src/kernel_gateway.rs),
