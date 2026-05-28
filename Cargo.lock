@@ -719,6 +719,7 @@ dependencies = [
 name = "aura-protocol"
 version = "0.1.0"
 dependencies = [
+ "aura-core",
  "serde",
  "serde_json",
  "ts-rs",

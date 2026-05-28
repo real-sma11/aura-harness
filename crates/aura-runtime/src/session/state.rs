@@ -1,13 +1,17 @@
 //! Session state management.
 //!
 //! This file owns the [`Session`] struct plus everything that maintains
-//! its per-connection state: `new`, `apply_init`, the wire→core permission
-//! translator, the intent-classifier builder, `AgentLoopConfig` derivation,
-//! and the agent loop configuration derived from session state. Split out of
-//! `session/mod.rs` in Wave 6 / T3 so `mod.rs` can stay
-//! tiny (declarations + `WsContext` + re-exports).
+//! its per-connection state: `new`, `apply_chat_runtime_request`, the
+//! wire→core permission translator, the intent-classifier builder,
+//! `AgentLoopConfig` derivation, and the agent loop configuration
+//! derived from session state.
+//!
+//! Phase A note: the chat session bootstrap used to be driven by an
+//! `InboundMessage::SessionInit` first WS frame. With the new
+//! `POST /v1/run` + `WS /stream/:run_id` flow the chat fields ship
+//! on a [`RuntimeRequest`] over HTTP and the session is fully
+//! initialized before the WebSocket attaches.
 
-use crate::protocol::{self, SessionInit};
 use crate::scheduler::AgentIdentity as RuntimeAgentIdentity;
 use crate::session::ToolApprovalBroker;
 use aura_agent::AgentLoopConfig;
@@ -15,10 +19,12 @@ use aura_core::{
     AgentId, AgentPermissions, AgentScope, AgentToolPermissions, Capability,
     InstalledIntegrationDefinition, InstalledToolDefinition,
 };
-use aura_prompts::{default_system_prompt, AgentIdentity, ProjectInfo, SystemPromptBuilder};
+use aura_prompts::{
+    default_system_prompt, AgentIdentity as PromptAgentIdentity, ProjectInfo, SystemPromptBuilder,
+};
 use aura_protocol::{
-    AgentIdentityWire, AgentPermissionsWire, CapabilityWire, ChatProjectInfoWire,
-    IntentClassifierSpec, SessionModelOverrides,
+    AgentPermissionsWire, AgentPersona, CapabilityWire, ChatProjectInfoWire, IntentClassifierSpec,
+    RuntimeRequest, RuntimeRequestType, SessionModelOverrides,
 };
 use aura_reasoner::{
     Message, ModelProvider, ModelRequestKind, PromptCacheRetention, ToolDefinition,
@@ -36,7 +42,7 @@ use uuid::Uuid;
 ///
 /// Fields are `pub(crate)` so only the node crate may mutate them; external
 /// crates must go through the public accessors / constructors we expose on
-/// purpose. (Wave 3 — T2.2.)
+/// purpose.
 pub struct Session {
     /// Unique session identifier.
     pub(crate) session_id: String,
@@ -48,26 +54,23 @@ pub struct Session {
     pub(crate) model: String,
     /// Provider identifier for this session.
     pub(crate) provider_name: String,
-    /// Optional per-session model overrides resolved from `session_init`.
+    /// Optional per-session model overrides resolved from the runtime
+    /// request.
     pub(crate) provider_overrides: Option<SessionModelOverrides>,
-    /// Stable OpenAI-family `prompt_cache_key` resolved from `SessionInit.provider_overrides`.
+    /// Stable OpenAI-family `prompt_cache_key` resolved from the
+    /// request's `provider_overrides` bundle.
     pub(crate) prompt_cache_key: Option<String>,
-    /// Optional OpenAI-family `prompt_cache_retention` paired with `prompt_cache_key`.
+    /// Optional OpenAI-family `prompt_cache_retention` paired with
+    /// `prompt_cache_key`.
     pub(crate) prompt_cache_retention: Option<String>,
-    /// Optional concrete provider override built from `provider_overrides`.
+    /// Optional concrete provider override built from
+    /// `provider_overrides`.
     pub(crate) provider_override: Option<Arc<dyn ModelProvider + Send + Sync>>,
     /// Max tokens per response.
     pub(crate) max_tokens: u32,
     /// Sampling temperature.
     pub(crate) temperature: Option<f32>,
     /// Maximum agentic steps per turn.
-    ///
-    /// Defaults to [`aura_core::MAX_TURNS`] — the single source of
-    /// truth for every "max turns / max iterations" knob in the
-    /// system. Clients may override the cap by passing
-    /// [`SessionInit::max_turns`] on the wire; absent that, this
-    /// default flows through [`Session::agent_loop_config`] into
-    /// `AgentLoopConfig::max_iterations`.
     pub(crate) max_turns: u32,
     /// Installed tools registered for this session.
     pub(crate) installed_tools: Vec<InstalledToolDefinition>,
@@ -90,9 +93,10 @@ pub struct Session {
     /// Real project directory on the host filesystem.
     /// When set, tool execution uses this path directly.
     pub(crate) project_path: Option<PathBuf>,
-    /// Optional base directory that project_path must reside under (remote VM mode).
+    /// Optional base directory that project_path must reside under
+    /// (remote VM mode).
     pub(super) project_base: Option<PathBuf>,
-    /// Whether `session_init` has been received.
+    /// Whether the chat runtime request has been applied.
     pub(crate) initialized: bool,
     /// Available tool definitions (builtin + external).
     pub(crate) tool_definitions: Vec<ToolDefinition>,
@@ -110,37 +114,27 @@ pub struct Session {
     pub(crate) aura_org_id: Option<String>,
     /// Harness-level agent ID for per-agent skill lookup.
     pub(crate) skill_agent_id: Option<String>,
-    /// Optional keyword-driven intent classifier that narrows the visible
-    /// tool set per turn. Populated from
-    /// [`aura_protocol::SessionInit::intent_classifier`] so a
-    /// harness-hosted super-agent can reproduce the aura-os tier-1/tier-2
-    /// filtering behavior without the harness binary knowing the manifest.
+    /// Optional keyword-driven intent classifier that narrows the
+    /// visible tool set per turn.
     pub(crate) intent_classifier: Option<Arc<IntentClassifier>>,
-    /// `(tool_name, domain)` pairs paired with [`intent_classifier`]. Empty
-    /// when the classifier is not configured.
+    /// `(tool_name, domain)` pairs paired with [`intent_classifier`].
     ///
     /// [`intent_classifier`]: Self::intent_classifier
     pub(crate) intent_classifier_manifest: Vec<(String, String)>,
     /// Agent permissions for this session, derived directly from the
-    /// required `SessionInit.agent_permissions` field. Always applied to
-    /// the kernel [`aura_kernel::PolicyConfig`] on kernel construction;
-    /// enforcement is unconditional.
+    /// required `RuntimeRequest.agent_permissions` field. Always
+    /// applied to the kernel `PolicyConfig` on kernel construction.
     pub(crate) agent_permissions: AgentPermissions,
-    /// Originating user id for tool-default resolution and forever approvals.
+    /// Originating user id for tool-default resolution and forever
+    /// approvals.
     pub(crate) user_id: String,
     /// Optional per-agent tool override for this session.
     pub(crate) tool_permissions: Option<AgentToolPermissions>,
     /// Live approval broker attached to this WebSocket connection.
     pub(crate) tool_approval_broker: Option<Arc<ToolApprovalBroker>>,
-    /// Chat-WS migration: set when [`Session::apply_init`] assembled
-    /// [`Self::system_prompt`] from the typed identity / project_info
-    /// wire fields via [`SystemPromptBuilder`]. The chat
-    /// `<project_context>` block already carries the workspace `folder:`
-    /// line (and any `<agents_md>` body), so [`Self::agent_loop_config`]
-    /// skips the legacy `## Workspace` markdown addendum on this path
-    /// — the addendum is only meaningful for legacy callers that
-    /// shipped a pre-baked prompt string with no project metadata of
-    /// its own.
+    /// Chat-WS migration: set when `apply_chat_runtime_request`
+    /// assembled [`Self::system_prompt`] from the typed identity /
+    /// project_info fields via [`SystemPromptBuilder`].
     pub(crate) typed_chat_prompt: bool,
 }
 
@@ -151,17 +145,6 @@ impl Session {
             session_id: Uuid::new_v4().to_string(),
             agent_id: AgentId::generate(),
             system_prompt: String::new(),
-            // Empty until `apply_init` lands `init.model`. The
-            // chat-WS path enforces that callers send `session_init`
-            // before any user message (see
-            // `Session::initialized` + the
-            // `ws_handler::start_turn` guard); the runtime
-            // [`AgentIdentityRegistry`](crate::scheduler::AgentIdentityRegistry)
-            // then exposes the resolved model to the worker path.
-            // A blank model here used to silently fall back to
-            // `aura_agent::DEFAULT_MODEL` (i.e. opus-4-6); we now
-            // refuse to construct an `AgentLoopConfig` until the
-            // model is populated.
             model: String::new(),
             provider_name: String::new(),
             provider_overrides: None,
@@ -170,9 +153,6 @@ impl Session {
             provider_override: None,
             max_tokens: 16384,
             temperature: None,
-            // Canonical cap from `aura_core::MAX_TURNS`. See the field
-            // doc on `max_turns` for the override path and termination
-            // signals.
             max_turns: aura_core::MAX_TURNS,
             installed_tools: Vec::new(),
             installed_integrations: Vec::new(),
@@ -204,22 +184,52 @@ impl Session {
         }
     }
 
-    /// Apply a `session_init` message to configure this session.
-    pub(super) fn apply_init(&mut self, init: SessionInit) -> Result<(), String> {
-        // Chat-WS migration: when ANY of the typed identity / project
-        // info fields are populated, the harness assembles the system
-        // prompt itself via [`SystemPromptBuilder`] (chat preset:
-        // `chat_capabilities` + identity sections + `project_context`
-        // + `agents_md`). This path takes priority over the legacy
-        // pre-baked `init.system_prompt` string. When ALL of the new
-        // fields are absent / empty we fall through to the legacy
-        // path so older callers (and the dev-loop / TUI surfaces)
-        // continue to work byte-identically.
+    /// Apply a [`RuntimeRequest`] carrying a [`RuntimeRequestType::Chat`]
+    /// variant to configure this chat session.
+    ///
+    /// Returns `Err(...)` when the request is not a Chat variant
+    /// (DevLoop / TaskRun never construct a chat Session) or when
+    /// workspace / project_path validation fails.
+    pub(crate) fn apply_chat_runtime_request(
+        &mut self,
+        request: RuntimeRequest,
+    ) -> Result<(), String> {
+        let RuntimeRequest {
+            r#type,
+            agent_identity,
+            model,
+            workspace,
+            project,
+            agent_permissions,
+            tool_permissions,
+            agent_capabilities,
+            auth_jwt,
+            user_id,
+        } = request;
+
+        let conversation_messages = match r#type {
+            RuntimeRequestType::Chat {
+                conversation_messages,
+            } => conversation_messages,
+            RuntimeRequestType::DevLoop {} | RuntimeRequestType::TaskRun { .. } => {
+                return Err(
+                    "session apply only accepts RuntimeRequestType::Chat — DevLoop / TaskRun runs \
+                     do not open a chat session"
+                        .to_string(),
+                );
+            }
+        };
+
+        if user_id.trim().is_empty() {
+            return Err("user_id is required".into());
+        }
+
+        let project_info_ref = project.as_ref().and_then(|p| p.project_info.as_ref());
         let typed_prompt = build_typed_chat_system_prompt(
-            init.agent_identity.as_ref(),
-            &init.agent_skills,
-            init.agent_system_prompt.as_deref(),
-            init.project_info.as_ref(),
+            agent_identity.persona.as_ref(),
+            &agent_identity.skills,
+            agent_identity.system_prompt.as_deref(),
+            project_info_ref,
         );
         match typed_prompt {
             Some(prompt) => {
@@ -227,39 +237,34 @@ impl Session {
                 self.typed_chat_prompt = true;
             }
             None => {
-                if let Some(prompt) = init.system_prompt {
-                    self.system_prompt = prompt;
-                }
                 self.typed_chat_prompt = false;
             }
         }
-        if let Some(model) = init.model {
-            self.context_window_tokens = context_window_for_model(&model);
-            self.model = model;
+        if let Some(model_id) = model.id {
+            self.context_window_tokens = context_window_for_model(&model_id);
+            self.model = model_id;
         }
-        if let Some(max_tokens) = init.max_tokens {
+        if let Some(max_tokens) = model.max_tokens {
             self.max_tokens = max_tokens;
         }
-        if let Some(temperature) = init.temperature {
+        if let Some(temperature) = model.temperature {
             self.temperature = Some(temperature);
         }
-        if let Some(max_turns) = init.max_turns {
+        if let Some(max_turns) = model.max_turns {
             self.max_turns = max_turns;
         }
-        if let Some(tools) = init.installed_tools {
-            self.installed_tools = tools
-                .into_iter()
-                .map(protocol::installed_tool_to_core)
-                .collect();
-        }
-        if let Some(integrations) = init.installed_integrations {
-            self.installed_integrations = integrations
-                .into_iter()
-                .map(protocol::installed_integration_to_core)
-                .collect();
-        }
-        if let Some(workspace) = init.workspace {
-            let candidate = PathBuf::from(&workspace);
+        self.installed_tools = agent_capabilities
+            .installed_tools
+            .into_iter()
+            .map(aura_protocol::installed_tool_to_core)
+            .collect();
+        self.installed_integrations = agent_capabilities
+            .installed_integrations
+            .into_iter()
+            .map(aura_protocol::installed_integration_to_core)
+            .collect();
+        if let Some(ws) = workspace.workspace {
+            let candidate = PathBuf::from(&ws);
             if candidate
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -276,7 +281,7 @@ impl Session {
             }
             self.workspace = candidate;
         }
-        if let Some(ref pp) = init.project_path {
+        if let Some(ref pp) = workspace.project_path {
             let candidate = PathBuf::from(pp);
             if !candidate.is_absolute() {
                 return Err("project_path must be an absolute path".into());
@@ -287,8 +292,6 @@ impl Session {
             {
                 return Err("project_path must not contain '..' components".into());
             }
-            // When project_base is configured (remote VM mode), validate that
-            // the project path is under it to prevent sandbox escape.
             if let Some(ref base) = self.project_base {
                 let normalized = lexical_normalize(&candidate);
                 let normalized_base = lexical_normalize(base);
@@ -298,67 +301,61 @@ impl Session {
             }
             self.project_path = Some(candidate);
         }
-        if let Some(token) = init.token {
+        if let Some(token) = auth_jwt {
             self.auth_token = Some(token);
         }
-        if let Some(agent_id) = init.agent_id {
+        if let Some(partition_id) = agent_identity.partition_id {
             self.skill_agent_id = Some(
-                init.template_agent_id
+                agent_identity
+                    .template_id
                     .as_ref()
                     .filter(|id| !id.trim().is_empty())
                     .cloned()
-                    .unwrap_or_else(|| agent_id.clone()),
+                    .unwrap_or_else(|| partition_id.clone()),
             );
-            self.agent_id = AgentId::from_hex(&agent_id).unwrap_or_else(|_| {
-                let hash = blake3::hash(agent_id.as_bytes());
+            self.agent_id = AgentId::from_hex(&partition_id).unwrap_or_else(|_| {
+                let hash = blake3::hash(partition_id.as_bytes());
                 AgentId::new(*hash.as_bytes())
             });
-        } else if let Some(template_agent_id) = init.template_agent_id {
-            if !template_agent_id.trim().is_empty() {
-                self.skill_agent_id = Some(template_agent_id);
+        } else if let Some(template_id) = agent_identity.template_id {
+            if !template_id.trim().is_empty() {
+                self.skill_agent_id = Some(template_id);
             }
         }
-        if init.user_id.trim().is_empty() {
-            return Err("user_id is required".into());
+        self.user_id = user_id;
+        self.tool_permissions =
+            tool_permissions.map(aura_protocol::agent_tool_permissions_from_wire);
+
+        // Project context (project_id + billing IDs + intent classifier carrier).
+        if let Some(project_ctx) = project {
+            self.project_id = Some(project_ctx.project_id);
+            if let Some(id) = project_ctx.aura_agent_id {
+                self.aura_agent_id = Some(id);
+            }
+            if let Some(id) = project_ctx.aura_session_id {
+                self.aura_session_id = Some(id);
+            }
+            if let Some(id) = project_ctx.aura_org_id {
+                self.aura_org_id = Some(id);
+            }
         }
-        self.user_id = init.user_id;
-        self.tool_permissions = init
-            .tool_permissions
-            .map(protocol::agent_tool_permissions_from_wire);
-        if let Some(pid) = init.project_id {
-            self.project_id = Some(pid);
-        }
-        if let Some(id) = init.aura_agent_id {
-            self.aura_agent_id = Some(id);
-        }
-        if let Some(id) = init.aura_session_id {
-            self.aura_session_id = Some(id);
-        }
-        if let Some(id) = init.aura_org_id {
-            self.aura_org_id = Some(id);
-        }
-        if let Some(provider_overrides) = init.provider_overrides {
+        if let Some(provider_overrides) = model.provider_overrides {
             self.prompt_cache_key = provider_overrides.prompt_cache_key.clone();
             self.prompt_cache_retention = provider_overrides.prompt_cache_retention.clone();
             self.provider_overrides = Some(provider_overrides);
         }
-        if let Some(spec) = init.intent_classifier {
+        if let Some(spec) = agent_capabilities.intent_classifier {
             let (classifier, manifest) = build_intent_classifier(spec);
             self.intent_classifier = Some(Arc::new(classifier));
             self.intent_classifier_manifest = manifest;
         }
 
-        // Agent permissions are applied once at session init. The canonical
-        // default is full access; callers that need restrictions must send a
-        // narrower non-default bundle.
-        self.agent_permissions = agent_permissions_from_wire(init.agent_permissions);
-        if let Some(msgs) = init.conversation_messages {
-            for msg in msgs {
-                match msg.role.as_str() {
-                    "user" => self.messages.push(Message::user(&msg.content)),
-                    "assistant" => self.messages.push(Message::assistant(&msg.content)),
-                    _ => {}
-                }
+        self.agent_permissions = agent_permissions_from_wire(agent_permissions);
+        for msg in conversation_messages {
+            match msg.role.as_str() {
+                "user" => self.messages.push(Message::user(&msg.content)),
+                "assistant" => self.messages.push(Message::assistant(&msg.content)),
+                _ => {}
             }
         }
         self.initialized = true;
@@ -368,8 +365,8 @@ impl Session {
     /// Return a deterministic `AgentId` for memory keying.
     ///
     /// When the session carries an `aura_agent_id` (the aura-os UUID),
-    /// derive the `AgentId` from it so memory queries from the UI use the
-    /// same key. Falls back to the random session `agent_id`.
+    /// derive the `AgentId` from it so memory queries from the UI use
+    /// the same key. Falls back to the random session `agent_id`.
     pub(super) fn memory_agent_id(&self) -> AgentId {
         if let Some(ref uuid_str) = self.aura_agent_id {
             if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
@@ -379,14 +376,8 @@ impl Session {
         self.agent_id
     }
 
-    /// Snapshot the session's identity for the
-    /// runtime-scheduler-side [`AgentIdentityRegistry`](
-    /// crate::scheduler::AgentIdentityRegistry). Called from
-    /// `handle_session_init` once `apply_init` has populated the
-    /// model + IDs so the worker path (HTTP `/tx`,
-    /// post-permission-update fan-out, post-automaton-completion
-    /// fan-out) can build the per-turn `AgentLoopConfig` even after
-    /// the WebSocket has closed mid-turn.
+    /// Snapshot the session's identity for the runtime-scheduler-side
+    /// `AgentIdentityRegistry`.
     pub(crate) fn as_runtime_identity(&self) -> RuntimeAgentIdentity {
         let prompt_cache_retention = self
             .prompt_cache_retention
@@ -401,23 +392,15 @@ impl Session {
             system_prompt: self.resolved_system_prompt(),
             prompt_cache_key: self.prompt_cache_key.clone(),
             prompt_cache_retention,
-            // Chat sessions ship `Chat`. The dev-loop / task-run paths
-            // that override this are wired separately via the
-            // automaton bridge.
             request_kind: ModelRequestKind::Chat,
             max_tokens: self.max_tokens,
-            // Context windows top out near 1M tokens; the `u64` →
-            // `usize` cast is bounds-safe on every target we ship to
-            // (64-bit only). The saturate is defensive.
             max_context_tokens: usize::try_from(self.context_window_tokens).unwrap_or(usize::MAX),
             auth_token: self.auth_token.clone(),
         }
     }
 
     /// Resolve the system prompt the same way [`Self::agent_loop_config`]
-    /// does (typed-chat path skips the legacy `## Workspace`
-    /// addendum). Held as its own helper so the registry shapshot
-    /// matches the in-process `AgentLoopConfig` byte-for-byte.
+    /// does (typed-chat path skips the legacy `## Workspace` addendum).
     fn resolved_system_prompt(&self) -> String {
         let base_prompt = if self.system_prompt.is_empty() {
             default_system_prompt()
@@ -443,14 +426,6 @@ impl Session {
             self.system_prompt.clone()
         };
 
-        // Chat-WS migration: the typed-fields path renders
-        // `<project_context>` with the workspace folder inline, so the
-        // pre-existing `## Workspace` markdown addendum is redundant
-        // (and would violate the bracketed-tag schema). Skip it on
-        // that path. Legacy callers (which leave
-        // [`Self::typed_chat_prompt`] `false`) keep the addendum so
-        // their pre-baked prompts continue to advertise the workspace
-        // root the way they always have.
         let system_prompt = match (&self.project_path, self.typed_chat_prompt) {
             (Some(pp), false) => format!(
                 "{base_prompt}\n\n## Workspace\n\n\
@@ -461,14 +436,6 @@ impl Session {
             _ => base_prompt,
         };
 
-        // Wire-protocol `max_turns` is `u32`; the agent loop wants
-        // `usize`. The default flows from `aura_core::MAX_TURNS`, and
-        // clients overriding via `SessionInit.max_turns` still pass a
-        // bounded `u32`. Preserve the `u32::MAX → usize::MAX` mapping
-        // as a defensive translation so a client that explicitly opts
-        // out of the cap engages the unlimited-mode short-circuits in
-        // `aura_agent::budget::should_stop_for_budget` and
-        // `aura_agent::agent_loop::context::check_budget_warnings`.
         let max_iterations = if self.max_turns == u32::MAX {
             usize::MAX
         } else {
@@ -482,11 +449,6 @@ impl Session {
             max_context_tokens: Some(self.context_window_tokens),
             stream_timeout: agent_loop_stream_timeout(),
             auth_token: self.auth_token.clone(),
-            // The wire-level `SessionModelOverrides` no longer carries
-            // an upstream provider-family hint — proxy routing is the
-            // single LLM path. Per-request family hints (used by
-            // X-Aura-Upstream-Provider-Family on outbound calls) come
-            // from elsewhere if and when they are needed.
             upstream_provider_family: None,
             aura_project_id: self.project_id.clone(),
             aura_agent_id: self.aura_agent_id.clone(),
@@ -502,10 +464,7 @@ impl Session {
 }
 
 /// Convert the wire-side `prompt_cache_retention` (`"24h"` /
-/// `"in_memory"`) into the typed reasoner enum. Mirrors the
-/// in-process plumbing in `Session::agent_loop_config`; centralized
-/// here so the registry snapshot taken in
-/// [`Session::as_runtime_identity`] uses the same conversion.
+/// `"in_memory"`) into the typed reasoner enum.
 fn parse_session_cache_retention(value: &str) -> Option<PromptCacheRetention> {
     match value {
         "24h" => Some(PromptCacheRetention::Hours24),
@@ -515,43 +474,15 @@ fn parse_session_cache_retention(value: &str) -> Option<PromptCacheRetention> {
 }
 
 /// Reasoner reqwest HTTP timeout, in milliseconds, when
-/// `AURA_MODEL_TIMEOUT_MS` is unset or unparsable. Mirrors the default
-/// in [`aura_reasoner::anthropic::config::AnthropicConfig::from_env`]
-/// (300_000ms / 300s) so the two layers stay numerically aligned even
-/// when the env var is not set.
+/// `AURA_MODEL_TIMEOUT_MS` is unset or unparsable.
 const REASONER_DEFAULT_TIMEOUT_MS: u64 = 300_000;
 
 /// Safety margin added on top of the reasoner's reqwest timeout when
-/// computing the agent-loop outer-guard `stream_timeout`. The outer
-/// guard at [`aura_agent::agent_loop::iteration::AgentLoop::call_model`]
-/// must be **strictly greater** than the HTTP-layer timeout, otherwise
-/// it preempts a still-healthy stream and the user sees a generic
-/// `code: "llm_error"` ("Model call timed out after Ns") instead of the
-/// typed `ReasonerError` the HTTP layer would have produced (network /
-/// 5xx / rate limit / context overflow).
-///
-/// 30s is large enough to cover scheduler jitter + any drift between
-/// the two timer subsystems; small enough that a genuinely deadlocked
-/// future still surfaces in well under a minute past the HTTP cap.
+/// computing the agent-loop outer-guard `stream_timeout`.
 const STREAM_TIMEOUT_MARGIN_SECS: u64 = 30;
 
 /// Outer-guard streaming timeout used by the chat-session
 /// [`AgentLoopConfig`].
-///
-/// Reads `AURA_MODEL_TIMEOUT_MS` (the same env var the reasoner reads
-/// for its reqwest request timeout — see
-/// [`aura_reasoner::anthropic::config::AnthropicConfig::from_env`]) and
-/// adds [`STREAM_TIMEOUT_MARGIN_SECS`] so the HTTP layer always wins
-/// the timeout race.
-///
-/// Pinned by the regression tests in `session::tests` to keep the
-/// "outer guard ≥ HTTP timeout" invariant the agent-loop module
-/// documents at [`AgentLoopConfig::stream_timeout`] from drifting
-/// again. The previous hardcoded `Duration::from_secs(180)` violated
-/// that invariant and caused long single LLM calls (e.g. a turn
-/// emitting several large `update_spec` tool blocks inline) to fire
-/// "Model call timed out after 180s" while the upstream stream was
-/// still happily delivering tokens.
 pub(crate) fn agent_loop_stream_timeout() -> std::time::Duration {
     let reasoner_ms = std::env::var("AURA_MODEL_TIMEOUT_MS")
         .ok()
@@ -562,39 +493,30 @@ pub(crate) fn agent_loop_stream_timeout() -> std::time::Duration {
         + std::time::Duration::from_secs(STREAM_TIMEOUT_MARGIN_SECS)
 }
 
-/// Chat-WS migration helper: assemble the chat-path system prompt from
-/// the typed [`SessionInit`] identity / project info wire fields via
-/// [`SystemPromptBuilder`].
+/// Chat-WS migration helper: assemble the chat-path system prompt
+/// from the typed [`RuntimeRequest`] identity / project info fields
+/// via [`SystemPromptBuilder`].
 ///
-/// Returns `Some(prompt)` when at least one typed field is populated
-/// (in which case the caller stamps [`Session::typed_chat_prompt`] and
-/// ignores the legacy `system_prompt` string), and `None` when every
-/// typed field is absent / blank — letting [`Session::apply_init`]
-/// fall back to the legacy path for backward compatibility with older
-/// callers (and the TUI / dev-loop surfaces that never populate these
-/// fields).
-///
-/// Section selection mirrors `aura_prompts::build_chat_system_prompt`:
-/// `chat_capabilities` first, then any populated identity sections,
-/// then `<project_context>` and the AGENTS.md probe.
+/// Returns `Some(prompt)` when at least one typed field is populated,
+/// and `None` when every typed field is absent / blank.
 fn build_typed_chat_system_prompt(
-    identity_wire: Option<&AgentIdentityWire>,
+    persona: Option<&AgentPersona>,
     skills: &[String],
     agent_system_prompt: Option<&str>,
     project_wire: Option<&ChatProjectInfoWire>,
 ) -> Option<String> {
-    let identity_populated = identity_wire.is_some_and(|w| !w.is_empty());
+    let persona_populated = persona.is_some_and(|w| !w.is_empty());
     let skills_populated = skills.iter().any(|s| !s.trim().is_empty());
     let agent_prompt_populated = agent_system_prompt.is_some_and(|s| !s.trim().is_empty());
     let project_populated = project_wire.is_some_and(|w| !w.is_empty());
 
-    if !identity_populated && !skills_populated && !agent_prompt_populated && !project_populated {
+    if !persona_populated && !skills_populated && !agent_prompt_populated && !project_populated {
         return None;
     }
 
-    let identity = identity_wire
+    let identity = persona
         .filter(|w| !w.is_empty())
-        .map(|w| AgentIdentity {
+        .map(|w| PromptAgentIdentity {
             name: w.name.as_str(),
             role: w.role.as_str(),
             personality: w.personality.as_str(),
@@ -605,11 +527,6 @@ fn build_typed_chat_system_prompt(
         .agent_skills(skills)
         .agent_system_prompt(agent_system_prompt);
 
-    // `<project_context>` and the AGENTS.md probe only fire when
-    // aura-os actually shipped a project descriptor on the wire — bare
-    // -agent (non-project) chat lands here with `project_wire = None`,
-    // and rendering an empty project block would produce visually
-    // blank `project_name: ` / `folder: ` lines.
     if let Some(project) = project_wire.filter(|w| !w.is_empty()) {
         let project_info = ProjectInfo {
             project_id: Some(project.id.as_str()).filter(|s| !s.trim().is_empty()),
@@ -627,14 +544,9 @@ fn build_typed_chat_system_prompt(
     Some(builder.build())
 }
 
-/// Translate an [`IntentClassifierSpec`] from the wire protocol into the
-/// in-process [`IntentClassifier`] plus a `(tool_name, domain)` manifest
-/// the agent loop can consume.
-///
-/// Kept as a free function (rather than an `impl From`) so both sides of
-/// the conversion stay obvious at call sites — the spec flattens a
-/// `HashMap<String, String>` while the loop expects a stable `Vec` so
-/// filters are deterministic.
+/// Translate an [`IntentClassifierSpec`] from the wire protocol into
+/// the in-process [`IntentClassifier`] plus a `(tool_name, domain)`
+/// manifest the agent loop can consume.
 fn build_intent_classifier(
     spec: IntentClassifierSpec,
 ) -> (IntentClassifier, Vec<(String, String)>) {
@@ -648,16 +560,12 @@ fn build_intent_classifier(
         .map(|r| (r.domain, r.keywords))
         .collect();
     let mut manifest: Vec<(String, String)> = tool_domains.into_iter().collect();
-    // Stable ordering keeps `build_request` deterministic even though
-    // the classifier itself doesn't care about order.
     manifest.sort_by(|a, b| a.0.cmp(&b.0));
     (IntentClassifier::from_rules(tier1_domains, rules), manifest)
 }
 
-/// Phase 5: translate the wire `AgentPermissionsWire` into the harness-core
-/// `AgentPermissions` used by tools + the kernel policy. Kept here (rather
-/// than in `aura-protocol`) so the protocol crate stays decoupled from
-/// harness internals — see the module doc on `aura_protocol::SessionInit`.
+/// Translate the wire `AgentPermissionsWire` into the harness-core
+/// `AgentPermissions` used by tools + the kernel policy.
 pub(crate) fn agent_permissions_from_wire(wire: AgentPermissionsWire) -> AgentPermissions {
     let capabilities = wire
         .capabilities
@@ -676,10 +584,6 @@ pub(crate) fn agent_permissions_from_wire(wire: AgentPermissionsWire) -> AgentPe
             CapabilityWire::WriteProject { id } => Some(Capability::WriteProject { id }),
             CapabilityWire::ReadAllProjects => Some(Capability::ReadAllProjects),
             CapabilityWire::WriteAllProjects => Some(Capability::WriteAllProjects),
-            // Forward-compat: a newer server can send capability variants
-            // this harness build doesn't know yet. Per the protocol doc,
-            // drop them silently rather than rejecting the session — the
-            // tools that depend on them simply won't be enforceable here.
             CapabilityWire::Unknown => None,
         })
         .collect();
@@ -714,27 +618,12 @@ fn lexical_normalize(path: &std::path::Path) -> PathBuf {
 }
 
 /// Map a model identifier to its maximum context window in tokens.
-///
-/// Mirrors the authoritative values in aura-router's
-/// `providers::max_context_tokens` so the harness uses the full window
-/// each model supports instead of a blanket 200K cap.
-///
-/// Model names arrive as-is from `SessionInit.model`. The interface
-/// normalises to aura-prefixed aliases (e.g. `aura-gpt-5-5`) which use
-/// hyphens, while direct upstream names use dots (`gpt-5.5`). Both
-/// forms must resolve correctly, so every OpenAI arm checks both
-/// conventions.
 pub(crate) fn context_window_for_model(model: &str) -> u64 {
     match model {
-        // Anthropic — substring handles bare (claude-opus-4-6) and
-        // aura-prefixed (aura-claude-opus-4-7) names.
         m if m.contains("opus-4") => 1_000_000,
         m if m.contains("sonnet-4") => 1_000_000,
         m if m.contains("haiku-4") => 200_000,
         m if m.starts_with("claude") => 200_000,
-        // OpenAI GPT 5.x — aliases use hyphens (aura-gpt-5-5), direct
-        // names use dots (gpt-5.5). Mini/nano checked before the base
-        // variant so "gpt-5-4" doesn't swallow them.
         m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_000_000,
         m if m.contains("gpt-5.4-mini")
             || m.contains("gpt-5-4-mini")
@@ -744,18 +633,13 @@ pub(crate) fn context_window_for_model(model: &str) -> u64 {
             400_000
         }
         m if m.contains("gpt-5.4") || m.contains("gpt-5-4") => 1_050_000,
-        // OpenAI GPT 4.x
         m if m.contains("gpt-4.1") => 1_047_576,
         m if m.contains("gpt-4o") || m.contains("gpt-4-turbo") => 128_000,
-        // OpenAI reasoning — substring handles aura- prefix (aura-o3).
         m if m.ends_with("-o1") || m.starts_with("o1") => 200_000,
         m if m.contains("-o3") || m.starts_with("o3") => 200_000,
         m if m.contains("-o4") || m.starts_with("o4") => 200_000,
-        // DeepSeek
         m if m.contains("deepseek") => 1_000_000,
-        // Fireworks OSS
         m if m.contains("kimi") => 262_144,
-        // Safe default
         _ => 200_000,
     }
 }
@@ -780,7 +664,6 @@ mod context_window_tests {
         assert_eq!(context_window_for_model("claude-opus-4-6"), 1_000_000);
         assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
         assert_eq!(context_window_for_model("claude-haiku-4-5"), 200_000);
-        // Older Claude generations fall to the generic claude catch-all.
         assert_eq!(context_window_for_model("claude-3-5-sonnet"), 200_000);
     }
 
@@ -806,7 +689,6 @@ mod context_window_tests {
         assert_eq!(context_window_for_model("gpt-4.1"), 1_047_576);
         assert_eq!(context_window_for_model("gpt-4o"), 128_000);
         assert_eq!(context_window_for_model("gpt-4-turbo"), 128_000);
-        // Reasoning models — both bare and aura-prefixed.
         assert_eq!(context_window_for_model("o3"), 200_000);
         assert_eq!(context_window_for_model("aura-o3"), 200_000);
         assert_eq!(context_window_for_model("o4-mini"), 200_000);

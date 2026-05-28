@@ -21,7 +21,8 @@ data: string,
  */
 name: string | null, 
 /**
- * URL to fetch content from (e.g. S3). When set, `data` may be empty
- * and the consumer should fetch the content from this URL instead.
+ * URL to fetch content from (e.g. S3). When set, `data` may be
+ * empty and the consumer should fetch the content from this
+ * URL instead.
  */
 source_url: string | null, };

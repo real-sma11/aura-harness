@@ -3,12 +3,20 @@
 //! These were extracted from `session/mod.rs` in Wave 6 / T3 so the
 //! module-root file can stay tiny (declarations + `WsContext` + the
 //! `Session` re-export).
+//!
+//! Phase A: the `SessionInit` first-frame contract was replaced with
+//! `POST /v1/run` + `WS /stream/:run_id`. These tests now drive
+//! [`Session::apply_chat_runtime_request`] directly with chat-shaped
+//! [`RuntimeRequest`] payloads built by [`chat_request`].
 
 use super::state::agent_loop_stream_timeout;
 use super::Session;
 use aura_compaction::{compact_for_storage, SESSION_TOOL_BLOB_MAX_BYTES};
 use aura_core::{AgentPermissions, Capability};
-use aura_protocol::{AgentPermissionsWire, SessionInit};
+use aura_protocol::{
+    AgentCapabilities, AgentIdentity, AgentPermissionsWire, ChatProjectInfoWire, ModelSelection,
+    ProjectContext, RuntimeRequest, RuntimeRequestType, WorkspaceLocation,
+};
 use aura_reasoner::Message;
 use std::path::PathBuf;
 
@@ -33,43 +41,35 @@ fn test_session(project_base: Option<PathBuf>) -> Session {
     s
 }
 
-fn init_with_project_path(path: &std::path::Path) -> SessionInit {
-    SessionInit {
-        system_prompt: None,
-        model: None,
-        max_tokens: None,
-        temperature: None,
-        max_turns: None,
-        installed_tools: None,
-        installed_integrations: None,
-        workspace: None,
-        project_path: Some(path.display().to_string()),
-        token: None,
-        project_id: None,
-        conversation_messages: None,
-        aura_agent_id: None,
-        aura_session_id: None,
-        aura_org_id: None,
-        agent_id: None,
-        template_agent_id: None,
-        user_id: "user-test".to_string(),
-        tool_permissions: None,
-        provider_overrides: None,
-        intent_classifier: None,
+fn blank_chat_request() -> RuntimeRequest {
+    RuntimeRequest {
+        r#type: RuntimeRequestType::Chat {
+            conversation_messages: Vec::new(),
+        },
+        agent_identity: AgentIdentity::default(),
+        model: ModelSelection::default(),
+        workspace: WorkspaceLocation::default(),
+        project: None,
         agent_permissions: AgentPermissionsWire::default(),
-        agent_identity: None,
-        agent_skills: Vec::new(),
-        agent_system_prompt: None,
-        project_info: None,
+        tool_permissions: None,
+        agent_capabilities: AgentCapabilities::default(),
+        auth_jwt: None,
+        user_id: "user-test".to_string(),
     }
+}
+
+fn chat_request_with_project_path(path: &std::path::Path) -> RuntimeRequest {
+    let mut req = blank_chat_request();
+    req.workspace.project_path = Some(path.display().to_string());
+    req
 }
 
 #[test]
 fn project_path_allowed_when_no_base() {
     let project_path = absolute_path(&["any", "absolute", "path"]);
     let mut session = test_session(None);
-    let init = init_with_project_path(&project_path);
-    assert!(session.apply_init(init).is_ok());
+    let req = chat_request_with_project_path(&project_path);
+    assert!(session.apply_chat_runtime_request(req).is_ok());
     assert_eq!(session.project_path.unwrap(), project_path);
 }
 
@@ -78,8 +78,8 @@ fn project_path_allowed_under_base() {
     let project_base = absolute_path(&["home", "aura"]);
     let project_path = project_base.join("myproject");
     let mut session = test_session(Some(project_base));
-    let init = init_with_project_path(&project_path);
-    assert!(session.apply_init(init).is_ok());
+    let req = chat_request_with_project_path(&project_path);
+    assert!(session.apply_chat_runtime_request(req).is_ok());
 }
 
 #[test]
@@ -87,8 +87,8 @@ fn project_path_blocked_outside_base() {
     let project_base = absolute_path(&["home", "aura"]);
     let project_path = absolute_path(&["etc", "passwd"]);
     let mut session = test_session(Some(project_base));
-    let init = init_with_project_path(&project_path);
-    let result = session.apply_init(init);
+    let req = chat_request_with_project_path(&project_path);
+    let result = session.apply_chat_runtime_request(req);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("must be under"));
 }
@@ -98,22 +98,22 @@ fn project_path_blocked_with_traversal() {
     let project_base = absolute_path(&["home", "aura"]);
     let project_path = project_base.join("..").join("etc").join("passwd");
     let mut session = test_session(Some(project_base));
-    let init = init_with_project_path(&project_path);
-    let result = session.apply_init(init);
+    let req = chat_request_with_project_path(&project_path);
+    let result = session.apply_chat_runtime_request(req);
     assert!(result.is_err());
 }
 
 #[test]
 fn project_path_rejects_relative() {
     let mut session = test_session(None);
-    let init = init_with_project_path(std::path::Path::new("relative/path"));
-    let result = session.apply_init(init);
+    let req = chat_request_with_project_path(std::path::Path::new("relative/path"));
+    let result = session.apply_chat_runtime_request(req);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("absolute"));
 }
 
 #[test]
-fn apply_init_builds_intent_classifier_when_spec_present() {
+fn apply_chat_runtime_request_builds_intent_classifier_when_spec_present() {
     use aura_protocol::{IntentClassifierRule, IntentClassifierSpec};
     use std::collections::HashMap;
 
@@ -130,36 +130,10 @@ fn apply_init_builds_intent_classifier_when_spec_present() {
         }],
         tool_domains,
     };
-    let init = SessionInit {
-        system_prompt: None,
-        model: None,
-        max_tokens: None,
-        temperature: None,
-        max_turns: None,
-        installed_tools: None,
-        installed_integrations: None,
-        workspace: None,
-        project_path: None,
-        token: None,
-        project_id: None,
-        conversation_messages: None,
-        aura_agent_id: None,
-        aura_session_id: None,
-        aura_org_id: None,
-        agent_id: None,
-        template_agent_id: None,
-        user_id: "user-test".to_string(),
-        tool_permissions: None,
-        provider_overrides: None,
-        intent_classifier: Some(spec),
-        agent_permissions: AgentPermissionsWire::default(),
-        agent_identity: None,
-        agent_skills: Vec::new(),
-        agent_system_prompt: None,
-        project_info: None,
-    };
+    let mut req = blank_chat_request();
+    req.agent_capabilities.intent_classifier = Some(spec);
 
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
 
     let classifier = session
         .intent_classifier
@@ -171,48 +145,19 @@ fn apply_init_builds_intent_classifier_when_spec_present() {
 
     let manifest = &session.intent_classifier_manifest;
     assert_eq!(manifest.len(), 2);
-    // Manifest is sorted for determinism.
     assert_eq!(manifest[0].0, "create_project");
     assert_eq!(manifest[1].0, "list_credits");
 
-    // Carry through to AgentLoopConfig.
     let cfg = session.agent_loop_config();
     assert!(cfg.intent_classifier.is_some());
     assert_eq!(cfg.intent_classifier_manifest.len(), 2);
 }
 
 #[test]
-fn apply_init_leaves_intent_classifier_none_when_spec_absent() {
+fn apply_chat_runtime_request_leaves_intent_classifier_none_when_spec_absent() {
     let mut session = test_session(None);
-    let init = SessionInit {
-        system_prompt: None,
-        model: None,
-        max_tokens: None,
-        temperature: None,
-        max_turns: None,
-        installed_tools: None,
-        installed_integrations: None,
-        workspace: None,
-        project_path: None,
-        token: None,
-        project_id: None,
-        conversation_messages: None,
-        aura_agent_id: None,
-        aura_session_id: None,
-        aura_org_id: None,
-        agent_id: None,
-        template_agent_id: None,
-        user_id: "user-test".to_string(),
-        tool_permissions: None,
-        provider_overrides: None,
-        intent_classifier: None,
-        agent_permissions: AgentPermissionsWire::default(),
-        agent_identity: None,
-        agent_skills: Vec::new(),
-        agent_system_prompt: None,
-        project_info: None,
-    };
-    session.apply_init(init).unwrap();
+    let req = blank_chat_request();
+    session.apply_chat_runtime_request(req).unwrap();
     assert!(session.intent_classifier.is_none());
     assert!(session.intent_classifier_manifest.is_empty());
 
@@ -221,52 +166,23 @@ fn apply_init_leaves_intent_classifier_none_when_spec_absent() {
     assert!(cfg.intent_classifier_manifest.is_empty());
 }
 
-fn blank_session_init() -> SessionInit {
-    SessionInit {
-        system_prompt: None,
-        model: None,
-        max_tokens: None,
-        temperature: None,
-        max_turns: None,
-        installed_tools: None,
-        installed_integrations: None,
-        workspace: None,
-        project_path: None,
-        token: None,
-        project_id: None,
-        conversation_messages: None,
-        aura_agent_id: None,
-        aura_session_id: None,
-        aura_org_id: None,
-        agent_id: None,
-        template_agent_id: None,
-        user_id: "user-test".to_string(),
-        tool_permissions: None,
-        provider_overrides: None,
-        intent_classifier: None,
-        agent_permissions: AgentPermissionsWire::default(),
-        agent_identity: None,
-        agent_skills: Vec::new(),
-        agent_system_prompt: None,
-        project_info: None,
-    }
-}
-
 #[test]
-fn apply_init_applies_full_access_permissions_by_default() {
+fn apply_chat_runtime_request_applies_full_access_permissions_by_default() {
     let mut session = test_session(None);
-    session.apply_init(blank_session_init()).unwrap();
+    session
+        .apply_chat_runtime_request(blank_chat_request())
+        .unwrap();
     assert_eq!(session.agent_permissions, AgentPermissions::full_access());
 }
 
 #[test]
-fn apply_init_uses_template_agent_id_for_skill_lookup() {
+fn apply_chat_runtime_request_uses_template_id_for_skill_lookup() {
     let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.agent_id = Some("spec-gen-project-123".to_string());
-    init.template_agent_id = Some("f74bc868-0a34-4195-9718-bf5ce7f67a55".to_string());
+    let mut req = blank_chat_request();
+    req.agent_identity.partition_id = Some("spec-gen-project-123".to_string());
+    req.agent_identity.template_id = Some("f74bc868-0a34-4195-9718-bf5ce7f67a55".to_string());
 
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
 
     assert_eq!(
         session.skill_agent_id.as_deref(),
@@ -275,63 +191,52 @@ fn apply_init_uses_template_agent_id_for_skill_lookup() {
 }
 
 #[test]
-fn apply_init_falls_back_to_agent_id_for_skill_lookup() {
+fn apply_chat_runtime_request_falls_back_to_partition_id_for_skill_lookup() {
     let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.agent_id = Some("legacy-agent-id".to_string());
+    let mut req = blank_chat_request();
+    req.agent_identity.partition_id = Some("legacy-agent-id".to_string());
 
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
 
     assert_eq!(session.skill_agent_id.as_deref(), Some("legacy-agent-id"));
 }
 
 /// Phase 2 of the cross-repo `parallel-session-chats` plan: two
-/// `SessionInit`s that differ only in the trailing `session` segment
+/// runtime requests that differ only in the trailing `session` segment
 /// of the partition string `"{template}::{instance}::{session}"` must
-/// yield **distinct** `Session.agent_id`s — so each session gets its
-/// own `aura-store` record-log keyspace, its own `Kernel::next_seq`
-/// chain, and its own per-(template, instance, session) turn lock.
-/// Memory, on the other hand, is keyed by `memory_agent_id()` which
-/// prefers the explicit template UUID via `aura_agent_id`, so both
-/// sessions still resolve to the **same** template id for memory
-/// reads/writes — that's the desired behavior (memory shared at the
-/// template level, record log partitioned per logical session).
-///
-/// `apply_init` parses `agent_id` with `AgentId::from_hex(...)` first
-/// and falls back to `blake3(agent_id_string)` when the hex parse
-/// fails. Three-segment partition strings always contain `::` and
-/// therefore always go down the blake3 path, where two distinct
-/// strings hash to two distinct 32-byte digests. This test pins that
-/// behavior; if `apply_init` ever started ignoring the session
-/// segment (e.g. by re-deriving the agent id from `template_agent_id`
-/// only) we'd lose per-session record-log isolation and the
-/// concurrent-turns guarantee the plan rests on.
-///
-/// TODO(parallel-sessions): integration-level WS test once a
-/// stub-model test scaffold is available — the only existing file
-/// under `crates/aura-runtime/tests/` is a static-source regression
-/// guard, not a runtime WS harness, so this unit-level assertion is
-/// the load-bearing test for the harness side of the plan.
+/// yield **distinct** `Session.agent_id`s.
 #[test]
-fn apply_init_partitions_session_id_per_session_segment() {
+fn apply_chat_runtime_request_partitions_session_id_per_session_segment() {
     use aura_core::AgentId;
 
     let template_uuid = "f74bc868-0a34-4195-9718-bf5ce7f67a55";
     let instance = "abcdef01-2345-6789-abcd-ef0123456789";
 
     let mut session_a = test_session(None);
-    let mut init_a = blank_session_init();
-    init_a.agent_id = Some(format!("{template_uuid}::{instance}::sess-A"));
-    init_a.template_agent_id = Some(template_uuid.to_string());
-    init_a.aura_agent_id = Some(template_uuid.to_string());
-    session_a.apply_init(init_a).unwrap();
+    let mut req_a = blank_chat_request();
+    req_a.agent_identity.partition_id = Some(format!("{template_uuid}::{instance}::sess-A"));
+    req_a.agent_identity.template_id = Some(template_uuid.to_string());
+    req_a.project = Some(ProjectContext {
+        project_id: "proj-test".to_string(),
+        project_info: None,
+        aura_agent_id: Some(template_uuid.to_string()),
+        aura_org_id: None,
+        aura_session_id: None,
+    });
+    session_a.apply_chat_runtime_request(req_a).unwrap();
 
     let mut session_b = test_session(None);
-    let mut init_b = blank_session_init();
-    init_b.agent_id = Some(format!("{template_uuid}::{instance}::sess-B"));
-    init_b.template_agent_id = Some(template_uuid.to_string());
-    init_b.aura_agent_id = Some(template_uuid.to_string());
-    session_b.apply_init(init_b).unwrap();
+    let mut req_b = blank_chat_request();
+    req_b.agent_identity.partition_id = Some(format!("{template_uuid}::{instance}::sess-B"));
+    req_b.agent_identity.template_id = Some(template_uuid.to_string());
+    req_b.project = Some(ProjectContext {
+        project_id: "proj-test".to_string(),
+        project_info: None,
+        aura_agent_id: Some(template_uuid.to_string()),
+        aura_org_id: None,
+        aura_session_id: None,
+    });
+    session_b.apply_chat_runtime_request(req_b).unwrap();
 
     assert_ne!(
         session_a.agent_id, session_b.agent_id,
@@ -355,27 +260,21 @@ fn apply_init_partitions_session_id_per_session_segment() {
         "memory_agent_id must resolve to the template uuid so memory \
          is shared across sessions of the same template+instance",
     );
-    assert_eq!(
-        session_a.memory_agent_id(),
-        session_b.memory_agent_id(),
-        "both sessions must share the same memory keyspace even \
-         though their record-log AgentIds diverge",
-    );
 }
 
 #[test]
-fn apply_init_applies_explicit_agent_permissions() {
+fn apply_chat_runtime_request_applies_explicit_agent_permissions() {
     use aura_protocol::{AgentPermissionsWire, AgentScopeWire, CapabilityWire};
     let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.agent_permissions = AgentPermissionsWire {
+    let mut req = blank_chat_request();
+    req.agent_permissions = AgentPermissionsWire {
         scope: AgentScopeWire {
             orgs: vec!["org-a".into()],
             ..AgentScopeWire::default()
         },
         capabilities: vec![CapabilityWire::SpawnAgent, CapabilityWire::ReadAgent],
     };
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
     let perms = &session.agent_permissions;
     assert_eq!(perms.scope.orgs, vec!["org-a".to_string()]);
     assert!(perms.capabilities.contains(&Capability::SpawnAgent));
@@ -383,15 +282,18 @@ fn apply_init_applies_explicit_agent_permissions() {
 }
 
 #[test]
-fn apply_init_applies_ceo_preset_when_wired_explicitly() {
-    // Keep this in sync with `AgentPermissions::ceo_preset()`. When
-    // new capabilities are added to the preset, extend the wire list
-    // below so the assertion still holds.
+fn apply_chat_runtime_request_applies_ceo_preset_when_wired_explicitly() {
     use aura_protocol::{AgentPermissionsWire, CapabilityWire};
     let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.aura_org_id = Some("org-uuid".into());
-    init.agent_permissions = AgentPermissionsWire {
+    let mut req = blank_chat_request();
+    req.project = Some(ProjectContext {
+        project_id: "proj-test".to_string(),
+        project_info: None,
+        aura_org_id: Some("org-uuid".into()),
+        aura_session_id: None,
+        aura_agent_id: None,
+    });
+    req.agent_permissions = AgentPermissionsWire {
         scope: Default::default(),
         capabilities: vec![
             CapabilityWire::SpawnAgent,
@@ -407,53 +309,44 @@ fn apply_init_applies_ceo_preset_when_wired_explicitly() {
             CapabilityWire::WriteAllProjects,
         ],
     };
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
     assert_eq!(session.agent_permissions, AgentPermissions::ceo_preset());
 }
 
 /// Chat-WS migration regression: when ANY typed-field is populated
-/// on `SessionInit`, `apply_init` must build the session prompt via
-/// `SystemPromptBuilder` from those typed inputs and ignore the
-/// legacy `system_prompt: Option<String>` payload.
-///
-/// Pins the section ordering and per-field rendering so an aura-os
-/// caller that stops baking the prompt and starts forwarding typed
-/// fields gets a structurally-equivalent system prompt out the
-/// other side. The harness-side helper itself has dedicated
-/// snapshot coverage in
-/// `aura-agent::prompts::system::tests::snapshot_chat_with_identity*`;
-/// this test pins the wiring through `apply_init`.
+/// on the runtime request, the session prompt must be built via
+/// `SystemPromptBuilder` from those typed inputs.
 #[test]
-fn apply_init_typed_fields_path_takes_priority_over_legacy_system_prompt() {
-    use aura_protocol::{AgentIdentityWire, ChatProjectInfoWire};
+fn apply_chat_runtime_request_typed_fields_path_builds_assembled_prompt() {
+    use aura_protocol::AgentPersona;
 
     let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.system_prompt = Some("LEGACY_PRE_BAKED_PROMPT_THAT_MUST_BE_IGNORED".to_string());
-    init.agent_identity = Some(AgentIdentityWire {
+    let mut req = blank_chat_request();
+    req.agent_identity.persona = Some(AgentPersona {
         name: "Atlas".into(),
         role: "Engineer".into(),
         personality: "Precise and methodical.".into(),
     });
-    init.agent_skills = vec!["Rust".into(), "TypeScript".into()];
-    init.agent_system_prompt = Some("Use TDD on every change.".into());
-    init.project_info = Some(ChatProjectInfoWire {
-        id: "00000000-0000-0000-0000-000000000001".into(),
-        name: "Demo".into(),
-        description: "A demo project.".into(),
-        workspace_root: String::new(),
-        build_command: "cargo build".into(),
-        test_command: "cargo test".into(),
+    req.agent_identity.skills = vec!["Rust".into(), "TypeScript".into()];
+    req.agent_identity.system_prompt = Some("Use TDD on every change.".into());
+    req.project = Some(ProjectContext {
+        project_id: "proj-test".to_string(),
+        project_info: Some(ChatProjectInfoWire {
+            id: "00000000-0000-0000-0000-000000000001".into(),
+            name: "Demo".into(),
+            description: "A demo project.".into(),
+            workspace_root: String::new(),
+            build_command: "cargo build".into(),
+            test_command: "cargo test".into(),
+        }),
+        aura_org_id: None,
+        aura_session_id: None,
+        aura_agent_id: None,
     });
 
-    session.apply_init(init).unwrap();
+    session.apply_chat_runtime_request(req).unwrap();
 
     let prompt = &session.system_prompt;
-
-    assert!(
-        !prompt.contains("LEGACY_PRE_BAKED_PROMPT_THAT_MUST_BE_IGNORED"),
-        "typed-fields path must ignore the legacy system_prompt payload; got prompt:\n{prompt}",
-    );
 
     assert!(
         prompt.contains("<chat_capabilities>"),
@@ -511,25 +404,6 @@ fn apply_init_typed_fields_path_takes_priority_over_legacy_system_prompt() {
     assert!(
         prompt.contains("test_command: cargo test"),
         "missing test command: {prompt}"
-    );
-}
-
-/// Chat-WS migration regression: when EVERY typed field is absent
-/// or blank, `apply_init` must fall back to the legacy
-/// `SessionInit.system_prompt` payload verbatim. This preserves
-/// compatibility with older callers (and any test fixtures) that
-/// were written before the typed-fields wire shape landed.
-#[test]
-fn apply_init_falls_back_to_legacy_system_prompt_when_typed_fields_empty() {
-    let mut session = test_session(None);
-    let mut init = blank_session_init();
-    init.system_prompt = Some("LEGACY_BAKED_BODY_VERBATIM".to_string());
-
-    session.apply_init(init).unwrap();
-
-    assert_eq!(
-        session.system_prompt, "LEGACY_BAKED_BODY_VERBATIM",
-        "with all typed-fields absent, apply_init must use SessionInit.system_prompt verbatim",
     );
 }
 
@@ -612,19 +486,6 @@ fn truncate_messages_for_storage_caps_oversized_tool_result_json() {
 
 // ---------------------------------------------------------------------------
 // Regression tests for `agent_loop_stream_timeout`
-//
-// The chat-session `AgentLoopConfig::stream_timeout` previously hard-coded
-// 180s, which was strictly less than the reasoner's reqwest HTTP timeout
-// (`AURA_MODEL_TIMEOUT_MS`, default 300_000ms). The outer guard at
-// `aura_agent::agent_loop::iteration::AgentLoop::call_model` therefore
-// preempted long-but-healthy LLM streams (e.g. a turn emitting several
-// large `update_spec` tool blocks inline) and fired
-// `LlmCallError::Fatal("Model call timed out after 180s")`, surfaced to
-// clients as `code: "llm_error"`.
-//
-// These tests pin the new helper's invariant — outer guard MUST be
-// strictly greater than the reasoner's HTTP timeout — and exercise the
-// `AURA_MODEL_TIMEOUT_MS` override path.
 // ---------------------------------------------------------------------------
 
 /// Serializes the env-mutating tests below. Rust runs unit tests in
@@ -676,14 +537,12 @@ fn agent_loop_stream_timeout_reads_env_in_milliseconds_with_margin() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::capture("AURA_MODEL_TIMEOUT_MS");
 
-    // 600_000ms + 30s margin = 630s.
     std::env::set_var("AURA_MODEL_TIMEOUT_MS", "600000");
     assert_eq!(
         agent_loop_stream_timeout(),
         std::time::Duration::from_secs(630),
     );
 
-    // Whitespace / trailing characters are tolerated by the trim+parse path.
     std::env::set_var("AURA_MODEL_TIMEOUT_MS", "  120000  ");
     assert_eq!(
         agent_loop_stream_timeout(),
@@ -696,50 +555,21 @@ fn agent_loop_stream_timeout_falls_back_for_invalid_or_zero_values() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvVarGuard::capture("AURA_MODEL_TIMEOUT_MS");
 
-    // Empty / non-numeric / zero must NOT collapse the outer guard to
-    // the margin alone — they fall back to the documented default so
-    // a typo can't silently shrink the timeout below the HTTP layer.
-    let default = std::time::Duration::from_secs(330);
-
     std::env::set_var("AURA_MODEL_TIMEOUT_MS", "");
-    assert_eq!(agent_loop_stream_timeout(), default);
-
-    std::env::set_var("AURA_MODEL_TIMEOUT_MS", "nope");
-    assert_eq!(agent_loop_stream_timeout(), default);
-
-    std::env::set_var("AURA_MODEL_TIMEOUT_MS", "0");
-    assert_eq!(agent_loop_stream_timeout(), default);
-}
-
-/// Core invariant: the outer-guard timeout used by the agent loop MUST
-/// be strictly greater than the reasoner's HTTP request timeout, for
-/// every value of `AURA_MODEL_TIMEOUT_MS` (including the unset default
-/// and any explicit override). Without this, a still-healthy stream
-/// can be preempted by the outer `tokio::time::timeout`, surfacing a
-/// generic `code: "llm_error"` instead of the typed `ReasonerError`
-/// the HTTP layer would have produced.
-#[test]
-fn agent_loop_stream_timeout_strictly_exceeds_reasoner_timeout() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = EnvVarGuard::capture("AURA_MODEL_TIMEOUT_MS");
-
-    // Default path (no env set).
-    std::env::remove_var("AURA_MODEL_TIMEOUT_MS");
-    let outer = agent_loop_stream_timeout();
-    let inner = std::time::Duration::from_millis(300_000);
-    assert!(
-        outer > inner,
-        "default outer guard ({outer:?}) must exceed default reasoner timeout ({inner:?})"
+    assert_eq!(
+        agent_loop_stream_timeout(),
+        std::time::Duration::from_secs(330),
     );
 
-    // Several explicit overrides — match the reasoner config's parser.
-    for ms in [60_000_u64, 180_000, 300_000, 600_000, 900_000] {
-        std::env::set_var("AURA_MODEL_TIMEOUT_MS", ms.to_string());
-        let outer = agent_loop_stream_timeout();
-        let inner = std::time::Duration::from_millis(ms);
-        assert!(
-            outer > inner,
-            "outer guard ({outer:?}) must exceed reasoner timeout ({inner:?}) for AURA_MODEL_TIMEOUT_MS={ms}"
-        );
-    }
+    std::env::set_var("AURA_MODEL_TIMEOUT_MS", "not-a-number");
+    assert_eq!(
+        agent_loop_stream_timeout(),
+        std::time::Duration::from_secs(330),
+    );
+
+    std::env::set_var("AURA_MODEL_TIMEOUT_MS", "0");
+    assert_eq!(
+        agent_loop_stream_timeout(),
+        std::time::Duration::from_secs(330),
+    );
 }

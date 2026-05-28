@@ -24,10 +24,11 @@ mod tests;
 mod tool_approval;
 mod ws_handler;
 
+pub(crate) use helpers::{prepare_chat_session, ChatRequestError};
 pub use state::Session;
 pub(crate) use state::{agent_permissions_from_wire, context_window_for_model};
 pub(crate) use tool_approval::ToolApprovalBroker;
-pub use ws_handler::handle_ws_connection;
+pub(crate) use ws_handler::handle_chat_ws_connection;
 
 use aura_reasoner::ModelProvider;
 use aura_skills::SkillManager;
@@ -46,7 +47,7 @@ use crate::scheduler::Scheduler;
 
 /// Configuration passed to the WebSocket handler from the router state.
 #[derive(Clone)]
-pub struct WsContext {
+pub(crate) struct WsContext {
     /// Default workspace base path.
     pub(crate) workspace_base: PathBuf,
     /// Shared model provider (type-erased).
@@ -83,4 +84,31 @@ pub struct WsContext {
     pub(crate) router_url: Option<String>,
     /// aura-os-server base URL used by cross-agent callbacks.
     pub(crate) aura_os_server_url: Option<String>,
+}
+
+impl WsContext {
+    /// Build a [`WsContext`] from a [`crate::router::RouterState`]
+    /// snapshot plus the auth token resolved at the
+    /// [`crate::router::RouterState`] entry point.
+    pub(crate) fn from_state(
+        state: &crate::router::RouterState,
+        auth_token: Option<String>,
+    ) -> Self {
+        Self {
+            workspace_base: state.config.workspaces_path(),
+            provider: state.provider.clone(),
+            store: state.store.clone(),
+            scheduler: state.scheduler.clone(),
+            tool_config: state.tool_config.clone(),
+            auth_token,
+            catalog: state.catalog.clone(),
+            domain_api: state.domain_api.clone(),
+            automaton_controller: state.automaton_controller.clone(),
+            project_base: state.config.project_base.clone(),
+            memory_manager: state.memory_manager.clone(),
+            skill_manager: state.skill_manager.clone(),
+            router_url: state.router_url.clone(),
+            aura_os_server_url: state.config.aura_os_server_url.clone(),
+        }
+    }
 }

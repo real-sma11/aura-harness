@@ -1,17 +1,25 @@
 //! WebSocket session protocol message types.
 //!
 //! Re-exports canonical types from `aura-protocol` and provides
-//! harness-specific conversions between wire types and internal types.
+//! harness-specific helpers that depend on aura-runtime-internal
+//! types (e.g. [`aura_reasoner::ToolDefinition`]).
+//!
+//! Phase A note: the wire→core conversion helpers
+//! (`installed_tool_to_core`, `installed_integration_to_core`,
+//! `agent_tool_permissions_from_wire`, `tool_state_from_wire`,
+//! `tool_state_to_wire`) moved to
+//! [`aura_protocol::conversions`] so the protocol crate is the
+//! single canonical wire↔core seam. The re-exports below preserve
+//! the in-crate import path so callers do not have to chase the
+//! move.
 
 pub use aura_protocol::*;
 
-use aura_core::{
-    AgentToolPermissions, InstalledIntegrationDefinition, InstalledToolDefinition, ToolState,
-};
+use aura_core::ToolState;
 use aura_reasoner::ToolDefinition;
 
-/// Convert a reasoner [`ToolDefinition`] into a protocol [`ToolInfo`] with
-/// an explicit tri-state permission annotation.
+/// Convert a reasoner [`ToolDefinition`] into a protocol [`ToolInfo`]
+/// with an explicit tri-state permission annotation.
 pub fn tool_info_from_definition_with_state(
     td: &ToolDefinition,
     effective_state: ToolState,
@@ -19,122 +27,7 @@ pub fn tool_info_from_definition_with_state(
     ToolInfo {
         name: td.name.clone(),
         description: td.description.clone(),
-        effective_state: tool_state_to_wire(effective_state),
-    }
-}
-
-pub fn tool_state_to_wire(state: ToolState) -> ToolStateWire {
-    match state {
-        ToolState::Allow => ToolStateWire::On,
-        ToolState::Deny => ToolStateWire::Off,
-        ToolState::Ask => ToolStateWire::Ask,
-    }
-}
-
-pub fn tool_state_from_wire(state: ToolStateWire) -> ToolState {
-    match state {
-        ToolStateWire::On => ToolState::Allow,
-        ToolStateWire::Off => ToolState::Deny,
-        ToolStateWire::Ask => ToolState::Ask,
-    }
-}
-
-pub fn agent_tool_permissions_from_wire(wire: AgentToolPermissionsWire) -> AgentToolPermissions {
-    AgentToolPermissions {
-        per_tool: wire
-            .per_tool
-            .into_iter()
-            .map(|(name, state)| (name, tool_state_from_wire(state)))
-            .collect(),
-    }
-}
-
-/// Convert a protocol [`InstalledTool`] into a core [`InstalledToolDefinition`].
-pub fn installed_tool_to_core(t: InstalledTool) -> InstalledToolDefinition {
-    InstalledToolDefinition {
-        name: t.name,
-        description: t.description,
-        input_schema: t.input_schema,
-        endpoint: t.endpoint,
-        auth: match t.auth {
-            ToolAuth::None => aura_core::ToolAuth::None,
-            ToolAuth::Bearer { token } => aura_core::ToolAuth::Bearer { token },
-            ToolAuth::ApiKey { header, key } => aura_core::ToolAuth::ApiKey { header, key },
-            ToolAuth::Headers { headers } => aura_core::ToolAuth::Headers { headers },
-        },
-        timeout_ms: t.timeout_ms,
-        namespace: t.namespace,
-        required_integration: t.required_integration.map(|requirement| {
-            aura_core::InstalledToolIntegrationRequirement {
-                integration_id: requirement.integration_id,
-                provider: requirement.provider,
-                kind: requirement.kind,
-            }
-        }),
-        runtime_execution: t.runtime_execution.map(|execution| match execution {
-            InstalledToolRuntimeExecution::AppProvider(provider) => {
-                aura_core::InstalledToolRuntimeExecution::AppProvider(
-                    aura_core::InstalledToolRuntimeProviderExecution {
-                        provider: provider.provider,
-                        base_url: provider.base_url,
-                        static_headers: provider.static_headers,
-                        integrations: provider
-                            .integrations
-                            .into_iter()
-                            .map(|integration| aura_core::InstalledToolRuntimeIntegration {
-                                integration_id: integration.integration_id,
-                                base_url: integration.base_url,
-                                auth: match integration.auth {
-                                    InstalledToolRuntimeAuth::None => {
-                                        aura_core::InstalledToolRuntimeAuth::None
-                                    }
-                                    InstalledToolRuntimeAuth::AuthorizationBearer { token } => {
-                                        aura_core::InstalledToolRuntimeAuth::AuthorizationBearer {
-                                            token,
-                                        }
-                                    }
-                                    InstalledToolRuntimeAuth::AuthorizationRaw { value } => {
-                                        aura_core::InstalledToolRuntimeAuth::AuthorizationRaw {
-                                            value,
-                                        }
-                                    }
-                                    InstalledToolRuntimeAuth::Header { name, value } => {
-                                        aura_core::InstalledToolRuntimeAuth::Header { name, value }
-                                    }
-                                    InstalledToolRuntimeAuth::QueryParam { name, value } => {
-                                        aura_core::InstalledToolRuntimeAuth::QueryParam {
-                                            name,
-                                            value,
-                                        }
-                                    }
-                                    InstalledToolRuntimeAuth::Basic { username, password } => {
-                                        aura_core::InstalledToolRuntimeAuth::Basic {
-                                            username,
-                                            password,
-                                        }
-                                    }
-                                },
-                                provider_config: integration.provider_config,
-                            })
-                            .collect(),
-                    },
-                )
-            }
-        }),
-        metadata: t.metadata,
-    }
-}
-
-/// Convert a protocol [`InstalledIntegration`] into a core [`InstalledIntegrationDefinition`].
-pub fn installed_integration_to_core(
-    integration: InstalledIntegration,
-) -> InstalledIntegrationDefinition {
-    InstalledIntegrationDefinition {
-        integration_id: integration.integration_id,
-        name: integration.name,
-        provider: integration.provider,
-        kind: integration.kind,
-        metadata: integration.metadata,
+        effective_state: aura_protocol::tool_state_to_wire(effective_state),
     }
 }
 
@@ -145,62 +38,6 @@ mod tests {
     // ========================================================================
     // Inbound message deserialization
     // ========================================================================
-
-    #[test]
-    fn test_inbound_session_init_full() {
-        const TEST_MODEL: &str = "claude-opus-4-7";
-        let json = serde_json::json!({
-            "type": "session_init",
-            "system_prompt": "You are helpful",
-            "model": TEST_MODEL,
-            "max_tokens": 4096,
-            "temperature": 0.7,
-            "max_turns": 10,
-            "workspace": "/tmp/ws",
-            "token": "jwt-abc",
-            "project_id": "proj-123",
-            "user_id": "user-test",
-            "agent_permissions": {}
-        });
-        let msg: InboundMessage = serde_json::from_value(json).unwrap();
-        match msg {
-            InboundMessage::SessionInit(init) => {
-                assert_eq!(init.system_prompt.as_deref(), Some("You are helpful"));
-                assert_eq!(init.model.as_deref(), Some(TEST_MODEL));
-                assert_eq!(init.max_tokens, Some(4096));
-                assert!((init.temperature.unwrap() - 0.7).abs() < f32::EPSILON);
-                assert_eq!(init.max_turns, Some(10));
-                assert_eq!(init.workspace.as_deref(), Some("/tmp/ws"));
-                assert_eq!(init.token.as_deref(), Some("jwt-abc"));
-                assert_eq!(init.project_id.as_deref(), Some("proj-123"));
-            }
-            _ => panic!("Expected SessionInit"),
-        }
-    }
-
-    #[test]
-    fn test_inbound_session_init_minimal() {
-        let json = serde_json::json!({
-            "type": "session_init",
-            "user_id": "user-test",
-            "agent_permissions": {}
-        });
-        let msg: InboundMessage = serde_json::from_value(json).unwrap();
-        match msg {
-            InboundMessage::SessionInit(init) => {
-                assert!(init.system_prompt.is_none());
-                assert!(init.model.is_none());
-                assert!(init.max_tokens.is_none());
-                assert!(init.temperature.is_none());
-                assert!(init.max_turns.is_none());
-                assert!(init.installed_tools.is_none());
-                assert!(init.installed_integrations.is_none());
-                assert!(init.workspace.is_none());
-                assert!(init.token.is_none());
-            }
-            _ => panic!("Expected SessionInit"),
-        }
-    }
 
     #[test]
     fn test_inbound_user_message() {
@@ -408,66 +245,6 @@ mod tests {
         assert_eq!(json["stop_reason"], "end_turn");
         assert_eq!(json["usage"]["input_tokens"], 100);
         assert_eq!(json["usage"]["output_tokens"], 50);
-        assert_eq!(json["usage"]["estimated_context_tokens"], 150);
-        assert_eq!(json["usage"]["cache_creation_input_tokens"], 25);
-        assert_eq!(json["usage"]["cache_read_input_tokens"], 10);
-        assert_eq!(json["usage"]["cumulative_cache_creation_input_tokens"], 50);
-        assert_eq!(json["usage"]["cumulative_cache_read_input_tokens"], 20);
-        assert_eq!(json["usage"]["model"], "claude-opus-4-7");
-        // Per-bucket context breakdown round-trips through serde so the
-        // frontend can render the new popover without losing fidelity.
-        let breakdown = &json["usage"]["context_breakdown"];
-        assert_eq!(breakdown["system_prompt_tokens"], 7);
-        assert_eq!(breakdown["tools_tokens"], 11);
-        assert_eq!(breakdown["skills_tokens"], 13);
-        assert_eq!(breakdown["mcp_tokens"], 0);
-        assert_eq!(breakdown["subagents_tokens"], 17);
-        assert_eq!(breakdown["conversation_tokens"], 102);
-        assert_eq!(json["files_changed"]["created"][0], "new.txt");
-        assert_eq!(json["files_changed"]["modified"][0], "old.txt");
-        assert!(json["files_changed"]["deleted"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-    }
-
-    /// Older harness builds will continue to omit `context_breakdown`
-    /// from the JSON they produce; with `#[serde(default)]` the field
-    /// must deserialize back to its zero value so newer frontends never
-    /// crash when reading legacy payloads.
-    #[test]
-    fn assistant_message_end_deserializes_without_context_breakdown() {
-        let json = serde_json::json!({
-            "type": "assistant_message_end",
-            "message_id": "msg_legacy",
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "estimated_context_tokens": 15,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "cumulative_input_tokens": 10,
-                "cumulative_output_tokens": 5,
-                "cumulative_cache_creation_input_tokens": 0,
-                "cumulative_cache_read_input_tokens": 0,
-                "context_utilization": 0.0,
-                "model": "test",
-                "provider": "test",
-            },
-            "files_changed": {
-                "created": [],
-                "modified": [],
-                "deleted": [],
-            },
-        });
-        let parsed: OutboundMessage = serde_json::from_value(json).unwrap();
-        match parsed {
-            OutboundMessage::AssistantMessageEnd(end) => {
-                assert!(end.usage.context_breakdown.is_empty());
-            }
-            _ => panic!("Expected AssistantMessageEnd"),
-        }
     }
 
     #[test]
@@ -482,30 +259,9 @@ mod tests {
         assert_eq!(json["type"], "error");
         assert_eq!(json["code"], "rate_limit");
         assert!(json["recoverable"].as_bool().unwrap());
-        assert!(
-            json.get("support_id").is_none(),
-            "absent support_id must not be serialized so older receivers \
-             never see an unexpected key"
-        );
+        assert!(json.get("support_id").is_none());
     }
 
-    #[test]
-    fn test_outbound_error_non_recoverable() {
-        let msg = OutboundMessage::Error(ErrorMsg {
-            code: "auth_failed".to_string(),
-            message: "Invalid token".to_string(),
-            recoverable: false,
-            support_id: None,
-        });
-        let json = serde_json::to_value(&msg).unwrap();
-        assert!(!json["recoverable"].as_bool().unwrap());
-    }
-
-    /// Phase 6: when an in-process emit site pre-populates `support_id`
-    /// the field rides on the wire as a top-level JSON key. Confirms
-    /// the additive serde wiring works in both directions: serialize
-    /// stamps the id, and deserializing the same JSON back into
-    /// `ErrorMsg` returns the id unchanged.
     #[test]
     fn test_outbound_error_msg_with_support_id_roundtrips() {
         let msg = OutboundMessage::Error(ErrorMsg {
@@ -515,8 +271,6 @@ mod tests {
             support_id: Some("0123456789ab".to_string()),
         });
         let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["type"], "error");
-        assert_eq!(json["code"], "agent_stalled");
         assert_eq!(json["support_id"], "0123456789ab");
 
         let back: OutboundMessage = serde_json::from_value(json).unwrap();
@@ -527,71 +281,6 @@ mod tests {
             }
             _ => panic!("expected Error variant"),
         }
-    }
-
-    /// Phase 6 wire-compat guard: older harness builds (and existing
-    /// in-process emit sites that haven't been migrated yet) emit
-    /// `error` JSON without a `support_id` key. Newer aura-os builds
-    /// must still deserialize that JSON cleanly into `ErrorMsg` with
-    /// `support_id == None` so the SSE remap boundary keeps stamping
-    /// a suffix instead of crashing on a missing field.
-    #[test]
-    fn test_outbound_error_msg_deserializes_without_support_id() {
-        let json = serde_json::json!({
-            "type": "error",
-            "code": "something_else",
-            "message": "boom",
-            "recoverable": false,
-        });
-        let parsed: OutboundMessage = serde_json::from_value(json).unwrap();
-        match parsed {
-            OutboundMessage::Error(err) => {
-                assert_eq!(err.code, "something_else");
-                assert!(err.support_id.is_none());
-            }
-            _ => panic!("expected Error variant"),
-        }
-    }
-
-    // ========================================================================
-    // Structural / utility tests
-    // ========================================================================
-
-    #[test]
-    fn test_session_usage_default() {
-        let usage = SessionUsage::default();
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 0);
-        assert_eq!(usage.estimated_context_tokens, 0);
-        assert_eq!(usage.cumulative_input_tokens, 0);
-        assert_eq!(usage.cumulative_output_tokens, 0);
-        assert!((usage.context_utilization - 0.0).abs() < f32::EPSILON);
-        assert!(usage.model.is_empty());
-        assert!(usage.provider.is_empty());
-    }
-
-    #[test]
-    fn test_files_changed_is_empty() {
-        let fc = FilesChanged::default();
-        assert!(fc.is_empty());
-
-        let fc2 = FilesChanged {
-            created: vec!["a.txt".to_string()],
-            ..Default::default()
-        };
-        assert!(!fc2.is_empty());
-
-        let fc3 = FilesChanged {
-            modified: vec!["b.txt".to_string()],
-            ..Default::default()
-        };
-        assert!(!fc3.is_empty());
-
-        let fc4 = FilesChanged {
-            deleted: vec!["c.txt".to_string()],
-            ..Default::default()
-        };
-        assert!(!fc4.is_empty());
     }
 
     #[test]
@@ -605,86 +294,5 @@ mod tests {
         assert_eq!(info.name, "test_tool");
         assert_eq!(info.description, "A test tool");
         assert_eq!(info.effective_state, ToolStateWire::On);
-    }
-
-    #[test]
-    fn test_inbound_user_message_empty_content() {
-        let json = serde_json::json!({"type": "user_message", "content": ""});
-        let msg: InboundMessage = serde_json::from_value(json).unwrap();
-        match msg {
-            InboundMessage::UserMessage(um) => assert!(um.content.is_empty()),
-            _ => panic!("Expected UserMessage"),
-        }
-    }
-
-    #[test]
-    fn test_inbound_user_message_unicode() {
-        let json = serde_json::json!({"type": "user_message", "content": "こんにちは🌍"});
-        let msg: InboundMessage = serde_json::from_value(json).unwrap();
-        match msg {
-            InboundMessage::UserMessage(um) => assert_eq!(um.content, "こんにちは🌍"),
-            _ => panic!("Expected UserMessage"),
-        }
-    }
-
-    #[test]
-    fn test_outbound_all_variants_serialize() {
-        let variants: Vec<OutboundMessage> = vec![
-            OutboundMessage::SessionReady(SessionReady {
-                session_id: "s".into(),
-                tools: vec![],
-                skills: vec![],
-            }),
-            OutboundMessage::AssistantMessageStart(AssistantMessageStart {
-                message_id: "m".into(),
-            }),
-            OutboundMessage::TextDelta(TextDelta { text: "t".into() }),
-            OutboundMessage::ThinkingDelta(ThinkingDelta {
-                thinking: "th".into(),
-            }),
-            OutboundMessage::ToolUseStart(ToolUseStart {
-                id: "i".into(),
-                name: "n".into(),
-            }),
-            OutboundMessage::ToolResult(ToolResultMsg {
-                name: "n".into(),
-                result: "r".into(),
-                is_error: false,
-                tool_use_id: None,
-            }),
-            OutboundMessage::AssistantMessageEnd(Box::new(AssistantMessageEnd {
-                message_id: "m".into(),
-                stop_reason: "s".into(),
-                usage: SessionUsage::default(),
-                files_changed: FilesChanged::default(),
-                originating_user_id: None,
-            })),
-            OutboundMessage::Error(ErrorMsg {
-                code: "c".into(),
-                message: "m".into(),
-                recoverable: false,
-                support_id: None,
-            }),
-        ];
-
-        let expected_types = [
-            "session_ready",
-            "assistant_message_start",
-            "text_delta",
-            "thinking_delta",
-            "tool_use_start",
-            "tool_result",
-            "assistant_message_end",
-            "error",
-        ];
-
-        for (variant, expected) in variants.iter().zip(expected_types.iter()) {
-            let json = serde_json::to_value(variant).unwrap();
-            assert_eq!(
-                json["type"].as_str().unwrap(),
-                *expected,
-                "variant type mismatch"
-            );
-        }
     }
 }

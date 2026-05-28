@@ -2,6 +2,7 @@
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * Definition for an installed integration, sent over the wire in `session_init`.
+ * Definition for an installed integration, sent over the wire on
+ * [`crate::AgentCapabilities`].
  */
 export type InstalledIntegration = { integration_id: string, name: string, provider: string, kind: string, metadata: { [key in string]?: JsonValue }, };

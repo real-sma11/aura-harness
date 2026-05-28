@@ -1,108 +1,33 @@
+//! `POST /v1/run` + `/v1/run/:id/{status,pause,stop}` + `/v1/run/list`
+//! handlers — the canonical entry point for chat / dev-loop / task-run
+//! kickoffs.
+//!
+//! Phase A note: this replaces the old `POST /automaton/start` +
+//! `AutomatonStartRequest` shape with a single handler that consumes
+//! [`aura_protocol::RuntimeRequest`] and dispatches to the right
+//! engine surface based on the run kind. Chat runs are prepared
+//! synchronously and stashed in [`super::RouterState::pending_chat_runs`]
+//! so the follow-up `WS /stream/:run_id` finds an already-applied
+//! [`crate::session::Session`]. DevLoop / TaskRun runs are handed to
+//! the automaton bridge and exposed via the same `/stream/:run_id`
+//! route in event-only mode.
+
 use super::*;
-use aura_protocol::{AgentIdentityWire, AgentPermissionsWire, InstalledIntegration, InstalledTool};
+use crate::session::{prepare_chat_session, ChatRequestError};
+use aura_protocol::{AgentPermissionsWire, RuntimeRequest, RuntimeRequestType, RuntimeRunResponse};
+use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
-pub(super) struct AutomatonStartRequest {
-    project_id: String,
-    #[serde(default)]
-    auth_token: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    workspace_root: Option<String>,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    git_repo_url: Option<String>,
-    #[serde(default)]
-    git_branch: Option<String>,
-    #[serde(default)]
-    installed_tools: Option<Vec<InstalledTool>>,
-    #[serde(default)]
-    installed_integrations: Option<Vec<InstalledIntegration>>,
-    /// Capability + scope bundle for the agent driving this automaton.
-    /// Defaults to empty for older callers, preserving the strict policy
-    /// behavior until aura-os sends the real agent bundle.
-    #[serde(default)]
-    agent_permissions: AgentPermissionsWire,
-    /// Retry-warm-up: the reason text persisted on the previous
-    /// attempt's `task_failed` record. Threaded into the task-run
-    /// automaton config as `prior_failure`, which the automaton folds
-    /// into `TaskInfo::execution_notes`. Ignored on dev-loop starts
-    /// (`task_id` is `None`). `#[serde(default)]` keeps older clients
-    /// — which never sent this field — working unchanged.
-    #[serde(default)]
-    prior_failure: Option<String>,
-    /// Retry-warm-up: recent work-log entries the caller wants the
-    /// agent to re-see on this attempt. Threaded into the task-run
-    /// automaton config as `work_log` and fed straight into
-    /// `AgenticTaskParams::work_log`. Ignored on dev-loop starts.
-    #[serde(default)]
-    work_log: Vec<String>,
-    /// Org UUID forwarded as the `X-Aura-Org-Id` header on outbound
-    /// `/v1/messages` calls so `aura-router` can bucket per-org rate
-    /// limits / billing on automaton runs the same way it does for
-    /// interactive chat. `#[serde(default)]` keeps older callers (or
-    /// the in-tree `aura-os-server` before this field was wired up)
-    /// compatible — the harness simply omits the header if absent.
-    #[serde(default)]
-    aura_org_id: Option<String>,
-    /// Storage session UUID forwarded as `X-Aura-Session-Id`.
-    /// Caller-generated per automaton-start so concurrent runs of
-    /// the same agent get distinct billing/observability partitions.
-    #[serde(default)]
-    aura_session_id: Option<String>,
-    /// Template agent UUID forwarded as `X-Aura-Agent-Id` on outbound
-    /// `/v1/messages` calls. Mirrors the chat path's
-    /// `SessionInit::aura_agent_id`. Without this header
-    /// `aura-router`'s Cloudflare WAF reads the request as
-    /// unsanctioned API traffic — which is what was producing the
-    /// `403 Forbidden` HTML challenges on dev-loop / task-run paths
-    /// while interactive chat from the same account succeeded.
-    /// `#[serde(default)]` keeps older clients compatible.
-    #[serde(default)]
-    aura_agent_id: Option<String>,
-    /// PR B (simplify-system-prompts): typed identity wire fields.
-    ///
-    /// `aura-os` does not populate any of the three until PR C, and
-    /// `#[serde(default)]` keeps the wire backward-compatible. When all
-    /// three are absent / empty the harness leaves
-    /// `AgenticTaskParams::agent` at `None` and the assembled system
-    /// prompt is byte-identical with PR A.
-    #[serde(default)]
-    agent_identity: Option<AgentIdentityWire>,
-    /// Operator-curated skills list. Empty default means no
-    /// `<agent_skills>` section is rendered.
-    #[serde(default)]
-    agent_skills: Vec<String>,
-    /// Operator-authored system prompt (the "system prompt" textarea
-    /// on the agent template). Empty / `None` means no
-    /// `<agent_system_prompt>` section is rendered.
-    #[serde(default)]
-    agent_system_prompt: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct AutomatonStartResponse {
-    automaton_id: String,
-    event_stream_url: String,
-}
-
-/// Start a dev-loop or single-task automaton.
-/// When `task_id` is provided, runs a single task; otherwise starts the full dev loop.
-pub(super) async fn automaton_start_handler(
+/// `POST /v1/run` — start a chat, dev-loop, or task-run.
+///
+/// Returns `{ run_id, event_stream_url }`. The caller follows up with
+/// `WS /stream/:run_id` to either drive a chat session bidirectionally
+/// or receive event-only stream for the automaton runs.
+pub(super) async fn run_start_handler(
     headers: HeaderMap,
     State(state): State<RouterState>,
-    Json(req): Json<AutomatonStartRequest>,
+    Json(req): Json<RuntimeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let bridge = state.automaton_bridge.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "automaton controller unavailable"})),
-        )
-    })?;
-
-    let auth_token = req.auth_token.or_else(|| {
+    let auth_token = req.auth_jwt.clone().or_else(|| {
         headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -110,75 +35,250 @@ pub(super) async fn automaton_start_handler(
             .map(String::from)
     });
 
-    let workspace_root = req.workspace_root.map(|s| {
-        let path = std::path::PathBuf::from(s);
-        state.config.resolve_project_path(&path)
-    });
-    let agent_permissions = crate::session::agent_permissions_from_wire(req.agent_permissions);
-
-    let agent_identity = req.agent_identity.filter(|wire| !wire.is_empty());
-    let agent_skills = req.agent_skills;
-    let agent_system_prompt = req.agent_system_prompt.filter(|s| !s.trim().is_empty());
-
-    let automaton_id = if let Some(task_id) = req.task_id {
-        bridge
-            .run_task_with_capabilities(
-                &req.project_id,
-                &task_id,
-                workspace_root,
-                auth_token,
-                req.model,
-                req.git_repo_url,
-                req.git_branch,
-                req.installed_tools,
-                req.installed_integrations,
-                agent_permissions,
-                req.prior_failure,
-                req.work_log,
-                req.aura_org_id,
-                req.aura_session_id,
-                req.aura_agent_id,
-                agent_identity,
-                agent_skills,
-                agent_system_prompt,
-            )
-            .await
-    } else {
-        bridge
-            .start_dev_loop_with_capabilities(
-                &req.project_id,
-                workspace_root,
-                auth_token,
-                req.model,
-                req.git_repo_url,
-                req.git_branch,
-                req.installed_tools,
-                req.installed_integrations,
-                agent_permissions,
-                req.aura_org_id,
-                req.aura_session_id,
-                req.aura_agent_id,
-                agent_identity,
-                agent_skills,
-                agent_system_prompt,
-            )
-            .await
+    match req.r#type {
+        RuntimeRequestType::Chat { .. } => start_chat_run(state, req, auth_token).await,
+        RuntimeRequestType::DevLoop {} => start_dev_loop_run(state, req, auth_token).await,
+        RuntimeRequestType::TaskRun { .. } => start_task_run(state, req, auth_token).await,
     }
-    .map_err(automaton_start_error_response)?;
+}
 
+async fn start_chat_run(
+    state: RouterState,
+    mut req: RuntimeRequest,
+    auth_token: Option<String>,
+) -> Result<(StatusCode, Json<RuntimeRunResponse>), (StatusCode, Json<serde_json::Value>)> {
+    // Make sure the chat-session helpers see the resolved JWT, not
+    // whatever the body originally carried (the header version takes
+    // precedence per the conventional axum auth flow).
+    if auth_token.is_some() {
+        req.auth_jwt = auth_token.clone();
+    }
+    let ctx = crate::session::WsContext::from_state(&state, auth_token);
+    let session =
+        prepare_chat_session(req, &ctx)
+            .await
+            .map_err(|ChatRequestError { code, message }| {
+                let status = match code {
+                    "invalid_workspace"
+                    | "invalid_provider_config"
+                    | "tool_permissions_load_failed" => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (
+                    status,
+                    Json(serde_json::json!({"error": message, "code": code})),
+                )
+            })?;
+
+    let run_id = Uuid::new_v4().to_string();
+    state
+        .pending_chat_runs
+        .insert(run_id.clone(), std::sync::Mutex::new(Some(session)));
+
+    let event_stream_url = format!("/stream/{run_id}");
     Ok((
         StatusCode::CREATED,
-        Json(AutomatonStartResponse {
-            event_stream_url: format!("/stream/automaton/{automaton_id}"),
-            automaton_id,
+        Json(RuntimeRunResponse {
+            run_id,
+            event_stream_url,
         }),
     ))
 }
 
-fn automaton_start_error_response(e: String) -> (StatusCode, Json<serde_json::Value>) {
-    let status = if e.to_ascii_lowercase().contains("already running") {
+async fn start_dev_loop_run(
+    state: RouterState,
+    req: RuntimeRequest,
+    auth_token: Option<String>,
+) -> Result<(StatusCode, Json<RuntimeRunResponse>), (StatusCode, Json<serde_json::Value>)> {
+    let bridge = automaton_bridge(&state)?;
+
+    let RuntimeRequest {
+        r#type: _,
+        agent_identity,
+        model,
+        workspace,
+        project,
+        agent_permissions,
+        tool_permissions: _,
+        agent_capabilities,
+        auth_jwt: _,
+        user_id: _,
+    } = req;
+
+    let project_ctx = project.ok_or_else(|| {
+        bad_request("dev-loop runs require a project context (project_id, billing ids)")
+    })?;
+    let workspace_root = workspace.project_path.map(|s| {
+        let path = std::path::PathBuf::from(s);
+        state.config.resolve_project_path(&path)
+    });
+    let agent_permissions = wire_permissions_to_core(agent_permissions);
+    let agent_persona = agent_identity.persona.filter(|p| !p.is_empty());
+    let agent_skills = agent_identity.skills;
+    let agent_system_prompt = agent_identity
+        .system_prompt
+        .filter(|s| !s.trim().is_empty());
+
+    let installed_tools = if agent_capabilities.installed_tools.is_empty() {
+        None
+    } else {
+        Some(agent_capabilities.installed_tools)
+    };
+    let installed_integrations = if agent_capabilities.installed_integrations.is_empty() {
+        None
+    } else {
+        Some(agent_capabilities.installed_integrations)
+    };
+
+    let automaton_id = bridge
+        .start_dev_loop_with_capabilities(
+            &project_ctx.project_id,
+            workspace_root,
+            auth_token,
+            model.id,
+            workspace.git_repo_url,
+            workspace.git_branch,
+            installed_tools,
+            installed_integrations,
+            agent_permissions,
+            project_ctx.aura_org_id,
+            project_ctx.aura_session_id,
+            project_ctx.aura_agent_id,
+            agent_persona,
+            agent_skills,
+            agent_system_prompt,
+        )
+        .await
+        .map_err(run_start_error_response)?;
+
+    let event_stream_url = format!("/stream/{automaton_id}");
+    Ok((
+        StatusCode::CREATED,
+        Json(RuntimeRunResponse {
+            run_id: automaton_id,
+            event_stream_url,
+        }),
+    ))
+}
+
+async fn start_task_run(
+    state: RouterState,
+    req: RuntimeRequest,
+    auth_token: Option<String>,
+) -> Result<(StatusCode, Json<RuntimeRunResponse>), (StatusCode, Json<serde_json::Value>)> {
+    let bridge = automaton_bridge(&state)?;
+
+    let RuntimeRequest {
+        r#type,
+        agent_identity,
+        model,
+        workspace,
+        project,
+        agent_permissions,
+        tool_permissions: _,
+        agent_capabilities,
+        auth_jwt: _,
+        user_id: _,
+    } = req;
+
+    let (task_id, prior_failure, work_log) = match r#type {
+        RuntimeRequestType::TaskRun {
+            task_id,
+            prior_failure,
+            work_log,
+        } => (task_id, prior_failure, work_log),
+        _ => unreachable!("dispatched to task_run for non-TaskRun variant"),
+    };
+
+    let project_ctx = project.ok_or_else(|| {
+        bad_request("task-run runs require a project context (project_id, billing ids)")
+    })?;
+    let workspace_root = workspace.project_path.map(|s| {
+        let path = std::path::PathBuf::from(s);
+        state.config.resolve_project_path(&path)
+    });
+    let agent_permissions = wire_permissions_to_core(agent_permissions);
+    let agent_persona = agent_identity.persona.filter(|p| !p.is_empty());
+    let agent_skills = agent_identity.skills;
+    let agent_system_prompt = agent_identity
+        .system_prompt
+        .filter(|s| !s.trim().is_empty());
+
+    let installed_tools = if agent_capabilities.installed_tools.is_empty() {
+        None
+    } else {
+        Some(agent_capabilities.installed_tools)
+    };
+    let installed_integrations = if agent_capabilities.installed_integrations.is_empty() {
+        None
+    } else {
+        Some(agent_capabilities.installed_integrations)
+    };
+
+    let automaton_id = bridge
+        .run_task_with_capabilities(
+            &project_ctx.project_id,
+            &task_id,
+            workspace_root,
+            auth_token,
+            model.id,
+            workspace.git_repo_url,
+            workspace.git_branch,
+            installed_tools,
+            installed_integrations,
+            agent_permissions,
+            prior_failure,
+            work_log,
+            project_ctx.aura_org_id,
+            project_ctx.aura_session_id,
+            project_ctx.aura_agent_id,
+            agent_persona,
+            agent_skills,
+            agent_system_prompt,
+        )
+        .await
+        .map_err(run_start_error_response)?;
+
+    let event_stream_url = format!("/stream/{automaton_id}");
+    Ok((
+        StatusCode::CREATED,
+        Json(RuntimeRunResponse {
+            run_id: automaton_id,
+            event_stream_url,
+        }),
+    ))
+}
+
+fn automaton_bridge(
+    state: &RouterState,
+) -> Result<
+    std::sync::Arc<crate::automaton_bridge::AutomatonBridge>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    state.automaton_bridge.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "automaton controller unavailable"})),
+        )
+    })
+}
+
+fn wire_permissions_to_core(wire: AgentPermissionsWire) -> aura_core::AgentPermissions {
+    crate::session::agent_permissions_from_wire(wire)
+}
+
+fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": message})),
+    )
+}
+
+fn run_start_error_response(e: String) -> (StatusCode, Json<serde_json::Value>) {
+    let lowered = e.to_ascii_lowercase();
+    let status = if lowered.contains("already running") {
         StatusCode::CONFLICT
-    } else if e.starts_with("missing model") {
+    } else if lowered.starts_with("missing model") {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
@@ -186,84 +286,80 @@ fn automaton_start_error_response(e: String) -> (StatusCode, Json<serde_json::Va
     (status, Json(serde_json::json!({"error": e})))
 }
 
-/// Get the status of a running automaton.
-pub(super) async fn automaton_status_handler(
+/// `GET /v1/run/:run_id/status` — fetch the status of a running run.
+///
+/// Chat runs that have been prepared but not yet attached return
+/// `{"status": "pending_attach"}`. Active chat runs return
+/// `{"status": "chat_active"}`. Automaton runs delegate to the
+/// existing bridge status.
+pub(super) async fn run_status_handler(
     State(state): State<RouterState>,
-    Path(automaton_id): Path<String>,
+    Path(run_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let bridge = state.automaton_bridge.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "automaton controller unavailable"})),
-        )
-    })?;
-
-    match bridge.get_status(&automaton_id) {
+    if state.pending_chat_runs.contains_key(&run_id) {
+        return Ok(Json(
+            serde_json::json!({"run_id": run_id, "status": "pending_attach", "kind": "chat"}),
+        ));
+    }
+    let bridge = automaton_bridge(&state)?;
+    match bridge.get_status(&run_id) {
         Some(info) => Ok(Json(serde_json::to_value(&info).unwrap_or_default())),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("automaton {automaton_id} not found")})),
+            Json(serde_json::json!({"error": format!("run {run_id} not found")})),
         )),
     }
 }
 
-/// List all running automatons.
-pub(super) async fn automaton_list_handler(
+/// `GET /v1/run/list` — list every active automaton run on this node.
+///
+/// Chat runs aren't enumerated today because they're per-WebSocket and
+/// hold no server-side identity beyond the pending-attach map entry.
+pub(super) async fn run_list_handler(
     State(state): State<RouterState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let bridge = state.automaton_bridge.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "automaton controller unavailable"})),
-        )
-    })?;
-
+    let bridge = automaton_bridge(&state)?;
     let list = bridge.list_automatons();
     Ok(Json(
         serde_json::to_value(&list).unwrap_or(serde_json::json!([])),
     ))
 }
 
-/// Pause a running automaton.
-pub(super) async fn automaton_pause_handler(
+/// `POST /v1/run/:run_id/pause` — pause an active automaton run.
+pub(super) async fn run_pause_handler(
     State(state): State<RouterState>,
-    Path(automaton_id): Path<String>,
+    Path(run_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let bridge = state.automaton_bridge.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "automaton controller unavailable"})),
-        )
-    })?;
-
+    let bridge = automaton_bridge(&state)?;
     bridge
-        .pause_by_id(&automaton_id)
+        .pause_by_id(&run_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))))?;
-
     Ok(Json(
-        serde_json::json!({"ok": true, "automaton_id": automaton_id, "status": "paused"}),
+        serde_json::json!({"ok": true, "run_id": run_id, "status": "paused"}),
     ))
 }
 
-/// Stop a running automaton.
-pub(super) async fn automaton_stop_handler(
+/// `POST /v1/run/:run_id/stop` — stop a run.
+///
+/// For chat runs awaiting attachment, removes the pending entry so the
+/// matching `WS /stream/:run_id` 404s instead of attaching to a zombie
+/// session. Automaton runs delegate to the bridge.
+pub(super) async fn run_stop_handler(
     State(state): State<RouterState>,
-    Path(automaton_id): Path<String>,
+    Path(run_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let bridge = state.automaton_bridge.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "automaton controller unavailable"})),
-        )
-    })?;
-
+    if state.pending_chat_runs.remove(&run_id).is_some() {
+        return Ok(Json(
+            serde_json::json!({"ok": true, "run_id": run_id, "status": "stopped"}),
+        ));
+    }
+    let bridge = automaton_bridge(&state)?;
     bridge
-        .stop_by_id(&automaton_id)
+        .stop_by_id(&run_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))))?;
-
     Ok(Json(
-        serde_json::json!({"ok": true, "automaton_id": automaton_id, "status": "stopped"}),
+        serde_json::json!({"ok": true, "run_id": run_id, "status": "stopped"}),
     ))
 }

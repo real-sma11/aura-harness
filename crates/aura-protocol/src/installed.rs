@@ -1,9 +1,9 @@
 //! Installed-tool and installed-integration wire definitions.
 //!
 //! These are the self-contained, wire-compatible mirrors of
-//! `aura_core::InstalledToolDefinition` (and friends). Keeping them in this
-//! crate without an `aura-core` dependency means clients can construct
-//! `SessionInit` payloads on their own.
+//! `aura_core::InstalledToolDefinition` (and friends), shipped on
+//! the [`crate::AgentCapabilities`] bundle of a
+//! [`crate::RuntimeRequest`].
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -87,10 +87,10 @@ pub enum InstalledToolRuntimeExecution {
     AppProvider(InstalledToolRuntimeProviderExecution),
 }
 
-/// Definition for an installed tool, sent over the wire in `session_init`.
+/// Definition for an installed tool, sent over the wire on
+/// [`crate::AgentCapabilities`].
 ///
-/// Wire-compatible with `aura_core::InstalledToolDefinition` but
-/// self-contained so this crate has no dependency on `aura-core`.
+/// Wire-compatible with `aura_core::InstalledToolDefinition`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct InstalledToolIntegrationRequirement {
@@ -123,7 +123,8 @@ pub struct InstalledTool {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
-/// Definition for an installed integration, sent over the wire in `session_init`.
+/// Definition for an installed integration, sent over the wire on
+/// [`crate::AgentCapabilities`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct InstalledIntegration {

@@ -1,4 +1,10 @@
 //! WebSocket connection handler and turn management.
+//!
+//! Phase A note: the WS no longer accepts an `InboundMessage::SessionInit`
+//! first frame. Sessions are fully applied via `POST /v1/run` before
+//! the client attaches, so [`handle_chat_ws_connection`] receives an
+//! already-prepared [`Session`] and emits `SessionReady` as the first
+//! server-side frame.
 
 use super::generation::{self, GenerationTurn};
 use super::helpers;
@@ -107,8 +113,13 @@ fn log_ws_close_reason(session_id: &str, reason: &CloseReason, phase: &str) {
     }
 }
 
-/// Handle a WebSocket connection through its full lifecycle.
-pub async fn handle_ws_connection(socket: WebSocket, ctx: WsContext) {
+/// Handle a chat WebSocket connection through its full lifecycle.
+///
+/// `session` is already populated by [`super::prepare_chat_session`] —
+/// the WS handler attaches the outbound channel + approval broker and
+/// emits `SessionReady` as the first server-side frame, then enters
+/// the turn loop.
+pub async fn handle_chat_ws_connection(socket: WebSocket, mut session: Session, ctx: WsContext) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(1024);
 
@@ -130,11 +141,15 @@ pub async fn handle_ws_connection(socket: WebSocket, ctx: WsContext) {
         }
     });
 
-    let mut session = Session::new(ctx.workspace_base.clone());
-    session.auth_token = ctx.auth_token.clone();
-    session.project_base = ctx.project_base.clone();
     session.tool_approval_broker = Some(Arc::new(ToolApprovalBroker::new(outbound_tx.clone())));
-    info!(session_id = %session.session_id, "WebSocket connection opened");
+    info!(session_id = %session.session_id, "Chat WebSocket connection opened");
+
+    // Phase A: the WS no longer accepts an `InboundMessage::SessionInit`
+    // first frame. The session is already applied; bootstrap the
+    // kernel-side state (SessionStart transaction + capability install
+    // record + scheduler identity registration) and emit `SessionReady`
+    // before entering the turn loop.
+    helpers::emit_session_ready(&mut session, &outbound_tx, &ctx).await;
 
     let mut active_turn: Option<ActiveTurn> = None;
 
@@ -368,10 +383,6 @@ async fn dispatch_idle_message(
     ctx: &WsContext,
 ) -> IdleAction {
     match serde_json::from_str::<InboundMessage>(raw) {
-        Ok(InboundMessage::SessionInit(init)) => {
-            helpers::handle_session_init(session, *init, outbound_tx, ctx).await;
-            IdleAction::Continue
-        }
         Ok(InboundMessage::UserMessage(msg)) => {
             match start_turn(session, msg, outbound_tx, ctx).await {
                 Some(turn) => IdleAction::StartTurn(ActiveTurn::Agent(turn)),
@@ -500,21 +511,13 @@ async fn start_turn(
     outbound_tx: &mpsc::Sender<OutboundMessage>,
     ctx: &WsContext,
 ) -> Option<AgentTurn> {
-    if !session.initialized {
-        crate::inbound_console::ws_rejection_line(
-            "framing",
-            "not_initialized",
-            Some(&format!("session={}", session.session_id)),
-        );
-        let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-            code: "not_initialized".into(),
-            message: "Send session_init before user_message".into(),
-            recoverable: true,
-            support_id: None,
-        }));
-        return None;
-    }
-
+    // Phase A: the chat WS is only attached after
+    // `prepare_chat_session` has already applied the
+    // [`aura_protocol::RuntimeRequest`] on the HTTP side, so
+    // `session.initialized` is always true here. The previous
+    // "not_initialized" error path (which guarded a missing
+    // `session_init` first frame) is unreachable under the new
+    // two-step exchange.
     let message_id = Uuid::new_v4().to_string();
     let _ = outbound_tx.try_send(OutboundMessage::AssistantMessageStart(
         AssistantMessageStart {

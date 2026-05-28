@@ -1,8 +1,15 @@
 //! Inbound (client → server) wire messages and their payloads.
 //!
-//! [`InboundMessage`] is the top-level enum sent from a websocket client
-//! into the harness. Each variant carries one of the payload structs
-//! defined in this module.
+//! [`InboundMessage`] is the top-level enum sent from a websocket
+//! client into the harness. Each variant carries one of the payload
+//! structs defined in this module.
+//!
+//! Phase A note: the `SessionInit` first-frame contract was deleted
+//! when `POST /v1/run` + `WS /stream/:run_id` replaced the legacy
+//! `WS /stream` handshake. The WS now opens against a run id that
+//! already exists, so `InboundMessage` no longer carries a
+//! session-init variant — all session configuration ships on
+//! [`crate::RuntimeRequest`] over HTTP instead.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,19 +17,13 @@ use std::collections::HashMap;
 #[cfg(feature = "typescript")]
 use ts_rs::TS;
 
-use crate::agent_identity::AgentIdentityWire;
-use crate::chat_project_info::ChatProjectInfoWire;
 use crate::common::{ToolApprovalDecision, ToolApprovalRemember};
-use crate::installed::{InstalledIntegration, InstalledTool};
-use crate::permissions::{AgentPermissionsWire, AgentToolPermissionsWire};
 
 /// Top-level inbound message envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub enum InboundMessage {
-    /// Initialize the session (must be the first message).
-    SessionInit(Box<SessionInit>),
     /// Send a user message for processing.
     UserMessage(UserMessage),
     /// Cancel the current turn.
@@ -43,181 +44,26 @@ pub struct ConversationMessage {
     pub content: String,
 }
 
-/// Payload for `session_init`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
-pub struct SessionInit {
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// Model identifier (e.g., "claude-opus-4-6").
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Maximum tokens per model response.
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    /// Sampling temperature.
-    #[serde(default)]
-    pub temperature: Option<f32>,
-    /// Maximum agentic steps per turn.
-    #[serde(default)]
-    pub max_turns: Option<u32>,
-    /// Installed tools to register for this session.
-    #[serde(default)]
-    pub installed_tools: Option<Vec<InstalledTool>>,
-    /// Installed integrations authorized for this session.
-    #[serde(default)]
-    pub installed_integrations: Option<Vec<InstalledIntegration>>,
-    /// Workspace directory path (must be under the server's workspace base).
-    #[serde(default)]
-    pub workspace: Option<String>,
-    /// Absolute path to the real project directory on the host filesystem.
-    /// When set, tool execution happens directly in this directory instead of
-    /// the sandboxed `aura_data/workspaces/` tree.
-    #[serde(default)]
-    pub project_path: Option<String>,
-    /// JWT auth token for proxy routing.
-    #[serde(default)]
-    pub token: Option<String>,
-    /// Project ID for domain tool calls (specs, tasks, etc.).
-    #[serde(default)]
-    pub project_id: Option<String>,
-    /// Prior conversation messages to restore into session history.
-    #[serde(default)]
-    pub conversation_messages: Option<Vec<ConversationMessage>>,
-    /// Project-agent UUID for X-Aura-Agent-Id billing header.
-    #[serde(default)]
-    pub aura_agent_id: Option<String>,
-    /// Storage session UUID for X-Aura-Session-Id billing header.
-    #[serde(default)]
-    pub aura_session_id: Option<String>,
-    /// Organization UUID for X-Aura-Org-Id billing header.
-    #[serde(default)]
-    pub aura_org_id: Option<String>,
-    /// Harness-level agent ID for per-agent skill lookup. Set by the
-    /// caller (e.g. aura-os) so the harness can resolve which skills
-    /// are installed for this agent and which `Session.agent_id`
-    /// hashes to take a turn-lock against.
-    ///
-    /// The string is opaque to the harness, but `aura-os` constructs
-    /// it via `aura_os_core::harness_agent_id` in one of three forms:
-    ///
-    /// - `{template}::default` — bare-agent / loop / single-task /
-    ///   public-chat surfaces with no [`AgentInstance`] or storage
-    ///   session axis.
-    /// - `{template}::{agent_instance_id}` — classic per-instance
-    ///   partition used by automaton runs and any chat surface that
-    ///   opts out of session-level partitioning.
-    /// - `{template}::{agent_instance_id}::{session_id}` — full
-    ///   per-(instance, storage_session) partition. Phase 1 of the
-    ///   parallel-session-chats plan threads the resolved storage
-    ///   `session_id` into the third segment from
-    ///   `agent_route.rs` and `instance_route.rs`, so two chat POSTs
-    ///   against the same `(template, instance)` with different
-    ///   `session_id` values get distinct `Session.agent_id` values
-    ///   in the harness, distinct record logs, and distinct
-    ///   turn-locks — i.e. they run concurrently end-to-end.
-    ///
-    /// The harness path treats this field as a hex-or-string fallback:
-    /// `Session.agent_id = AgentId::from_hex(...).unwrap_or_else(|| blake3(...))`.
-    /// Three-segment strings therefore hash through blake3 and two
-    /// strings differing only in the session segment land on
-    /// distinct `AgentId`s. `parse_agent_id` (router/ids.rs) already
-    /// strips at the first `::` so per-agent skill lookup keeps
-    /// matching the template across all three forms.
-    ///
-    /// [`AgentInstance`]: aura_os_core::AgentInstance
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    /// Template agent id for skill / permissions / billing lookup.
-    ///
-    /// `agent_id` (above) is the partition key the harness uses for
-    /// turn-locking, derived from the AgentInstance via
-    /// `aura_os_core::harness_agent_id` (one of the three forms
-    /// listed there). `template_agent_id` is the stable Aura template
-    /// id (the row in `agents`) so the harness can resolve installed
-    /// skills, agent-level permissions, and billing aggregation
-    /// against a single identity per template even when multiple
-    /// partitions (per-instance, per-session) exist.
-    ///
-    /// Optional during rollout: when `None`, the harness falls back
-    /// to `agent_id` for skill lookup (the pre-Phase-1 behavior).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_agent_id: Option<String>,
-    /// Originating end-user id for resolving and persisting tool defaults.
-    pub user_id: String,
-    /// Optional per-session model overrides applied on top of the
-    /// harness's env-default router config. `None` means "use the
-    /// harness's defaults verbatim".
-    #[serde(default)]
-    pub provider_overrides: Option<SessionModelOverrides>,
-    /// Optional keyword-driven intent classifier spec. When present the harness
-    /// narrows the per-turn tool surface based on each user message using the
-    /// same tier-1 / tier-2 domain rules aura-os used to run in-process for
-    /// the CEO-preset agent. Ships as the profile-JSON subset that
-    /// `aura-tools::IntentClassifier::from_profile_json` accepts, plus a
-    /// `tool_domains` map from tool name to domain so the harness can narrow
-    /// `tool_definitions` (which are opaque to the classifier otherwise).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_classifier: Option<IntentClassifierSpec>,
-    /// Explicit [`AgentPermissionsWire`] bundle for this session. Required
-    /// on every session; the harness enforces scope + capability checks
-    /// unconditionally against these grants. See the module-level
-    /// "Agent permissions model" section for details.
-    pub agent_permissions: AgentPermissionsWire,
-    /// Optional per-agent tool override stamped onto this session. `None`
-    /// means the harness should load the persisted agent override, if any;
-    /// an empty map means "explicitly inherit the user default".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_permissions: Option<AgentToolPermissionsWire>,
-    /// Chat-WS migration: typed agent identity (name / role /
-    /// personality) the harness's `SystemPromptBuilder` consumes for
-    /// the chat path's `<agent_identity>` section. Mirrors the
-    /// dev-loop wire field on `AutomatonStartRequest`. When absent or
-    /// every sub-field is blank, the harness keeps `<agent_identity>`
-    /// out of the assembled prompt and — together with the other
-    /// typed fields — falls back to the legacy
-    /// [`SessionInit::system_prompt`] path for backward compatibility
-    /// with older callers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_identity: Option<AgentIdentityWire>,
-    /// Chat-WS migration: operator-curated skills list rendered as
-    /// `<agent_skills>`. Empty list ⇒ the harness drops the section
-    /// entirely.
-    #[serde(default)]
-    pub agent_skills: Vec<String>,
-    /// Chat-WS migration: operator-authored system prompt (the
-    /// "system prompt" textarea on the agent template, plus any
-    /// server-baked addenda such as the project-state continuity
-    /// snapshot or plan-mode suffix). Empty / `None` ⇒ no
-    /// `<agent_system_prompt>` section is rendered.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_system_prompt: Option<String>,
-    /// Chat-WS migration: typed project descriptor consumed by the
-    /// harness's `SystemPromptBuilder.project_context()`. When
-    /// populated, the harness assembles the chat system prompt via
-    /// the builder's `chat_capabilities + project_context + agents_md`
-    /// preset (plus identity sections when set) and ignores the
-    /// legacy [`SessionInit::system_prompt`] field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_info: Option<ChatProjectInfoWire>,
-}
-
-/// Keyword-driven classifier spec shipped in [`SessionInit`].
+/// Keyword-driven classifier spec shipped on
+/// [`crate::AgentCapabilities`].
 ///
 /// Matches the JSON shape that
-/// `aura-tools::IntentClassifier::from_profile_json` deserializes, extended
-/// with `tool_domains` so the harness can answer "which domain does this
-/// tool belong to?" without hard-coding the mapping in its binary.
+/// `aura-tools::IntentClassifier::from_profile_json` deserializes,
+/// extended with `tool_domains` so the harness can answer "which
+/// domain does this tool belong to?" without hard-coding the
+/// mapping in its binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct IntentClassifierSpec {
-    /// Domain names that are always visible (tier-1). Snake-case strings
-    /// like `"project"`, `"agent"`, `"execution"`, `"monitoring"`.
+    /// Domain names that are always visible (tier-1). Snake-case
+    /// strings like `"project"`, `"agent"`, `"execution"`,
+    /// `"monitoring"`.
     pub tier1_domains: Vec<String>,
-    /// Keyword rules that expand the visible domain set tier-2 on demand.
+    /// Keyword rules that expand the visible domain set tier-2 on
+    /// demand.
     pub classifier_rules: Vec<IntentClassifierRule>,
-    /// Mapping from tool name → domain. Any tool whose domain is in the
-    /// resolved visible set is kept on a turn.
+    /// Mapping from tool name → domain. Any tool whose domain is
+    /// in the resolved visible set is kept on a turn.
     #[serde(default)]
     pub tool_domains: HashMap<String, String>,
 }
@@ -233,11 +79,11 @@ pub struct IntentClassifierRule {
 /// Per-session model overrides applied on top of the harness's
 /// env-default router config.
 ///
-/// All LLM traffic flows through aura-router (the AURA proxy) using a
-/// per-request JWT; there is no direct-provider path, so this struct
-/// only carries knobs that still mean something for proxy routing:
-/// model name, fallback model, prompt-caching toggle. `None` on a field
-/// means "leave the harness default unchanged".
+/// All LLM traffic flows through aura-router (the AURA proxy) using
+/// a per-request JWT; there is no direct-provider path, so this
+/// struct only carries knobs that still mean something for proxy
+/// routing: model name, fallback model, prompt-caching toggle.
+/// `None` on a field means "leave the harness default unchanged".
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct SessionModelOverrides {
@@ -247,24 +93,18 @@ pub struct SessionModelOverrides {
     /// Optional fallback model used on 429/529 retries.
     #[serde(default)]
     pub fallback_model: Option<String>,
-    /// Optional override for whether Anthropic prompt-caching directives
-    /// should be attached.
+    /// Optional override for whether Anthropic prompt-caching
+    /// directives should be attached.
     #[serde(default)]
     pub prompt_caching_enabled: Option<bool>,
-    /// Optional stable cache key forwarded to aura-router for OpenAI-family
-    /// prompt caching (`prompt_cache_key` in the OpenAI API). Identical
-    /// values across requests within the same session pin them to the same
-    /// backend partition so the prompt prefix can be cached. aura-os
-    /// derives this from the agent / instance / session identity so two
-    /// turns of the same chat share a key, while two unrelated chats
-    /// don't. Has no effect on Anthropic family (which uses `cache_control`
-    /// blocks rather than a key) — the harness only emits the field on
-    /// outbound requests when the upstream family is OpenAI.
+    /// Optional stable cache key forwarded to aura-router for
+    /// OpenAI-family prompt caching (`prompt_cache_key` in the
+    /// OpenAI API).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
     /// Optional retention hint paired with [`Self::prompt_cache_key`].
-    /// Wire values are `"in_memory"` (default, ~5–10 min) or `"24h"`
-    /// (extended retention on newer OpenAI models).
+    /// Wire values are `"in_memory"` (default, ~5–10 min) or
+    /// `"24h"` (extended retention on newer OpenAI models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<String>,
 }
@@ -274,9 +114,10 @@ pub struct SessionModelOverrides {
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct UserMessage {
     pub content: String,
-    /// Optional list of tool names the user wants prioritized for this message.
-    /// When set, the agent loop will filter tools and set `tool_choice` on the
-    /// first iteration to explicitly direct the model toward these tools.
+    /// Optional list of tool names the user wants prioritized for
+    /// this message. When set, the agent loop will filter tools and
+    /// set `tool_choice` on the first iteration to explicitly
+    /// direct the model toward these tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_hints: Option<Vec<String>>,
     /// Optional image/text attachments (base64-encoded).
@@ -298,8 +139,9 @@ pub struct MessageAttachment {
     /// Optional filename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// URL to fetch content from (e.g. S3). When set, `data` may be empty
-    /// and the consumer should fetch the content from this URL instead.
+    /// URL to fetch content from (e.g. S3). When set, `data` may be
+    /// empty and the consumer should fetch the content from this
+    /// URL instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
 }
@@ -327,8 +169,9 @@ pub struct ToolApprovalResponse {
 /// - `mode == "image"`: uses `prompt` (required), `model`, `size`, `images`, `is_iteration`
 /// - `mode == "3d"`:    uses `image_url` (required), `prompt` (optional hint)
 ///
-/// Both modes accept `project_id` for artifact storage. 3D generation also
-/// accepts `parent_id` to link a generated model to a source image artifact.
+/// Both modes accept `project_id` for artifact storage. 3D
+/// generation also accepts `parent_id` to link a generated model to
+/// a source image artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct GenerationRequest {

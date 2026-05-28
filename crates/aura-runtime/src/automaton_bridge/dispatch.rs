@@ -22,13 +22,13 @@ use aura_agent::{KernelDomainGateway, KernelModelGateway, KernelToolGateway};
 use aura_automaton::{DevLoopAutomaton, TaskRunAutomaton};
 use aura_core::AgentPermissions;
 use aura_kernel::Kernel;
-use aura_protocol::AgentIdentityWire;
+use aura_protocol::AgentPersona;
 use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;
 use tracing::{info, warn};
 
-use crate::protocol::installed_integration_to_core;
 use crate::runtime_capabilities;
+use aura_protocol::installed_integration_to_core;
 
 use super::{AutomatonBridge, ProjectHandle};
 
@@ -196,7 +196,7 @@ impl AutomatonBridge {
         aura_org_id: Option<String>,
         aura_session_id: Option<String>,
         aura_agent_id: Option<String>,
-        agent_identity: Option<AgentIdentityWire>,
+        agent_persona: Option<AgentPersona>,
         agent_skills: Vec<String>,
         agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
@@ -205,8 +205,8 @@ impl AutomatonBridge {
         // constant (`claude-opus-4-6`) here, which is exactly the
         // regression the worker-identity work is closing. We surface
         // the gap loudly so the caller (typically aura-os's
-        // `POST /automaton/start`) sees the configuration mismatch
-        // instead of routing eval traffic to an unintended model.
+        // `POST /v1/run`) sees the configuration mismatch instead of
+        // routing eval traffic to an unintended model.
         let model = model
             .as_deref()
             .map(str::trim)
@@ -278,7 +278,7 @@ impl AutomatonBridge {
             // `AgenticTaskParams::agent`. `null` / `[]` defaults keep
             // the assembled prompt byte-identical with PR A until
             // aura-os populates these fields in PR C.
-            "agent_identity": agent_identity,
+            "agent_identity": agent_persona,
             "agent_skills": agent_skills,
             "agent_system_prompt": agent_system_prompt,
         });
@@ -343,7 +343,7 @@ impl AutomatonBridge {
         aura_org_id: Option<String>,
         aura_session_id: Option<String>,
         aura_agent_id: Option<String>,
-        agent_identity: Option<AgentIdentityWire>,
+        agent_persona: Option<AgentPersona>,
         agent_skills: Vec<String>,
         agent_system_prompt: Option<String>,
     ) -> Result<String, String> {
@@ -398,7 +398,7 @@ impl AutomatonBridge {
             // Single-task kickoffs go through the same prompt assembly,
             // so they pick up identity / skills / operator system
             // prompt the same way once PR C populates them upstream.
-            "agent_identity": agent_identity,
+            "agent_identity": agent_persona,
             "agent_skills": agent_skills,
             "agent_system_prompt": agent_system_prompt,
         });

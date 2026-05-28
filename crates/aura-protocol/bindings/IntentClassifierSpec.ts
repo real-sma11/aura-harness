@@ -2,25 +2,29 @@
 import type { IntentClassifierRule } from "./IntentClassifierRule";
 
 /**
- * Keyword-driven classifier spec shipped in [`SessionInit`].
+ * Keyword-driven classifier spec shipped on
+ * [`crate::AgentCapabilities`].
  *
  * Matches the JSON shape that
- * `aura-tools::IntentClassifier::from_profile_json` deserializes, extended
- * with `tool_domains` so the harness can answer "which domain does this
- * tool belong to?" without hard-coding the mapping in its binary.
+ * `aura-tools::IntentClassifier::from_profile_json` deserializes,
+ * extended with `tool_domains` so the harness can answer "which
+ * domain does this tool belong to?" without hard-coding the
+ * mapping in its binary.
  */
 export type IntentClassifierSpec = { 
 /**
- * Domain names that are always visible (tier-1). Snake-case strings
- * like `"project"`, `"agent"`, `"execution"`, `"monitoring"`.
+ * Domain names that are always visible (tier-1). Snake-case
+ * strings like `"project"`, `"agent"`, `"execution"`,
+ * `"monitoring"`.
  */
 tier1_domains: Array<string>, 
 /**
- * Keyword rules that expand the visible domain set tier-2 on demand.
+ * Keyword rules that expand the visible domain set tier-2 on
+ * demand.
  */
 classifier_rules: Array<IntentClassifierRule>, 
 /**
- * Mapping from tool name → domain. Any tool whose domain is in the
- * resolved visible set is kept on a turn.
+ * Mapping from tool name → domain. Any tool whose domain is
+ * in the resolved visible set is kept on a turn.
  */
 tool_domains: { [key in string]?: string }, };

@@ -24,7 +24,7 @@ use crate::config::NodeConfig;
 #[allow(unused_imports)]
 use crate::scheduler::Scheduler;
 #[allow(unused_imports)]
-use crate::session::{handle_ws_connection, WsContext};
+use crate::session::{handle_chat_ws_connection, WsContext};
 #[allow(unused_imports)]
 use crate::terminal;
 #[allow(unused_imports)]

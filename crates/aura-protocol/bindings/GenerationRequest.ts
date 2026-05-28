@@ -7,8 +7,9 @@
  * - `mode == "image"`: uses `prompt` (required), `model`, `size`, `images`, `is_iteration`
  * - `mode == "3d"`:    uses `image_url` (required), `prompt` (optional hint)
  *
- * Both modes accept `project_id` for artifact storage. 3D generation also
- * accepts `parent_id` to link a generated model to a source image artifact.
+ * Both modes accept `project_id` for artifact storage. 3D
+ * generation also accepts `parent_id` to link a generated model to
+ * a source image artifact.
  */
 export type GenerationRequest = { mode: string, prompt: string | null, model: string | null, size: string | null, image_url: string | null, images: Array<string> | null, project_id: string | null, parent_id: string | null, is_iteration: boolean | null, 
 /**

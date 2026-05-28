@@ -40,8 +40,7 @@ use tracing::{warn, Level};
 use crate::terminal;
 
 use super::automaton::{
-    automaton_list_handler, automaton_pause_handler, automaton_start_handler,
-    automaton_status_handler, automaton_stop_handler,
+    run_list_handler, run_pause_handler, run_start_handler, run_status_handler, run_stop_handler,
 };
 use super::files::{list_files_handler, read_file_handler, resolve_workspace_handler};
 use super::tool_permissions::{
@@ -49,7 +48,7 @@ use super::tool_permissions::{
     put_agent_tool_permissions_handler, put_user_tool_defaults_handler,
 };
 use super::tx::{get_head_handler, scan_record_handler, submit_tx_handler, tx_status_handler};
-use super::ws::{self, automaton_ws_handler, ws_upgrade_handler};
+use super::ws::{self, run_ws_handler};
 use super::{auth, memory, skills, RouterState};
 
 /// Create the router.
@@ -88,24 +87,18 @@ pub fn create_router(state: RouterState) -> Router {
         config: build_strict_governor(),
     };
 
-    // Strict-rate-limit sub-router: `/tx`, `/automaton/start`, and the
+    // Strict-rate-limit sub-router: `/tx`, `/v1/run`, and the
     // `:id/pause` + `:id/stop` path params. Pause/stop use a 4 KiB
-    // body limit for tiny JSON payloads; `/tx` and `/automaton/start`
-    // keep the 1 MiB default because legitimate requests can be large.
+    // body limit for tiny JSON payloads; `/tx` and `/v1/run` keep
+    // the 1 MiB default because legitimate requests can be large.
     let strict_small_body = Router::new()
-        .route(
-            "/automaton/:automaton_id/pause",
-            post(automaton_pause_handler),
-        )
-        .route(
-            "/automaton/:automaton_id/stop",
-            post(automaton_stop_handler),
-        )
+        .route("/v1/run/:run_id/pause", post(run_pause_handler))
+        .route("/v1/run/:run_id/stop", post(run_stop_handler))
         .route_layer(body_limit_4k);
 
     let strict_default_body = Router::new()
         .route("/tx", post(submit_tx_handler))
-        .route("/automaton/start", post(automaton_start_handler));
+        .route("/v1/run", post(run_start_handler));
 
     let strict = strict_small_body
         .merge(strict_default_body)
@@ -146,15 +139,14 @@ pub fn create_router(state: RouterState) -> Router {
         )
         .route("/agents/:agent_id/tools", get(get_agent_tools_handler))
         .route("/ws/terminal", get(terminal_ws_handler))
-        .route("/stream", get(ws_upgrade_handler))
-        .route("/stream/automaton/:automaton_id", get(automaton_ws_handler))
+        .route("/stream/:run_id", get(run_ws_handler))
         .route(
-            "/automaton/list",
-            get(automaton_list_handler).route_layer(body_limit_1k),
+            "/v1/run/list",
+            get(run_list_handler).route_layer(body_limit_1k),
         )
         .route(
-            "/automaton/:automaton_id/status",
-            get(automaton_status_handler).route_layer(body_limit_1k),
+            "/v1/run/:run_id/status",
+            get(run_status_handler).route_layer(body_limit_1k),
         )
         // Memory CRUD (canonical paths)
         .route(

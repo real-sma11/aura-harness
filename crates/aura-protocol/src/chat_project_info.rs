@@ -1,17 +1,14 @@
 //! Wire-compatible chat project descriptor.
 //!
-//! The follow-up "chat WS migration" PR threads typed project metadata
-//! over the chat session-init wire so the harness's
-//! `SystemPromptBuilder` can render `<project_context>` from structured
-//! fields rather than receiving a server-baked prompt string. This
-//! mirrors the pattern PR B/C established for the dev-loop start path
-//! with [`AgentIdentityWire`].
+//! Typed project metadata threaded onto every
+//! [`crate::RuntimeRequest`] so the harness's `SystemPromptBuilder`
+//! can render `<project_context>` from structured fields rather than
+//! receiving a server-baked prompt string. Mirrors the pattern used
+//! for the persona fields in [`crate::AgentPersona`].
 //!
 //! Lives in `aura-protocol` (rather than `aura-os-harness`) so any
 //! future client-side caller (eval harness, OpenAPI generator, etc.)
 //! can reach it from a stable location.
-//!
-//! [`AgentIdentityWire`]: crate::AgentIdentityWire
 
 use serde::{Deserialize, Serialize};
 

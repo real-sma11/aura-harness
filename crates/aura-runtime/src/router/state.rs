@@ -66,20 +66,26 @@ pub struct RouterState {
     pub(crate) router_url: Option<String>,
     /// Bounded pool of WebSocket connection slots.
     ///
-    /// Every upgrade handler (`/ws/terminal`, `/stream`,
-    /// `/stream/automaton/:id`) must call
+    /// Every upgrade handler (`/ws/terminal`, `/stream/:run_id`) must call
     /// [`super::ws::try_acquire_ws_slot`] and attach the returned permit to
     /// the spawned socket task. When the semaphore is empty, the handler
     /// short-circuits with `503 Service Unavailable` instead of tying
-    /// up another tokio task (the H5 "unbounded WS frames + slow-client
-    /// task exhaustion" finding — phase 9 of the audit remediation).
-    ///
-    /// A strict per-IP cap would need to plumb the peer socket address
-    /// through every upgrade handler; tower_governor can't rate-limit
-    /// long-lived WS sessions because it only inspects the upgrade
-    /// request, so we leave per-IP for a future iteration and bound
-    /// the global count here.
+    /// up another tokio task.
     pub(crate) ws_slots: Arc<Semaphore>,
+    /// `run_id` (UUID string) → fully-prepared chat [`crate::session::Session`]
+    /// awaiting a WS attach.
+    ///
+    /// Phase A: `POST /v1/run` applies the [`aura_protocol::RuntimeRequest`]
+    /// synchronously, stashes the prepared session here, and returns
+    /// `{run_id, event_stream_url}`. The follow-up `WS /stream/:run_id`
+    /// removes the entry and hands the session to
+    /// [`crate::session::handle_chat_ws_connection`]. The map carries a
+    /// `Mutex<Option<Session>>` so a late WS reconnect attempt against an
+    /// already-attached run finds `None` and falls through to a 404, while
+    /// the DashMap key still serves as the disambiguation seam against the
+    /// automaton-run path.
+    pub(crate) pending_chat_runs:
+        Arc<DashMap<String, std::sync::Mutex<Option<crate::session::Session>>>>,
 }
 
 /// Input bundle for [`RouterState::new`].
@@ -128,6 +134,7 @@ impl RouterState {
             skill_manager: cfg.skill_manager,
             router_url: cfg.router_url,
             ws_slots: Arc::new(Semaphore::new(ws::MAX_WS_CONNS_PER_NODE)),
+            pending_chat_runs: Arc::new(DashMap::new()),
         }
     }
 }
@@ -149,6 +156,7 @@ impl Clone for RouterState {
             skill_manager: self.skill_manager.clone(),
             router_url: self.router_url.clone(),
             ws_slots: self.ws_slots.clone(),
+            pending_chat_runs: self.pending_chat_runs.clone(),
         }
     }
 }

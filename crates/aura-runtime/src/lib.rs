@@ -154,11 +154,13 @@ pub async fn run_node() -> anyhow::Result<()> {
 }
 
 pub use aura_protocol::{
-    ApprovalResponse, AssistantMessageEnd, AssistantMessageStart, ConversationMessage, ErrorMsg,
-    FileOp, FilesChanged, InboundMessage, InstalledTool, OutboundMessage, SessionInit,
-    SessionModelOverrides, SessionReady, SessionUsage, TextDelta, ThinkingDelta,
-    ToolApprovalDecision, ToolApprovalPrompt, ToolApprovalRemember, ToolApprovalResponse,
-    ToolAuth as ProtocolToolAuth, ToolInfo, ToolResultMsg, ToolUseStart, UserMessage,
+    AgentCapabilities, AgentIdentity, AgentPersona, ApprovalResponse, AssistantMessageEnd,
+    AssistantMessageStart, ConversationMessage, ErrorMsg, FileOp, FilesChanged, InboundMessage,
+    InstalledTool, ModelSelection, OutboundMessage, ProjectContext, RuntimeRequest,
+    RuntimeRequestType, RuntimeRunResponse, SessionModelOverrides, SessionReady, SessionUsage,
+    TextDelta, ThinkingDelta, ToolApprovalDecision, ToolApprovalPrompt, ToolApprovalRemember,
+    ToolApprovalResponse, ToolAuth as ProtocolToolAuth, ToolInfo, ToolResultMsg, ToolUseStart,
+    UserMessage, WorkspaceLocation,
 };
 
 #[cfg(feature = "test-support")]

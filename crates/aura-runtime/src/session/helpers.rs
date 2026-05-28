@@ -6,8 +6,8 @@ use super::{Session, WsContext};
 use crate::executor_factory;
 use crate::protocol::{
     tool_info_from_definition_with_state, AssistantMessageEnd, ContextBreakdown, ErrorMsg,
-    FileDiff, FilesChanged, OutboundMessage, SessionInit, SessionReady, SessionUsage, SkillInfo,
-    TextDelta, ThinkingDelta, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
+    FileDiff, FilesChanged, OutboundMessage, SessionReady, SessionUsage, SkillInfo, TextDelta,
+    ThinkingDelta, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
 };
 use crate::runtime_capabilities;
 use crate::session::cross_agent_hook::{AuraServerAgentHook, AuraServerSpawnHook};
@@ -102,28 +102,30 @@ fn effective_tool_infos(session: &Session, defaults: &UserToolDefaults) -> Vec<T
         .collect()
 }
 
-pub(super) async fn handle_session_init(
-    session: &mut Session,
-    init: SessionInit,
-    outbound_tx: &mpsc::Sender<OutboundMessage>,
-    ctx: &WsContext,
-) {
-    let provider_overrides = init.provider_overrides.clone();
+/// Error returned when building a chat [`Session`] from a
+/// [`RuntimeRequest`] fails before the WS attaches.
+///
+/// Carries a `code` matching the legacy `OutboundMessage::Error.code`
+/// strings so the HTTP error path emits the same diagnostic surface
+/// the pre-`POST /v1/run` flow used.
+#[derive(Debug)]
+pub(crate) struct ChatRequestError {
+    pub code: &'static str,
+    pub message: String,
+}
 
-    if session.initialized {
-        crate::inbound_console::ws_rejection_line(
-            "framing",
-            "already_initialized",
-            Some(&format!("session={}", session.session_id)),
-        );
-        let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-            code: "already_initialized".into(),
-            message: "Session has already been initialized".into(),
-            recoverable: true,
-            support_id: None,
-        }));
-        return;
-    }
+/// Build a fully-applied chat [`Session`] from a [`RuntimeRequest`]
+/// before the WebSocket attaches.
+///
+/// Replaces the pre-Phase-A `handle_session_init` flow. Validation
+/// errors (invalid workspace, malformed provider overrides, etc.)
+/// are returned as a [`ChatRequestError`] so the gateway can surface
+/// them as a 4xx HTTP response.
+pub(crate) async fn prepare_chat_session(
+    request: aura_protocol::RuntimeRequest,
+    ctx: &WsContext,
+) -> Result<Session, ChatRequestError> {
+    let provider_overrides = request.model.provider_overrides.clone();
 
     let resolved_provider_override = if let Some(overrides) = provider_overrides {
         let reasoner_overrides = aura_reasoner::SessionOverrides {
@@ -136,37 +138,25 @@ pub(super) async fn handle_session_init(
         match aura_reasoner::with_session_overrides(reasoner_overrides) {
             Ok(selection) => Some(selection.provider),
             Err(e) => {
-                crate::inbound_console::ws_rejection_line(
-                    "framing",
-                    "invalid_provider_config",
-                    Some(&format!("session={} {e}", session.session_id)),
-                );
-                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                    code: "invalid_provider_config".into(),
+                return Err(ChatRequestError {
+                    code: "invalid_provider_config",
                     message: e.to_string(),
-                    recoverable: true,
-                    support_id: None,
-                }));
-                return;
+                });
             }
         }
     } else {
         None
     };
 
-    if let Err(e) = session.apply_init(init) {
-        crate::inbound_console::ws_rejection_line(
-            "framing",
-            "invalid_workspace",
-            Some(&format!("session={} {e}", session.session_id)),
-        );
-        let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-            code: "invalid_workspace".into(),
+    let mut session = Session::new(ctx.workspace_base.clone());
+    session.project_base = ctx.project_base.clone();
+    session.auth_token = ctx.auth_token.clone();
+
+    if let Err(e) = session.apply_chat_runtime_request(request) {
+        return Err(ChatRequestError {
+            code: "invalid_workspace",
             message: e,
-            recoverable: true,
-            support_id: None,
-        }));
-        return;
+        });
     }
 
     if session.tool_permissions.is_none() {
@@ -175,18 +165,10 @@ pub(super) async fn handle_session_init(
                 session.tool_permissions = agent_ctx.tool_permissions;
             }
             Err(e) => {
-                crate::inbound_console::ws_rejection_line(
-                    "framing",
-                    "tool_permissions_load_failed",
-                    Some(&format!("session={} {e}", session.session_id)),
-                );
-                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                    code: "tool_permissions_load_failed".into(),
+                return Err(ChatRequestError {
+                    code: "tool_permissions_load_failed",
                     message: e,
-                    recoverable: true,
-                    support_id: None,
-                }));
-                return;
+                });
             }
         }
     }
@@ -201,8 +183,24 @@ pub(super) async fn handle_session_init(
         session.project_path = Some(base.join(slug));
     }
 
-    populate_tool_definitions(session, ctx);
+    populate_tool_definitions(&mut session, ctx);
 
+    Ok(session)
+}
+
+/// Bootstrap an already-applied chat [`Session`] now that its WS is
+/// attached.
+///
+/// Emits the per-session kernel bootstrap (the `SessionStart`
+/// transaction + runtime-capability install record), publishes the
+/// identity to the runtime scheduler registry, and sends the
+/// terminal `SessionReady` frame so the client can start streaming
+/// `user_message` traffic.
+pub(super) async fn emit_session_ready(
+    session: &mut Session,
+    outbound_tx: &mpsc::Sender<OutboundMessage>,
+    ctx: &WsContext,
+) {
     bootstrap_session(session, ctx).await;
 
     // Publish the per-agent identity to the runtime-side scheduler
@@ -877,15 +875,19 @@ pub(super) async fn apply_turn_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_turn_result, finalize_turn, forward_events_to_ws, handle_session_init,
-        resolve_session_workspace, session_scoped_tool_config, summarize_files_changed,
+        apply_turn_result, emit_session_ready, finalize_turn, forward_events_to_ws,
+        prepare_chat_session, resolve_session_workspace, session_scoped_tool_config,
+        summarize_files_changed,
     };
     use crate::protocol::{OutboundMessage, TextDelta};
     use crate::scheduler::Scheduler;
     use crate::session::{Session, WsContext};
     use aura_agent::{AgentLoopEvent, AgentLoopResult, FileChange, FileChangeKind};
     use aura_core::{AgentToolPermissions, ToolState, UserToolDefaults};
-    use aura_protocol::{AgentPermissionsWire, SessionInit, SessionModelOverrides};
+    use aura_protocol::{
+        AgentCapabilities, AgentIdentity, AgentPermissionsWire, ModelSelection, RuntimeRequest,
+        RuntimeRequestType, SessionModelOverrides, WorkspaceLocation,
+    };
     use aura_reasoner::MockProvider;
     use aura_store::RocksStore;
     use aura_tools::{ToolCatalog, ToolConfig};
@@ -1307,148 +1309,97 @@ mod tests {
         assert_eq!(config.upstream_provider_family, None);
     }
 
+    fn chat_request(
+        workspace: Option<String>,
+        provider_overrides: Option<SessionModelOverrides>,
+    ) -> RuntimeRequest {
+        RuntimeRequest {
+            r#type: RuntimeRequestType::Chat {
+                conversation_messages: Vec::new(),
+            },
+            agent_identity: AgentIdentity::default(),
+            model: ModelSelection {
+                provider_overrides,
+                ..ModelSelection::default()
+            },
+            workspace: WorkspaceLocation {
+                workspace,
+                project_path: None,
+                git_repo_url: None,
+                git_branch: None,
+            },
+            project: None,
+            agent_permissions: AgentPermissionsWire::default(),
+            tool_permissions: None,
+            agent_capabilities: AgentCapabilities::default(),
+            auth_jwt: None,
+            user_id: "user-test".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn failed_init_does_not_leave_provider_override_state() {
         let ctx = test_context();
-        let mut session = Session::new(ctx.workspace_base.clone());
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
 
         let invalid_workspace = tempfile::tempdir()
             .expect("outside workspace")
             .path()
             .join("outside");
-        let invalid_init = SessionInit {
-            system_prompt: None,
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            max_turns: None,
-            installed_tools: None,
-            installed_integrations: None,
-            workspace: Some(invalid_workspace.display().to_string()),
-            project_path: None,
-            token: None,
-            project_id: None,
-            conversation_messages: None,
-            aura_agent_id: None,
-            aura_session_id: None,
-            aura_org_id: None,
-            agent_id: None,
-            template_agent_id: None,
-            user_id: "user-test".to_string(),
-            tool_permissions: None,
-            provider_overrides: Some(SessionModelOverrides {
+        let invalid_request = chat_request(
+            Some(invalid_workspace.display().to_string()),
+            Some(SessionModelOverrides {
                 default_model: Some("claude-opus-4-6".to_string()),
                 fallback_model: None,
                 prompt_caching_enabled: Some(true),
                 prompt_cache_key: None,
                 prompt_cache_retention: None,
             }),
-            intent_classifier: None,
-            agent_permissions: AgentPermissionsWire::default(),
-            agent_identity: None,
-            agent_skills: Vec::new(),
-            agent_system_prompt: None,
-            project_info: None,
+        );
+
+        let outcome = prepare_chat_session(invalid_request, &ctx).await;
+        let err = match outcome {
+            Ok(_) => panic!("workspace outside base must reject"),
+            Err(e) => e,
         };
-
-        handle_session_init(&mut session, invalid_init, &outbound_tx, &ctx).await;
-
-        assert!(!session.initialized);
-        assert!(session.provider_override.is_none());
-        assert!(session.provider_name.is_empty());
-        assert!(matches!(
-            outbound_rx.recv().await,
-            Some(OutboundMessage::Error(err)) if err.code == "invalid_workspace"
-        ));
+        assert_eq!(err.code, "invalid_workspace");
 
         let retry_workspace = ctx.workspace_base.join("retry-session");
         std::fs::create_dir_all(&retry_workspace).expect("retry workspace should exist");
-        let retry_init = SessionInit {
-            system_prompt: None,
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            max_turns: None,
-            installed_tools: None,
-            installed_integrations: None,
-            workspace: Some(retry_workspace.display().to_string()),
-            project_path: None,
-            token: None,
-            project_id: None,
-            conversation_messages: None,
-            aura_agent_id: None,
-            aura_session_id: None,
-            aura_org_id: None,
-            agent_id: None,
-            template_agent_id: None,
-            user_id: "user-test".to_string(),
-            tool_permissions: None,
-            provider_overrides: None,
-            intent_classifier: None,
-            agent_permissions: AgentPermissionsWire::default(),
-            agent_identity: None,
-            agent_skills: Vec::new(),
-            agent_system_prompt: None,
-            project_info: None,
-        };
+        let retry_request = chat_request(Some(retry_workspace.display().to_string()), None);
 
-        handle_session_init(&mut session, retry_init, &outbound_tx, &ctx).await;
-
+        let session = prepare_chat_session(retry_request, &ctx)
+            .await
+            .expect("valid workspace prepares cleanly");
         assert!(session.initialized);
         assert!(session.provider_override.is_none());
     }
 
     /// Wave 2 T2 — Invariants §2 + §11:
     ///
-    /// `handle_session_init` must submit a `Transaction::session_start(...)`
-    /// through the kernel so the record log reflects the session boundary
-    /// and the policy's session-scoped approvals are cleared.
+    /// Bootstrapping a chat session must submit a
+    /// `Transaction::session_start(...)` through the kernel so the
+    /// record log reflects the session boundary and the policy's
+    /// session-scoped approvals are cleared.
     ///
-    /// A follow-on kernel call (what `start_turn` now does) must append a
-    /// `UserPrompt` entry with the user message as payload.
+    /// A follow-on kernel call (what `start_turn` now does) must
+    /// append a `UserPrompt` entry with the user message as payload.
     #[tokio::test]
-    async fn session_init_emits_session_start_and_user_prompt_are_recorded() {
+    async fn session_bootstrap_emits_session_start_and_user_prompt_are_recorded() {
         use aura_core::{Transaction, TransactionType};
         use aura_kernel::{ExecutorRouter, Kernel, KernelConfig};
 
         let ctx = test_context();
-        let mut session = Session::new(ctx.workspace_base.clone());
 
         let ws_path = ctx.workspace_base.join("record-test");
         std::fs::create_dir_all(&ws_path).unwrap();
 
-        let init = SessionInit {
-            system_prompt: None,
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            max_turns: None,
-            installed_tools: None,
-            installed_integrations: None,
-            workspace: Some(ws_path.display().to_string()),
-            project_path: None,
-            token: None,
-            project_id: None,
-            conversation_messages: None,
-            aura_agent_id: None,
-            aura_session_id: None,
-            aura_org_id: None,
-            agent_id: None,
-            template_agent_id: None,
-            user_id: "user-test".to_string(),
-            tool_permissions: None,
-            provider_overrides: None,
-            intent_classifier: None,
-            agent_permissions: AgentPermissionsWire::default(),
-            agent_identity: None,
-            agent_skills: Vec::new(),
-            agent_system_prompt: None,
-            project_info: None,
-        };
+        let request = chat_request(Some(ws_path.display().to_string()), None);
 
+        let mut session = prepare_chat_session(request, &ctx)
+            .await
+            .expect("valid chat request prepares cleanly");
         let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
-        handle_session_init(&mut session, init, &outbound_tx, &ctx).await;
+        emit_session_ready(&mut session, &outbound_tx, &ctx).await;
 
         assert!(session.initialized);
         let agent_id = session.agent_id;
@@ -1466,8 +1417,6 @@ mod tests {
             entries.iter().map(|e| e.tx.tx_type).collect::<Vec<_>>(),
         );
 
-        // Simulate what `start_turn` now does before invoking the agent loop:
-        // build the same kernel and submit a `UserPrompt` via `process_direct`.
         let kernel = Arc::new(
             Kernel::new(
                 ctx.store.clone(),

@@ -4,11 +4,11 @@
  * Per-session model overrides applied on top of the harness's
  * env-default router config.
  *
- * All LLM traffic flows through aura-router (the AURA proxy) using a
- * per-request JWT; there is no direct-provider path, so this struct
- * only carries knobs that still mean something for proxy routing:
- * model name, fallback model, prompt-caching toggle. `None` on a field
- * means "leave the harness default unchanged".
+ * All LLM traffic flows through aura-router (the AURA proxy) using
+ * a per-request JWT; there is no direct-provider path, so this
+ * struct only carries knobs that still mean something for proxy
+ * routing: model name, fallback model, prompt-caching toggle.
+ * `None` on a field means "leave the harness default unchanged".
  */
 export type SessionModelOverrides = { 
 /**
@@ -20,25 +20,19 @@ default_model: string | null,
  */
 fallback_model: string | null, 
 /**
- * Optional override for whether Anthropic prompt-caching directives
- * should be attached.
+ * Optional override for whether Anthropic prompt-caching
+ * directives should be attached.
  */
 prompt_caching_enabled: boolean | null, 
 /**
- * Optional stable cache key forwarded to aura-router for OpenAI-family
- * prompt caching (`prompt_cache_key` in the OpenAI API). Identical
- * values across requests within the same session pin them to the same
- * backend partition so the prompt prefix can be cached. aura-os
- * derives this from the agent / instance / session identity so two
- * turns of the same chat share a key, while two unrelated chats
- * don't. Has no effect on Anthropic family (which uses `cache_control`
- * blocks rather than a key) — the harness only emits the field on
- * outbound requests when the upstream family is OpenAI.
+ * Optional stable cache key forwarded to aura-router for
+ * OpenAI-family prompt caching (`prompt_cache_key` in the
+ * OpenAI API).
  */
 prompt_cache_key: string | null, 
 /**
  * Optional retention hint paired with [`Self::prompt_cache_key`].
- * Wire values are `"in_memory"` (default, ~5–10 min) or `"24h"`
- * (extended retention on newer OpenAI models).
+ * Wire values are `"in_memory"` (default, ~5–10 min) or
+ * `"24h"` (extended retention on newer OpenAI models).
  */
 prompt_cache_retention: string | null, };
