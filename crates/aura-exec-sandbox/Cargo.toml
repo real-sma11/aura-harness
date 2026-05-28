@@ -1,0 +1,18 @@
+[package]
+name = "aura-exec-sandbox"
+description = "Filesystem + process sandbox primitives for the exec layer (Phase 5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

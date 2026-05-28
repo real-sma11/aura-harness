@@ -65,6 +65,19 @@ members = [
     "crates/aura-store-record",
     "crates/aura-store-snapshot",
     "crates/aura-tools",
+    # Phase 5 exec layer split:
+    #   aura-exec-conflict  — domain-scoped advisory locks
+    #   aura-exec-isolation — worktree / copy isolation primitives
+    #   aura-exec-policy    — verdict over EffectivePermissions
+    #   aura-exec-sandbox   — FsSandbox + ProcessSandbox primitives
+    #   aura-exec-tools     — Tool trait + builtin catalog (re-export shell)
+    #   aura-exec-runner    — ToolExecutor + orchestration (re-export shell)
+    "crates/aura-exec-conflict",
+    "crates/aura-exec-isolation",
+    "crates/aura-exec-policy",
+    "crates/aura-exec-sandbox",
+    "crates/aura-exec-tools",
+    "crates/aura-exec-runner",
     # Phase 3 model layer crate + shell
     "crates/aura-reasoner",
     "crates/aura-model-reasoner",

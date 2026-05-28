@@ -1,0 +1,21 @@
+[package]
+name = "aura-exec-tools"
+description = "Phase 5 exec-layer alias for the Tool trait + builtin tool catalog (re-exports aura-tools)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Phase 5 deviation: the legacy `aura-tools` crate still hosts every
+# `Tool` impl + the `ToolCatalog`. This shell re-exports them under
+# the layered `aura-exec-<name>` naming so the dep graph in §3 of the
+# plan resolves. A future phase migrates the implementations into
+# this crate's `src/`; for now the re-export keeps callers compiling.
+aura-tools = { path = "../aura-tools" }
+aura-exec-sandbox = { path = "../aura-exec-sandbox" }
+aura-exec-policy = { path = "../aura-exec-policy" }
+
+[lints]
+workspace = true

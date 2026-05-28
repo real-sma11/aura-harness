@@ -1,0 +1,20 @@
+[package]
+name = "aura-exec-runner"
+description = "Phase 5 exec-layer alias for the tool executor (re-exports aura-tools)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Phase 5 deviation: same rationale as `aura-exec-tools`. The
+# `ToolExecutor` lives in `aura-tools::executor`; this shell
+# re-exports it under the layered name and adds the conflict +
+# isolation primitives so future Phase 6/7 wiring can grow here.
+aura-exec-tools = { path = "../aura-exec-tools" }
+aura-exec-conflict = { path = "../aura-exec-conflict" }
+aura-exec-isolation = { path = "../aura-exec-isolation" }
+
+[lints]
+workspace = true

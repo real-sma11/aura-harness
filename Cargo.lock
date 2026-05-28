@@ -397,6 +397,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-exec-conflict"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "aura-exec-isolation"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "which",
+]
+
+[[package]]
+name = "aura-exec-policy"
+version = "0.1.0"
+dependencies = [
+ "aura-core-permissions",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-exec-runner"
+version = "0.1.0"
+dependencies = [
+ "aura-exec-conflict",
+ "aura-exec-isolation",
+ "aura-exec-tools",
+]
+
+[[package]]
+name = "aura-exec-sandbox"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "aura-exec-tools"
+version = "0.1.0"
+dependencies = [
+ "aura-exec-policy",
+ "aura-exec-sandbox",
+ "aura-tools",
+]
+
+[[package]]
 name = "aura-kernel"
 version = "0.1.0"
 dependencies = [

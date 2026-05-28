@@ -65,6 +65,19 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-store-record", "store"),
     ("aura-store-snapshot", "store"),
     ("aura-tools", "exec"),
+    // Phase 5 exec layer split (1 legacy shell + 6 new crates):
+    //   aura-exec-conflict  — domain-scoped advisory locks (no aura-* deps)
+    //   aura-exec-isolation — worktree + copy isolation (no aura-* deps)
+    //   aura-exec-policy    — verdict over EffectivePermissions (depends on aura-core-permissions)
+    //   aura-exec-sandbox   — FsSandbox + ProcessSandbox primitives (no aura-* deps)
+    //   aura-exec-tools     — re-export shell over aura-tools + sandbox + policy
+    //   aura-exec-runner    — re-export shell over aura-exec-tools + conflict + isolation
+    ("aura-exec-conflict", "exec"),
+    ("aura-exec-isolation", "exec"),
+    ("aura-exec-policy", "exec"),
+    ("aura-exec-sandbox", "exec"),
+    ("aura-exec-tools", "exec"),
+    ("aura-exec-runner", "exec"),
     // Phase 3 model + context layer renames. The original
     // `aura-<name>` crates are kept as compatibility shells that
     // re-export through the layered `aura-<layer>-<name>` crate.

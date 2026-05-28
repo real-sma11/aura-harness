@@ -1,0 +1,15 @@
+[package]
+name = "aura-exec-policy"
+description = "Approval / verdict evaluation over EffectivePermissions (Phase 5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aura-core-permissions = { path = "../aura-core-permissions" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
