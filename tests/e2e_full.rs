@@ -5,13 +5,19 @@
 //! would.  Tests are organised into suites:
 //!
 //!   1. REST API data-flow
-//!   2. WebSocket security & validation
-//!   3. WebSocket session configuration
+//!   2. POST `/v1/run` validation (Phase A wire shape)
+//!   3. WebSocket session configuration (mock provider)
 //!   4. WebSocket protocol edge-cases
 //!   5. ZOS login + JWT authentication  (requires `E2E_ZOS_EMAIL` / `E2E_ZOS_PASSWORD`)
 //!   6. LLM tool coverage               (requires LLM credentials)
 //!   7. Streaming protocol fidelity      (requires LLM credentials)
 //!   8. Concurrency & stress
+//!
+//! Phase A note: every chat run is bootstrapped via the canonical
+//! `POST /v1/run` + `WS /stream/:run_id` two-step exchange. The
+//! legacy `InboundMessage::SessionInit` first-frame contract no
+//! longer exists; tests that exercised it (double-init, malformed
+//! session_init, JWT-via-session-init-token) have been deleted.
 //!
 //! Run everything:
 //! ```text
@@ -21,7 +27,7 @@
 //! Run only suites that need no credentials:
 //! ```text
 //! cargo test --test e2e_full rest_
-//! cargo test --test e2e_full ws_sec_
+//! cargo test --test e2e_full run_validation_
 //! cargo test --test e2e_full ws_cfg_
 //! cargo test --test e2e_full ws_proto_
 //! cargo test --test e2e_full stress_
@@ -33,9 +39,10 @@ use std::time::Duration;
 
 use aura_core::AgentId;
 use common::{
-    assert_stop_reason, collect_text, connect_llm_session, find_agent_dir, find_file, http_client,
-    place_file_in_agent_dir, start_mock_server, tool_names_used, SessionInitOpts, TestServer,
-    WsClient,
+    assert_stop_reason, chat_request_payload, chat_request_payload_extended, collect_text,
+    connect_llm_session, find_agent_dir, find_file, http_client, open_chat_run,
+    place_file_in_agent_dir, post_runtime_request, start_mock_server, tool_names_used,
+    ChatRequestOpts, TestServer, WsClient,
 };
 use serde_json::{json, Value};
 
@@ -434,141 +441,173 @@ async fn rest_record_invalid_agent_returns_400() {
 }
 
 // ============================================================================
-// Suite 2: WebSocket Security & Validation
+// Suite 2: POST /v1/run validation (Phase A wire shape)
+//
+// These tests pin the HTTP-side validation that used to live on the
+// `InboundMessage::SessionInit` first-frame path before Phase A. The
+// chat-session bootstrap helpers in `crates/aura-runtime/src/session`
+// reject bad workspaces / project paths up-front and surface them as
+// `ChatRequestError { code: "invalid_workspace", ... }`, which the
+// `POST /v1/run` handler maps to HTTP 400.
 // ============================================================================
 
 #[tokio::test]
-async fn ws_sec_workspace_path_traversal_rejected() {
+async fn run_validation_workspace_path_traversal_rejected() {
     let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
+    let payload = json!({
+        "type": { "kind": "chat", "params": { "conversation_messages": [] } },
+        "agent_identity": {},
+        "model": {},
+        "workspace": { "workspace": "../../../etc" },
+        "agent_permissions": common::default_agent_permissions_payload(),
+        "agent_capabilities": {},
+        "user_id": "e2e-user",
+    });
 
-    ws.send_json(&json!({
-        "type": "session_init",
-        "workspace": "../../../etc",
-        "agent_permissions": common::default_agent_permissions_payload()
-    }))
-    .await;
-
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 400, "traversal workspace should 400");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_workspace");
     assert!(
-        msg["code"] == "invalid_workspace" || msg["message"].as_str().unwrap_or("").contains(".."),
-        "expected workspace rejection, got: {msg}"
+        body["error"].as_str().unwrap_or("").contains("..")
+            || body["error"].as_str().unwrap_or("").contains("under"),
+        "expected '..' or 'under' in error, got: {body}"
     );
 }
 
 #[tokio::test]
-async fn ws_sec_workspace_outside_base_rejected() {
+async fn run_validation_workspace_outside_base_rejected() {
     let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-
-    // Absolute path outside the server's workspaces directory
     let outside = if cfg!(windows) {
         "C:\\Windows\\Temp\\evil"
     } else {
         "/tmp/evil"
     };
-    ws.send_json(&json!({
-        "type": "session_init",
-        "workspace": outside,
-        "agent_permissions": common::default_agent_permissions_payload()
-    }))
-    .await;
+    let payload = json!({
+        "type": { "kind": "chat", "params": { "conversation_messages": [] } },
+        "agent_identity": {},
+        "model": {},
+        "workspace": { "workspace": outside },
+        "agent_permissions": common::default_agent_permissions_payload(),
+        "agent_capabilities": {},
+        "user_id": "e2e-user",
+    });
 
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(
-        msg["type"], "error",
-        "expected error for outside workspace, got: {msg}"
-    );
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 400, "outside-base workspace should 400");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_workspace");
 }
 
 #[tokio::test]
-async fn ws_sec_project_path_relative_rejected() {
+async fn run_validation_project_path_relative_rejected() {
     let server = TestServer::start().await;
     let ws_path = server.workspaces_path().join("sec-relpath");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_json(&json!({
-        "type": "session_init",
-        "workspace": ws_path.to_string_lossy(),
-        "project_path": "relative/path",
-        "agent_permissions": common::default_agent_permissions_payload()
-    }))
-    .await;
+    let payload = json!({
+        "type": { "kind": "chat", "params": { "conversation_messages": [] } },
+        "agent_identity": {},
+        "model": {},
+        "workspace": {
+            "workspace": ws_path.to_string_lossy(),
+            "project_path": "relative/path",
+        },
+        "agent_permissions": common::default_agent_permissions_payload(),
+        "agent_capabilities": {},
+        "user_id": "e2e-user",
+    });
 
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 400, "relative project_path should 400");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_workspace");
     assert!(
-        msg["message"].as_str().unwrap_or("").contains("absolute"),
-        "expected 'absolute' in error message, got: {msg}"
+        body["error"].as_str().unwrap_or("").contains("absolute"),
+        "expected 'absolute' in error, got: {body}"
     );
 }
 
 #[tokio::test]
-async fn ws_sec_project_path_with_dotdot_rejected() {
+async fn run_validation_project_path_with_dotdot_rejected() {
     let server = TestServer::start().await;
     let ws_path = server.workspaces_path().join("sec-dotdot");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
     let evil = if cfg!(windows) {
         "C:\\foo\\..\\bar"
     } else {
         "/foo/../bar"
     };
-    ws.send_json(&json!({
-        "type": "session_init",
-        "workspace": ws_path.to_string_lossy(),
-        "project_path": evil,
-        "agent_permissions": common::default_agent_permissions_payload()
-    }))
-    .await;
+    let payload = json!({
+        "type": { "kind": "chat", "params": { "conversation_messages": [] } },
+        "agent_identity": {},
+        "model": {},
+        "workspace": {
+            "workspace": ws_path.to_string_lossy(),
+            "project_path": evil,
+        },
+        "agent_permissions": common::default_agent_permissions_payload(),
+        "agent_capabilities": {},
+        "user_id": "e2e-user",
+    });
 
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 400, "..-containing project_path should 400");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_workspace");
     assert!(
-        msg["message"].as_str().unwrap_or("").contains(".."),
-        "expected '..' rejection, got: {msg}"
+        body["error"].as_str().unwrap_or("").contains(".."),
+        "expected '..' in error, got: {body}"
     );
 }
 
+// ============================================================================
+// WebSocket parse-error coverage (post-Phase-A)
+//
+// The pre-Phase-A WS handler rejected bad first frames before any
+// session existed. After Phase A the WS handler only ever sees an
+// already-attached session, so we open a valid chat run first and
+// then probe the parse-error paths.
+// ============================================================================
+
 #[tokio::test]
-async fn ws_sec_unknown_message_type_rejected() {
-    let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
+async fn ws_proto_unknown_message_type_rejected() {
+    let server = start_mock_server().await;
+    let ws_path = server.workspaces_path().join("proto-unknown");
+    std::fs::create_dir_all(&ws_path).unwrap();
+
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
     ws.send_raw(r#"{"type": "unknown_type", "data": 42}"#).await;
+
     let msg = ws.recv_json().await.expect("expected error");
     assert_eq!(msg["type"], "error");
     assert_eq!(msg["code"], "parse_error");
 }
 
 #[tokio::test]
-async fn ws_sec_empty_json_rejected() {
-    let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
+async fn ws_proto_empty_json_rejected() {
+    let server = start_mock_server().await;
+    let ws_path = server.workspaces_path().join("proto-empty-json");
+    std::fs::create_dir_all(&ws_path).unwrap();
+
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
     ws.send_raw("{}").await;
+
     let msg = ws.recv_json().await.expect("expected error");
     assert_eq!(msg["type"], "error");
     assert_eq!(msg["code"], "parse_error");
 }
 
 #[tokio::test]
-async fn ws_sec_malformed_session_init() {
-    let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_raw(r#"{"type": "session_init", "max_tokens": "not_a_number"}"#)
-        .await;
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
-    assert_eq!(msg["code"], "parse_error");
-}
+async fn ws_proto_invalid_json_rejected() {
+    let server = start_mock_server().await;
+    let ws_path = server.workspaces_path().join("proto-invalid-json");
+    std::fs::create_dir_all(&ws_path).unwrap();
 
-#[tokio::test]
-async fn ws_sec_invalid_json() {
-    let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
     ws.send_raw("this is not json at all!!!").await;
+
     let msg = ws.recv_json().await.expect("expected error");
     assert_eq!(msg["type"], "error");
     assert_eq!(msg["code"], "parse_error");
@@ -584,10 +623,9 @@ async fn ws_cfg_installed_tools_appear_in_session_ready() {
     let ws_path = server.workspaces_path().join("cfg-installed-tools");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             installed_tools: Some(vec![json!({
                 "name": "my_custom_tool",
                 "description": "A custom tool for testing",
@@ -600,10 +638,16 @@ async fn ws_cfg_installed_tools_appear_in_session_ready() {
             })]),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
 
+    let stream_url = server.stream_url(&run_id);
+    let mut ws = WsClient::connect(&stream_url).await;
     let ready = ws.expect_session_ready().await;
+
     let tools = ready["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
@@ -633,16 +677,17 @@ async fn ws_cfg_integration_backed_tools_require_installed_integration() {
         }
     });
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload_without_integration = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             installed_tools: Some(vec![gated_tool.clone()]),
             ..Default::default()
         },
-    )
-    .await;
-
+    );
+    let resp = post_runtime_request(&server, &payload_without_integration).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     let names: Vec<&str> = ready["tools"]
         .as_array()
@@ -655,10 +700,9 @@ async fn ws_cfg_integration_backed_tools_require_installed_integration() {
         "integration-backed tool should be hidden until its integration is installed: {names:?}"
     );
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload_with_integration = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             installed_tools: Some(vec![gated_tool]),
             installed_integrations: Some(vec![json!({
                 "integration_id": "integration-brave-1",
@@ -668,9 +712,11 @@ async fn ws_cfg_integration_backed_tools_require_installed_integration() {
             })]),
             ..Default::default()
         },
-    )
-    .await;
-
+    );
+    let resp = post_runtime_request(&server, &payload_with_integration).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     let names: Vec<&str> = ready["tools"]
         .as_array()
@@ -690,19 +736,20 @@ async fn ws_cfg_conversation_messages_accepted() {
     let ws_path = server.workspaces_path().join("cfg-conv-msgs");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             conversation_messages: Some(vec![
                 json!({"role": "user", "content": "Hello from history"}),
                 json!({"role": "assistant", "content": "I remember that."}),
             ]),
             ..Default::default()
         },
-    )
-    .await;
-
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(
         ready["session_id"].is_string(),
@@ -716,15 +763,17 @@ async fn ws_cfg_temperature() {
     let ws_path = server.workspaces_path().join("cfg-temp");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             temperature: Some(0.5),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -735,15 +784,17 @@ async fn ws_cfg_max_tokens() {
     let ws_path = server.workspaces_path().join("cfg-maxtok");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             max_tokens: Some(4096),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -754,15 +805,17 @@ async fn ws_cfg_project_id() {
     let ws_path = server.workspaces_path().join("cfg-projid");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             project_id: Some("proj-abc-123"),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -773,16 +826,13 @@ async fn ws_cfg_minimal_session_init() {
     let ws_path = server.workspaces_path().join("cfg-minimal");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    // Only workspace -- all other fields default
-    ws.send_json(&json!({
-        "type": "session_init",
-        "workspace": ws_path.to_string_lossy(),
-        "agent_permissions": common::default_agent_permissions_payload()
-    }))
-    .await;
-
+    let payload = chat_request_payload(&ws_path, None);
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
+
     let tools = ready["tools"].as_array().unwrap();
     assert!(
         !tools.is_empty(),
@@ -798,15 +848,17 @@ async fn ws_cfg_project_path_valid() {
 
     let real_dir = tempfile::tempdir().unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             project_path: Some(real_dir.path().to_str().unwrap()),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -817,8 +869,11 @@ async fn ws_cfg_session_ready_includes_agent_and_core_tools() {
     let ws_path = server.workspaces_path().join("cfg-alltools");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
+    let payload = chat_request_payload(&ws_path, None);
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
 
     let tools = ready["tools"].as_array().unwrap();
@@ -849,15 +904,17 @@ async fn ws_cfg_session_init_with_model_override() {
     let ws_path = server.workspaces_path().join("cfg-model");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             model: Some("claude-sonnet-4-20250514"),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -868,15 +925,17 @@ async fn ws_cfg_system_prompt_override() {
     let ws_path = server.workspaces_path().join("cfg-sysprompt");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             system_prompt: Some("You are a helpful pirate assistant."),
             ..Default::default()
         },
-    )
-    .await;
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
     assert!(ready["session_id"].is_string());
 }
@@ -887,10 +946,9 @@ async fn ws_cfg_multiple_installed_tools() {
     let ws_path = server.workspaces_path().join("cfg-multi-tools");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init_extended(
+    let payload = chat_request_payload_extended(
         &ws_path,
-        SessionInitOpts {
+        ChatRequestOpts {
             installed_tools: Some(vec![
                 json!({
                     "name": "tool_alpha",
@@ -907,10 +965,13 @@ async fn ws_cfg_multiple_installed_tools() {
             ]),
             ..Default::default()
         },
-    )
-    .await;
-
+    );
+    let resp = post_runtime_request(&server, &payload).await;
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
+
     let tools = ready["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"tool_alpha"), "missing tool_alpha");
@@ -927,10 +988,7 @@ async fn ws_proto_cancel_no_active_turn() {
     let ws_path = server.workspaces_path().join("proto-cancel-idle");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
-
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
     // Cancel with no turn in progress -- should be silently ignored
     ws.send_cancel().await;
 
@@ -951,9 +1009,7 @@ async fn ws_proto_approval_response_no_crash() {
     let ws_path = server.workspaces_path().join("proto-approval");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
 
     ws.send_json(&json!({
         "type": "approval_response",
@@ -969,32 +1025,6 @@ async fn ws_proto_approval_response_no_crash() {
 }
 
 #[tokio::test]
-async fn ws_proto_session_init_twice_errors() {
-    let server = start_mock_server().await;
-    let ws_path = server.workspaces_path().join("proto-double-init");
-    std::fs::create_dir_all(&ws_path).unwrap();
-
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
-
-    ws.send_session_init(&ws_path, None).await;
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
-    assert_eq!(msg["code"], "already_initialized");
-}
-
-#[tokio::test]
-async fn ws_proto_user_message_before_init() {
-    let server = start_mock_server().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_user_message("hello without init").await;
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
-    assert_eq!(msg["code"], "not_initialized");
-}
-
-#[tokio::test]
 async fn ws_proto_multiple_concurrent_sessions() {
     let server = start_mock_server().await;
 
@@ -1003,8 +1033,11 @@ async fn ws_proto_multiple_concurrent_sessions() {
         let ws_path = server.workspaces_path().join(format!("concurrent-{i}"));
         std::fs::create_dir_all(&ws_path).unwrap();
 
-        let mut ws = WsClient::connect(&server.ws_url()).await;
-        ws.send_session_init(&ws_path, None).await;
+        let payload = chat_request_payload(&ws_path, None);
+        let resp = post_runtime_request(&server, &payload).await;
+        let body: Value = resp.json().await.unwrap();
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+        let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
         let ready = ws.expect_session_ready().await;
         let sid = ready["session_id"].as_str().unwrap().to_string();
         session_ids.push(sid);
@@ -1024,17 +1057,20 @@ async fn ws_proto_multiple_concurrent_sessions() {
 #[tokio::test]
 async fn ws_proto_disconnect_during_init() {
     let server = start_mock_server().await;
+    let ws_path = server.workspaces_path().join("disconnect-test");
+    std::fs::create_dir_all(&ws_path).unwrap();
 
-    // Connect and immediately drop without waiting for session_ready
-    {
-        let mut ws = WsClient::connect(&server.ws_url()).await;
-        ws.send_session_init(&server.workspaces_path().join("disconnect-test"), None)
-            .await;
-        // Drop the connection immediately
-    }
+    // Phase A: prepare a run via POST, then immediately drop the
+    // pending WS attachment without consuming it. The matching slot
+    // sits in `RouterState::pending_chat_runs` until a stop or the
+    // next POST consumes it.
+    let payload = chat_request_payload(&ws_path, None);
+    let resp = post_runtime_request(&server, &payload).await;
+    assert!(resp.status().is_success());
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify server is still healthy
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let resp = http_client()
         .get(format!("{}/health", server.base_url()))
         .send()
@@ -1049,9 +1085,7 @@ async fn ws_proto_rapid_init_then_message() {
     let ws_path = server.workspaces_path().join("rapid-init-msg");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
 
     // Send message immediately after init
     ws.send_user_message("quick message").await;
@@ -1066,6 +1100,13 @@ async fn ws_proto_rapid_init_then_message() {
 
 // ============================================================================
 // Suite 5: ZOS Login + JWT Authentication
+//
+// Phase A note: the `jwt_via_session_init_token` test was deleted —
+// the `SessionInit.token` field no longer exists; the model JWT now
+// rides under `RuntimeRequest.auth_jwt` and is forwarded by the
+// chat-session bootstrap. The `jwt_via_bearer_header` variant
+// continues to exercise the alternative path where the bearer is
+// supplied on the transport instead of in the request body.
 // ============================================================================
 
 #[tokio::test]
@@ -1120,11 +1161,12 @@ async fn jwt_via_bearer_header() {
     let ws_path = server.workspaces_path().join("jwt-bearer");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    // Connect with JWT in the HTTP Authorization header
-    let mut ws = WsClient::connect_with_auth(&server.ws_url(), &token).await;
-    // Init WITHOUT token in body -- auth comes from the header
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
+    // Phase A: drive the bootstrap with the JWT supplied on the HTTP
+    // bearer (both the POST and the WS upgrade) instead of in the
+    // request body — exercises the path where the transport carries
+    // the credential and the gateway forwards it to the run.
+    let payload = chat_request_payload(&ws_path, None);
+    let mut ws = common::open_chat_run_with_auth(&server, &payload, &token).await;
 
     ws.send_user_message("Say hello in one word.").await;
     let messages = ws.collect_turn(Duration::from_secs(120)).await;
@@ -1135,33 +1177,6 @@ async fn jwt_via_bearer_header() {
 
     let has_text = messages.iter().any(|m| m["type"] == "text_delta");
     assert!(has_text, "should get text_delta with bearer auth");
-}
-
-#[tokio::test]
-async fn jwt_via_session_init_token() {
-    let _ = dotenvy::dotenv();
-    let (email, password) = require_zos!();
-    let token = common::zos_login(&email, &password).await.unwrap();
-
-    let server = TestServer::start().await;
-    let ws_path = server.workspaces_path().join("jwt-token-field");
-    std::fs::create_dir_all(&ws_path).unwrap();
-
-    // Connect WITHOUT auth header, but pass JWT in session_init.token
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, Some(&token)).await;
-    ws.expect_session_ready().await;
-
-    ws.send_user_message("What is 1+1? Reply with just the number.")
-        .await;
-    let messages = ws.collect_turn(Duration::from_secs(120)).await;
-    assert!(
-        !messages.is_empty(),
-        "should receive messages with token field auth"
-    );
-
-    let has_text = messages.iter().any(|m| m["type"] == "text_delta");
-    assert!(has_text, "should get text_delta with token field auth");
 }
 
 #[tokio::test]
@@ -1222,10 +1237,11 @@ async fn jwt_missing_errors() {
     let ws_path = server.workspaces_path().join("jwt-missing");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    // Connect with NO auth at all
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
+    // Open the run with no JWT supplied (neither in `auth_jwt` nor on
+    // the HTTP bearer — the bearer header on the POST goes to the
+    // node auth gate, not the model router).
+    let payload = chat_request_payload(&ws_path, None);
+    let mut ws = open_chat_run(&server, &payload).await;
 
     ws.send_user_message("hello").await;
 
@@ -2049,20 +2065,35 @@ async fn stress_parallel_sessions_independent() {
     let _ = dotenvy::dotenv();
     let token = require_llm!();
     let server = TestServer::start().await;
+    let base_url = server.base_url().to_string();
+    let base_ws_url = server.base_ws_url().to_string();
+    let ws_base = server.workspaces_path();
 
     let mut handles = Vec::new();
     for i in 0..3 {
-        let ws_url = server.ws_url();
-        let ws_base = server.workspaces_path();
+        let base_url = base_url.clone();
+        let base_ws_url = base_ws_url.clone();
+        let ws_base = ws_base.clone();
         let tok = token.clone();
 
         handles.push(tokio::spawn(async move {
             let ws_path = ws_base.join(format!("parallel-{i}"));
             std::fs::create_dir_all(&ws_path).unwrap();
 
-            let mut ws = WsClient::connect(&ws_url).await;
             let tok_ref = if tok.is_empty() { None } else { Some(tok.as_str()) };
-            ws.send_session_init(&ws_path, tok_ref).await;
+            let payload = chat_request_payload(&ws_path, tok_ref);
+            let client = http_client();
+            let resp = client
+                .post(format!("{base_url}/v1/run"))
+                .json(&payload)
+                .send()
+                .await
+                .expect("POST /v1/run");
+            let body: Value = resp.json().await.expect("body");
+            let run_id = body["run_id"].as_str().expect("run_id").to_string();
+            let stream_url = format!("{base_ws_url}/stream/{run_id}");
+            let mut ws =
+                WsClient::connect_with_auth(&stream_url, common::E2E_TEST_BEARER).await;
             ws.expect_session_ready().await;
 
             let filename = format!("unique_{i}.txt");
@@ -2105,9 +2136,16 @@ async fn stress_parallel_sessions_independent() {
 async fn stress_rapid_connect_disconnect() {
     let server = start_mock_server().await;
 
-    for _ in 0..10 {
-        let _ws = WsClient::connect(&server.ws_url()).await;
-        // Drop immediately
+    // Phase A: spin up several pending chat runs without attaching
+    // their WS to exercise the "client gives up before /stream/:run_id
+    // upgrade" path. The `RouterState::pending_chat_runs` slots just
+    // sit there until garbage collection / process exit.
+    for i in 0..10 {
+        let ws_path = server.workspaces_path().join(format!("rcd-{i}"));
+        std::fs::create_dir_all(&ws_path).unwrap();
+        let payload = chat_request_payload(&ws_path, None);
+        let resp = post_runtime_request(&server, &payload).await;
+        assert!(resp.status().is_success());
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2159,8 +2197,11 @@ async fn stress_many_ws_sessions_health() {
         let ws_path = server.workspaces_path().join(format!("stress-multi-{i}"));
         std::fs::create_dir_all(&ws_path).unwrap();
 
-        let mut ws = WsClient::connect(&server.ws_url()).await;
-        ws.send_session_init(&ws_path, None).await;
+        let payload = chat_request_payload(&ws_path, None);
+        let resp = post_runtime_request(&server, &payload).await;
+        let body: Value = resp.json().await.unwrap();
+        let run_id = body["run_id"].as_str().unwrap().to_string();
+        let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
         let ready = ws.expect_session_ready().await;
         assert!(
             ready["session_id"].is_string(),
@@ -2202,10 +2243,8 @@ async fn stress_concurrent_rest_and_ws() {
     // Simultaneously open a WS session
     let ws_path = server.workspaces_path().join("stress-rest-ws");
     std::fs::create_dir_all(&ws_path).unwrap();
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    let ready = ws.expect_session_ready().await;
-    assert!(ready["session_id"].is_string());
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
+    let _ = &mut ws; // keep ws alive
 
     // Verify REST still works while WS is open
     let resp = client

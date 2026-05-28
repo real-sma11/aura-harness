@@ -279,6 +279,11 @@ async fn spec_gen_via_kernel_model_gateway_records_reasoning_entry() {
         serde_json::json!({
             "project_id": "p1",
             "requirements_path": "requirements.md",
+            // `SpecGen::generate_specs` now requires an explicit
+            // model id — the silent `DEFAULT_MODEL` fallback was
+            // removed in `5618cce`. Any model name satisfies the
+            // mock provider, which ignores the field.
+            "model": "claude-opus-4-7",
         }),
         Some(ws.path().to_path_buf()),
         CancellationToken::new(),

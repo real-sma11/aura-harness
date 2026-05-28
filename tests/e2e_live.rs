@@ -14,6 +14,12 @@
 //!
 //! Required environment (via `.env` or exported):
 //! - `AURA_ROUTER_URL` (defaulted) and a JWT via `AURA_ROUTER_JWT` or `aura login`.
+//!
+//! Phase A note: every chat session is bootstrapped via the canonical
+//! `POST /v1/run` + `WS /stream/:run_id` two-step exchange. The old
+//! `WS /stream` + `InboundMessage::SessionInit` first-frame contract
+//! is gone; tests that exercised it (`test_ws_session_init_twice_errors`,
+//! `test_ws_user_message_before_init`) have been deleted.
 
 mod common;
 
@@ -21,8 +27,9 @@ use std::time::Duration;
 
 use aura_core::AgentId;
 use common::{
-    assert_stop_reason, collect_text, connect_llm_session, find_agent_dir, find_file,
-    has_tool_error, http_client, place_file_in_agent_dir, tool_names_used, TestServer, WsClient,
+    assert_stop_reason, chat_request_payload, chat_request_payload_full, collect_text,
+    connect_llm_session, find_agent_dir, find_file, has_tool_error, http_client, open_chat_run,
+    place_file_in_agent_dir, post_runtime_request, tool_names_used, TestServer, WsClient,
 };
 use serde_json::{json, Value};
 
@@ -69,7 +76,7 @@ async fn test_health() {
 /// header must reach handler logic rather than getting bounced at the
 /// middleware layer. Asserting "not 401" is stronger than asserting a
 /// specific success status — the test fixture wires up no automaton
-/// controller, so `/automaton/list` legitimately replies `503`; that's
+/// controller, so `/v1/run/list` legitimately replies `503`; that's
 /// still proof the request traversed the protected sub-router without
 /// being rejected for missing auth (which is the regression this guard
 /// actually cares about).
@@ -81,7 +88,7 @@ async fn test_protected_route_open_when_auth_disabled() {
         .build()
         .unwrap();
     let resp = client
-        .get(format!("{}/automaton/list", server.base_url()))
+        .get(format!("{}/v1/run/list", server.base_url()))
         .send()
         .await
         .unwrap();
@@ -155,20 +162,26 @@ async fn test_scan_record() {
 }
 
 // ============================================================================
-// Suite 2: WebSocket Session Lifecycle
+// Suite 2: WebSocket Session Lifecycle (Phase A wire shape)
 // ============================================================================
 
 #[tokio::test]
-
 async fn test_ws_session_init() {
     let server = TestServer::start().await;
     let ws_path = server.workspaces_path().join("test-agent");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-
+    // Use the raw POST + connect pattern so we can introspect the
+    // SessionReady frame (the high-level `open_chat_run` helper
+    // consumes it).
+    let payload = chat_request_payload(&ws_path, None);
+    let resp = post_runtime_request(&server, &payload).await;
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    let mut ws = WsClient::connect(&server.stream_url(&run_id)).await;
     let ready = ws.expect_session_ready().await;
+
     let tools = ready["tools"].as_array().unwrap();
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
@@ -181,34 +194,6 @@ async fn test_ws_session_init() {
     assert!(tool_names.contains(&"search_code"), "missing search_code");
     assert!(tool_names.contains(&"run_command"), "missing run_command");
     assert!(tool_names.contains(&"stat_file"), "missing stat_file");
-}
-
-#[tokio::test]
-
-async fn test_ws_session_init_twice_errors() {
-    let server = TestServer::start().await;
-    let ws_path = server.workspaces_path().join("test-agent-2");
-    std::fs::create_dir_all(&ws_path).unwrap();
-
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
-
-    ws.send_session_init(&ws_path, None).await;
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
-    assert_eq!(msg["code"], "already_initialized");
-}
-
-#[tokio::test]
-
-async fn test_ws_user_message_before_init() {
-    let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
-    ws.send_user_message("hello").await;
-    let msg = ws.recv_json().await.expect("expected error");
-    assert_eq!(msg["type"], "error");
-    assert_eq!(msg["code"], "not_initialized");
 }
 
 // ============================================================================
@@ -650,13 +635,21 @@ async fn test_ws_cancel_turn() {
 
 // ============================================================================
 // Suite 11: Error Handling
+//
+// Phase A note: WebSocket parse-error coverage now requires an
+// attached session (the `/stream/:run_id` route is the only WS
+// endpoint and only sees frames after `prepare_chat_session`
+// succeeds).
 // ============================================================================
 
 #[tokio::test]
 
 async fn test_ws_invalid_json() {
     let server = TestServer::start().await;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
+    let ws_path = server.workspaces_path().join("invalid-json");
+    std::fs::create_dir_all(&ws_path).unwrap();
+
+    let mut ws = open_chat_run(&server, &chat_request_payload(&ws_path, None)).await;
     ws.send_raw("this is not json at all!!!").await;
 
     let msg = ws.recv_json().await.expect("expected error response");
@@ -825,22 +818,20 @@ async fn test_ws_session_init_with_system_prompt() {
     let ws_path = server.workspaces_path().join("sys-prompt");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
     let tok = if token.is_empty() {
         None
     } else {
         Some(token.as_str())
     };
-    ws.send_session_init_full(
+    let payload = chat_request_payload_full(
         &ws_path,
         tok,
         Some("You are a pirate. Every response must contain the word 'arrr'. This is mandatory."),
         None,
         None,
         None,
-    )
-    .await;
-    ws.expect_session_ready().await;
+    );
+    let mut ws = open_chat_run(&server, &payload).await;
 
     ws.send_user_message("Say hello.").await;
     let messages = ws.collect_turn(Duration::from_secs(120)).await;
@@ -867,15 +858,13 @@ async fn test_ws_session_init_with_model() {
     // Pin to the env-fallback model identifier — this end-to-end test
     // exercises the wire-protocol round trip, not model selection logic.
     let model = aura_reasoner::ENV_FALLBACK_MODEL;
-    let mut ws = WsClient::connect(&server.ws_url()).await;
     let tok = if token.is_empty() {
         None
     } else {
         Some(token.as_str())
     };
-    ws.send_session_init_full(&ws_path, tok, None, Some(model), None, None)
-        .await;
-    ws.expect_session_ready().await;
+    let payload = chat_request_payload_full(&ws_path, tok, None, Some(model), None, None);
+    let mut ws = open_chat_run(&server, &payload).await;
 
     ws.send_user_message("Say hi.").await;
     let messages = ws.collect_turn(Duration::from_secs(120)).await;
@@ -896,15 +885,13 @@ async fn test_ws_session_init_with_max_turns() {
     let ws_path = server.workspaces_path().join("max-turns");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect(&server.ws_url()).await;
     let tok = if token.is_empty() {
         None
     } else {
         Some(token.as_str())
     };
-    ws.send_session_init_full(&ws_path, tok, None, None, None, Some(1))
-        .await;
-    ws.expect_session_ready().await;
+    let payload = chat_request_payload_full(&ws_path, tok, None, None, None, Some(1));
+    let mut ws = open_chat_run(&server, &payload).await;
 
     place_file_in_agent_dir(&ws_path, "a.txt", "aaa");
     place_file_in_agent_dir(&ws_path, "b.txt", "bbb");
@@ -937,10 +924,13 @@ async fn test_ws_auth_bearer_header() {
     let ws_path = server.workspaces_path().join("bearer-header");
     std::fs::create_dir_all(&ws_path).unwrap();
 
-    let mut ws = WsClient::connect_with_auth(&server.ws_url(), &token).await;
-    // Init without token in body — auth comes from the HTTP header
-    ws.send_session_init(&ws_path, None).await;
-    ws.expect_session_ready().await;
+    // Phase A: the model JWT can either ride in the `auth_jwt` body
+    // field or as a transport bearer that the gateway threads through.
+    // This test exercises the bearer-header path: the POST + WS both
+    // use the JWT as their transport credential, and the body's
+    // `auth_jwt` is left unset.
+    let payload = chat_request_payload(&ws_path, None);
+    let mut ws = common::open_chat_run_with_auth(&server, &payload, &token).await;
 
     ws.send_user_message("Say hello in one word.").await;
     let messages = ws.collect_turn(Duration::from_secs(120)).await;

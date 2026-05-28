@@ -236,13 +236,19 @@ fn agent_meta_key_decode_invalid_field() {
 
 #[test]
 fn meta_field_byte_roundtrip() {
-    for field in [
+    #[allow(deprecated)]
+    let fields = [
         MetaField::HeadSeq,
         MetaField::InboxHead,
         MetaField::InboxTail,
         MetaField::Status,
         MetaField::SchemaVersion,
-    ] {
+        // Added in d762e84 (store-backed agent processing claims) —
+        // the byte 5 slot is now occupied, so `meta_field_from_invalid_byte`
+        // below probes byte 6 instead.
+        MetaField::ProcessingClaim,
+    ];
+    for field in fields {
         let byte = field.as_byte();
         let parsed = MetaField::from_byte(byte).unwrap();
         assert_eq!(field, parsed);
@@ -251,6 +257,8 @@ fn meta_field_byte_roundtrip() {
 
 #[test]
 fn meta_field_from_invalid_byte() {
-    assert!(MetaField::from_byte(5).is_none());
+    // Byte 5 is `MetaField::ProcessingClaim` (added in d762e84).
+    // The first invalid byte is now 6.
+    assert!(MetaField::from_byte(6).is_none());
     assert!(MetaField::from_byte(255).is_none());
 }
