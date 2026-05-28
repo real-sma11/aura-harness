@@ -1,13 +1,12 @@
 [package]
-name = "aura-memory"
-description = "Phase 3 compatibility shell over aura-context-memory"
+name = "aura-agent-steering"
+description = "Steering evaluators for the Aura agent loop (Phase 3 placeholder)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aura-context-memory = { path = "../aura-context-memory" }
 
 [lints]
 workspace = true

@@ -1,25 +1,18 @@
 [package]
 name = "aura-prompts"
-description = "Render-only prompt construction layer for Aura (Phase 2 boundary crate)"
+description = "Phase 3 compatibility shell over aura-context-prompts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# IMPORTANT — boundary contract (Phase 2 of the core-loop architecture
-# refactor): this crate is render-only. It must NOT depend on
-# `aura-agent`, `aura-automaton`, `aura-runtime`, or `aura-reasoner`.
-# The forbidden-imports test in `tests/no_upstream_imports.rs` re-asserts
-# this at the source level; the actual enforcement is here, in Cargo.
-# Any future PR that tries to add one of those deps will fail to
-# compile.
+# IMPORTANT — boundary contract: the underlying `aura-context-prompts`
+# crate is render-only and must NOT depend on `aura-agent`,
+# `aura-automaton`, `aura-runtime`, or `aura-reasoner` /
+# `aura-model-reasoner`. This shell inherits that contract by only
+# re-exporting through `aura-context-prompts`.
 [dependencies]
-aura-config = { path = "../aura-config" }
-regex = { workspace = true }
-tracing = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+aura-context-prompts = { path = "../aura-context-prompts" }
 
 [lints]
 workspace = true

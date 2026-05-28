@@ -55,7 +55,6 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     // does not match the intended layering.
     ("aura-core", "core"),
     ("aura-config", "config"),
-    ("aura-prompts", "context"),
     // Phase 2 store layer split:
     //   aura-store        — compatibility shell over aura-store-db
     //   aura-store-db     — RocksDB-backed durable storage impl
@@ -66,16 +65,32 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-store-record", "store"),
     ("aura-store-snapshot", "store"),
     ("aura-tools", "exec"),
+    // Phase 3 model + context layer renames. The original
+    // `aura-<name>` crates are kept as compatibility shells that
+    // re-export through the layered `aura-<layer>-<name>` crate.
+    // The `aura-<layer>-<name>` names match the
+    // `aura-<layer>-<rest>` auto-classification convention exactly,
+    // so they could theoretically be omitted from this table, but
+    // we list them explicitly for clarity and to make Phase 6a
+    // edits surgical.
     ("aura-compaction", "context"),
+    ("aura-context-compaction", "context"),
     ("aura-reasoner", "model"),
+    ("aura-model-reasoner", "model"),
+    ("aura-memory", "context"),
+    ("aura-context-memory", "context"),
+    ("aura-skills", "context"),
+    ("aura-context-skills", "context"),
+    ("aura-prompts", "context"),
+    ("aura-context-prompts", "context"),
     ("aura-kernel", "agent"),
     ("aura-terminal", "surface"),
     ("aura-agent", "agent"),
+    // Phase 3 empty placeholder for Phase 6a steering extraction.
+    ("aura-agent-steering", "agent"),
     ("aura-auth", "core"),
     ("aura-automaton", "surface"),
     ("aura-runtime", "surface"),
-    ("aura-memory", "context"),
-    ("aura-skills", "context"),
     ("aura-protocol", "core"),
 ];
 

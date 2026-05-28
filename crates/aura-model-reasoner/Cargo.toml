@@ -1,0 +1,32 @@
+[package]
+name = "aura-model-reasoner"
+description = "Provider-agnostic model interface for Aura (model layer)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-config = { path = "../aura-config" }
+aura-core = { path = "../aura-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.11", features = ["json", "stream"] }
+async-trait = "0.1"
+futures-util = "0.3"
+colored = { workspace = true }
+terminal_size = { workspace = true }
+
+# HTTP for direct API calls (more reliable than SDK wrappers)
+
+[dev-dependencies]
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

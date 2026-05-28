@@ -1,26 +1,13 @@
 [package]
 name = "aura-skills"
-description = "Skill system for Aura agents - SKILL.md parser, loader, registry, activation"
+description = "Phase 3 compatibility shell over aura-context-skills"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aura-core = { path = "../aura-core" }
-aura-store = { path = "../aura-store" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
-dirs = { workspace = true }
-rocksdb = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+aura-context-skills = { path = "../aura-context-skills" }
 
 [lints]
 workspace = true

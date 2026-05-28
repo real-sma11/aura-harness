@@ -200,6 +200,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-agent-steering"
+version = "0.1.0"
+
+[[package]]
 name = "aura-auth"
 version = "0.1.0"
 dependencies = [
@@ -244,10 +248,7 @@ dependencies = [
 name = "aura-compaction"
 version = "0.1.0"
 dependencies = [
- "aura-config",
- "aura-reasoner",
- "serde_json",
- "tracing",
+ "aura-context-compaction",
 ]
 
 [[package]]
@@ -258,6 +259,64 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "aura-context-compaction"
+version = "0.1.0"
+dependencies = [
+ "aura-config",
+ "aura-reasoner",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "aura-context-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aura-agent",
+ "aura-core",
+ "aura-kernel",
+ "aura-reasoner",
+ "aura-store",
+ "chrono",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "aura-context-prompts"
+version = "0.1.0"
+dependencies = [
+ "aura-config",
+ "regex",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "aura-context-skills"
+version = "0.1.0"
+dependencies = [
+ "aura-core",
+ "aura-store",
+ "chrono",
+ "dirs",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -357,43 +416,11 @@ dependencies = [
 name = "aura-memory"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "aura-agent",
- "aura-core",
- "aura-kernel",
- "aura-reasoner",
- "aura-store",
- "chrono",
- "rocksdb",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
+ "aura-context-memory",
 ]
 
 [[package]]
-name = "aura-prompts"
-version = "0.1.0"
-dependencies = [
- "aura-config",
- "regex",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "aura-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "ts-rs",
-]
-
-[[package]]
-name = "aura-reasoner"
+name = "aura-model-reasoner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -411,6 +438,29 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "aura-prompts"
+version = "0.1.0"
+dependencies = [
+ "aura-context-prompts",
+]
+
+[[package]]
+name = "aura-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
+name = "aura-reasoner"
+version = "0.1.0"
+dependencies = [
+ "aura-model-reasoner",
 ]
 
 [[package]]
@@ -465,18 +515,7 @@ dependencies = [
 name = "aura-skills"
 version = "0.1.0"
 dependencies = [
- "aura-core",
- "aura-store",
- "chrono",
- "dirs",
- "rocksdb",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "uuid",
+ "aura-context-skills",
 ]
 
 [[package]]

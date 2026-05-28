@@ -47,22 +47,32 @@ members = [
     "crates/aura-core-protocol",
     "crates/aura-core-auth",
     "crates/aura-config",
+    # Phase 3 context layer crates + shells
     "crates/aura-prompts",
+    "crates/aura-context-prompts",
+    "crates/aura-compaction",
+    "crates/aura-context-compaction",
+    "crates/aura-memory",
+    "crates/aura-context-memory",
+    "crates/aura-skills",
+    "crates/aura-context-skills",
+    # Phase 2 store layer
     "crates/aura-store",
     "crates/aura-store-db",
     "crates/aura-store-record",
     "crates/aura-store-snapshot",
     "crates/aura-tools",
-    "crates/aura-compaction",
+    # Phase 3 model layer crate + shell
     "crates/aura-reasoner",
+    "crates/aura-model-reasoner",
     "crates/aura-kernel",
     "crates/aura-terminal",
     "crates/aura-agent",
+    # Phase 3 placeholder for Phase 6a steering extraction
+    "crates/aura-agent-steering",
     "crates/aura-auth",
     "crates/aura-automaton",
     "crates/aura-runtime",
-    "crates/aura-memory",
-    "crates/aura-skills",
     "crates/aura-protocol",
 ]
 

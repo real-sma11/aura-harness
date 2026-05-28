@@ -128,6 +128,15 @@ impl SkillRegistry {
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
+
+    /// Phase 3 stub. Phase 8 wires plugin-provided skill roots into
+    /// discovery; today this method is intentionally a no-op so the
+    /// agent loop can call it unconditionally without a feature flag.
+    ///
+    /// _Stub — does nothing today; see Phase 8 plugin runtime integration._
+    pub fn add_plugin_roots(&mut self, _roots: &[std::path::PathBuf]) {
+        // intentionally no-op until Phase 8 plugin runtime integration
+    }
 }
 
 /// `Registry` trait impl (Wave 4 unification). The concrete inherent

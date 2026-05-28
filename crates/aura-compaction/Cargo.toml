@@ -1,16 +1,13 @@
 [package]
 name = "aura-compaction"
-description = "Unified context compaction for the Aura agent loop"
+description = "Phase 3 compatibility shell over aura-context-compaction"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aura-config = { path = "../aura-config" }
-aura-reasoner = { path = "../aura-reasoner" }
-serde_json = { workspace = true }
-tracing = { workspace = true }
+aura-context-compaction = { path = "../aura-context-compaction" }
 
 [lints]
 workspace = true
