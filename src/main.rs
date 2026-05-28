@@ -10,7 +10,10 @@ mod event_loop;
 mod record_loader;
 mod session_helpers;
 
-use cli::{Cli, Commands, MigrateArgs, PluginsCommand, PluginsSubcommand, RunArgs, UiMode};
+use cli::{
+    AgentsCommand, AgentsSubcommand, Cli, Commands, MigrateArgs, PluginsCommand, PluginsSubcommand,
+    RunArgs, UiMode,
+};
 
 use anyhow::Context;
 use aura_agent::{
@@ -61,8 +64,125 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Whoami) => cmd_whoami(),
         Some(Commands::Migrate(args)) => cmd_migrate(args),
         Some(Commands::Plugins(args)) => cmd_plugins(args),
+        Some(Commands::Agents(args)) => cmd_agents(args).await,
         Some(Commands::Run(args)) => run_with_args(args).await,
         None => run_with_args(RunArgs::default()).await,
+    }
+}
+
+/// `aura agents` (Phase 7b).
+///
+/// Reads the on-disk orphan store and renders inspect / reap output
+/// in a [`tabwriter`]-aligned table. Live-registry inspection is a
+/// best-effort no-op when run outside the daemon process — the
+/// on-disk orphan view is the durable source of truth across
+/// restarts.
+async fn cmd_agents(args: AgentsCommand) -> anyhow::Result<()> {
+    use aura_core::AgentId;
+    use aura_fleet_spawn::{OrphanRecord, OrphanStore};
+    use std::io::Write;
+    use std::time::Duration;
+    use tabwriter::TabWriter;
+
+    fn store_for(orphan_root: &Option<PathBuf>) -> anyhow::Result<OrphanStore> {
+        let root = match orphan_root.clone() {
+            Some(p) => p,
+            None => OrphanStore::default_root().context("resolving default orphan root")?,
+        };
+        Ok(OrphanStore::new(root))
+    }
+
+    fn render_table(rows: &[OrphanRecord]) -> anyhow::Result<()> {
+        let stdout = std::io::stdout();
+        let mut tw = TabWriter::new(stdout.lock());
+        writeln!(
+            tw,
+            "agent_id\tparent\tmode\tkernel\tstate\tspawned_at\tduration"
+        )?;
+        let now = chrono::Utc::now();
+        for record in rows {
+            let parent = record
+                .parent_lineage
+                .last()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into());
+            let duration = now.signed_duration_since(record.spawned_at);
+            writeln!(
+                tw,
+                "{id}\t{parent}\t{mode:?}\t{kernel:?}\torphan\t{spawned}\t{duration}s",
+                id = record.agent_id,
+                mode = record.mode,
+                kernel = record.kernel_mode,
+                spawned = record.spawned_at.to_rfc3339(),
+                duration = duration.num_seconds()
+            )?;
+        }
+        tw.flush()?;
+        Ok(())
+    }
+
+    match args.action {
+        AgentsSubcommand::Inspect {
+            alive,
+            orphans,
+            all: _,
+            orphan_root,
+        } => {
+            let show_orphans = orphans || (!alive);
+            if show_orphans {
+                let store = store_for(&orphan_root)?;
+                let rows = store
+                    .list()
+                    .map_err(|e| anyhow::anyhow!(format!("orphan store list: {e}")))?;
+                if rows.is_empty() {
+                    println!("(no orphans under {})", store.root().display());
+                } else {
+                    render_table(&rows)?;
+                }
+            }
+            if alive && !orphans {
+                println!(
+                    "(--alive listing requires an in-process FleetRegistry; \
+                     run `aura agents inspect` against the running daemon for live data)"
+                );
+            }
+            Ok(())
+        }
+        AgentsSubcommand::Reap {
+            agent_id,
+            all_orphans,
+            orphan_root,
+        } => {
+            let store = store_for(&orphan_root)?;
+            if all_orphans {
+                let rows = store
+                    .list()
+                    .map_err(|e| anyhow::anyhow!(format!("orphan store list: {e}")))?;
+                for record in &rows {
+                    store
+                        .remove(record.agent_id)
+                        .map_err(|e| anyhow::anyhow!(format!("orphan reap: {e}")))?;
+                    println!("reaped {}", record.agent_id);
+                }
+                if rows.is_empty() {
+                    println!("(no orphans under {})", store.root().display());
+                }
+                let _grace = Duration::from_secs(0);
+                Ok(())
+            } else if let Some(id) = agent_id {
+                let parsed = AgentId::from_hex(&id)
+                    .map_err(|e| anyhow::anyhow!(format!("invalid AgentId: {e}")))?;
+                store
+                    .remove(parsed)
+                    .map_err(|e| anyhow::anyhow!(format!("orphan reap: {e}")))?;
+                println!("reaped {parsed}");
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "aura agents reap: specify AGENT_ID or --all-orphans"
+                ))
+            }
+        }
     }
 }
 

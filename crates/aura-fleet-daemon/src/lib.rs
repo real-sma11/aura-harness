@@ -47,35 +47,42 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aura_fleet_dispatch::FleetDispatcher;
 use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
-use aura_fleet_spawn::{ChildRunner, FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry};
+use aura_fleet_spawn::{
+    ChildRunner, FleetSpawner, FleetSpawnerConfig, OrphanStore, ParentLeaseRegistry,
+};
 use aura_store::Store;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use tracing::info;
 
 pub use aura_fleet_dispatch::AgentJob;
+pub use aura_fleet_mailbox::{Mailbox, MailboxConfig, MailboxError, MailboxSender};
 
 /// Wiring config consumed at daemon construction time.
 #[derive(Debug, Clone, Default)]
 pub struct DaemonConfig {
-    /// Per-spawn quota request shape. Phase 7a's pool is
-    /// tracking-only so these values are recorded but not yet
-    /// enforced.
+    /// Per-spawn config forwarded to the [`FleetSpawner`].
     pub spawner: FleetSpawnerConfig,
+    /// Mailbox capacity / backpressure config.
+    pub mailbox: MailboxConfig,
+    /// Override the orphan store root. `None` uses
+    /// [`OrphanStore::default_root`] (`~/.aura/state/orphans/`).
+    pub orphan_root: Option<PathBuf>,
 }
 
-/// Errors surfaced by [`FleetDaemon`] APIs. Phase 7a has no
-/// terminal variants; the enum exists for forward-compat.
+/// Errors surfaced by [`FleetDaemon`] APIs.
 #[derive(Debug, Error)]
 pub enum FleetDaemonError {
-    /// Reserved — placeholder so the closed enum compiles even
-    /// before Phase 7b adds real variants. Never returned.
-    #[error("fleet daemon: phase-7a no-op shell error variant (never returned)")]
-    NoOpShell,
+    /// The mailbox receiver has already been claimed by a prior
+    /// [`FleetDaemon::run`] call.
+    #[error("fleet daemon: mailbox receiver already taken")]
+    ReceiverAlreadyTaken,
 }
 
 /// Read-only bundle of [`Arc`] handles to the daemon's subsystems.
@@ -87,6 +94,8 @@ pub struct FleetDaemonHandle {
     dispatcher: Arc<FleetDispatcher>,
     quota: Arc<QuotaPool>,
     leases: Arc<ParentLeaseRegistry>,
+    orphans: Arc<OrphanStore>,
+    mailbox_sender: MailboxSender,
 }
 
 impl FleetDaemonHandle {
@@ -122,14 +131,31 @@ impl FleetDaemonHandle {
     pub fn leases(&self) -> Arc<ParentLeaseRegistry> {
         self.leases.clone()
     }
+
+    /// Shared [`OrphanStore`] handle. Used by `aura agents
+    /// inspect/reap` to list and clean up detached / abandoned
+    /// children.
+    #[must_use]
+    pub fn orphans(&self) -> Arc<OrphanStore> {
+        self.orphans.clone()
+    }
+
+    /// Mailbox sender — clone via [`MailboxSender::clone`] and
+    /// hand to producers (task tool, SDK, RPC surface).
+    #[must_use]
+    pub fn mailbox_sender(&self) -> MailboxSender {
+        self.mailbox_sender.clone()
+    }
 }
 
-/// Phase 7a composition root. Holds owned `Arc`s to the four
-/// fleet subsystems plus the shared dispatcher; surface code reads
-/// them via [`FleetDaemon::handle`].
+/// Phase 7b composition root. Holds owned `Arc`s to the fleet
+/// subsystems plus the shared dispatcher and the mailbox receiver
+/// driven by [`FleetDaemon::run`]. Surface code reads handles via
+/// [`FleetDaemon::handle`].
 pub struct FleetDaemon {
     handle: FleetDaemonHandle,
     config: DaemonConfig,
+    receiver: Mutex<Option<aura_fleet_mailbox::MailboxReceiver>>,
 }
 
 impl FleetDaemon {
@@ -147,16 +173,24 @@ impl FleetDaemon {
         let registry = Arc::new(FleetRegistry::new());
         let quota = Arc::new(QuotaPool::new());
         let leases = Arc::new(ParentLeaseRegistry::new());
+        let orphan_root = config
+            .orphan_root
+            .clone()
+            .unwrap_or_else(|| OrphanStore::default_root().unwrap_or_else(|_| PathBuf::from(".")));
+        let orphans = Arc::new(OrphanStore::new(orphan_root));
         let spawner = Arc::new(FleetSpawner::with_default_derivation(
             store,
             registry.clone(),
             quota.clone(),
             leases.clone(),
+            orphans.clone(),
             child_runner,
             config.spawner.clone(),
         ));
         let dispatcher = Arc::new(FleetDispatcher::new(spawner.clone()));
-        info!("fleet daemon: subsystems wired (Phase 7a)");
+        let mailbox = Mailbox::with_config(config.mailbox);
+        let (mailbox_sender, mailbox_receiver) = mailbox.into_parts();
+        info!("fleet daemon: subsystems wired (Phase 7b)");
         Self {
             handle: FleetDaemonHandle {
                 registry,
@@ -164,8 +198,11 @@ impl FleetDaemon {
                 dispatcher,
                 quota,
                 leases,
+                orphans,
+                mailbox_sender,
             },
             config,
+            receiver: Mutex::new(Some(mailbox_receiver)),
         }
     }
 
@@ -181,17 +218,31 @@ impl FleetDaemon {
         &self.config
     }
 
-    /// Phase 7a no-op event loop placeholder. Phase 7b replaces
-    /// this with the real daemon lifecycle (mailbox routing,
-    /// graceful shutdown, plugin reload). Calling it today is
-    /// harmless and resolves immediately.
+    /// Phase 7b: drain the mailbox until every sender is dropped.
+    /// Each [`AgentJob`] dequeued is routed through the shared
+    /// [`FleetDispatcher::spawn_one`].
+    ///
+    /// Calling `run` a second time after the first run consumed the
+    /// receiver returns [`FleetDaemonError::ReceiverAlreadyTaken`].
     ///
     /// # Errors
     ///
-    /// Never errors in Phase 7a — the [`Result`] shape is kept so
-    /// the Phase 7b promotion doesn't break callers.
-    pub fn run(&self) -> Result<(), FleetDaemonError> {
-        info!("fleet daemon: Phase 7a `run` is a no-op shell — Phase 7b owns the event loop");
+    /// See [`FleetDaemonError`].
+    pub async fn run(&self) -> Result<(), FleetDaemonError> {
+        let mut receiver = self
+            .receiver
+            .lock()
+            .await
+            .take()
+            .ok_or(FleetDaemonError::ReceiverAlreadyTaken)?;
+        let dispatcher = self.handle.dispatcher();
+        info!("fleet daemon: mailbox loop entered");
+        while let Some(job) = receiver.recv().await {
+            if let Err(err) = dispatcher.spawn_one(job).await {
+                tracing::warn!(error = %err, "fleet daemon: dispatch error");
+            }
+        }
+        info!("fleet daemon: mailbox drained — exiting");
         Ok(())
     }
 }

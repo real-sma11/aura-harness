@@ -5,24 +5,26 @@
 //! Takes a stream of [`AgentJob`] items and routes each one into the
 //! correct [`aura_fleet_spawn::FleetSpawner::spawn`] call.
 //!
-//! ## Phase 7a scope
+//! ## Phase 7b scope
 //!
-//! Phase 7a only needs to route ONE source of [`AgentJob`]s: the
-//! task-tool compatibility adapter that today builds a single spawn
-//! request per `task` tool call. Phase 7b adds the mailbox + the
-//! detached/batch dispatch surface; until then `FleetDispatcher::run`
-//! is a thin async wrapper that drains a stream of jobs and awaits
-//! each spawn sequentially.
+//! The dispatcher now consumes jobs from the
+//! [`aura_fleet_mailbox::Mailbox`] **and** still supports the
+//! direct task-tool path where one job is spawned per tool call.
+//! Each job carries its resolved [`SpawnMode`] — `Wait`, `Detached`,
+//! or `Batch` — and the dispatcher does **not** await detached or
+//! batch handles. It returns the [`SpawnHandle`] to the caller (or
+//! drops it into the registry-managed background pool) and moves
+//! on to the next job.
 //!
 //! ## Invariants (per `.cursor/rules.md` §13)
 //!
-//! - The dispatcher is **stateless** in Phase 7a — every
-//!   [`AgentJob`] is converted into a [`SpawnRequest`] and handed
-//!   to the shared [`FleetSpawner`]. Concurrency is the spawner's
-//!   responsibility (per-parent lease; cross-parent parallelism).
-//! - The dispatcher **does not enqueue or persist jobs** in Phase
-//!   7a. Phase 7b introduces the durable mailbox + a job queue
-//!   with retry semantics.
+//! - The dispatcher is **stateless** — every [`AgentJob`] is
+//!   converted into a [`SpawnRequest`] and handed to the shared
+//!   [`FleetSpawner`]. Concurrency / quota / dedupe lives in the
+//!   spawner.
+//! - The dispatcher **does not enqueue or persist jobs**. The
+//!   mailbox crate owns enqueue + backpressure; the dispatcher
+//!   only consumes.
 //!
 //! ## Failure modes
 //!
@@ -45,17 +47,15 @@ use tracing::instrument;
 
 /// A job the dispatcher routes into a spawn call.
 ///
-/// Phase 7a wraps a single [`SpawnRequest`] plus the resolved
-/// [`SpawnMode`] (which today is always [`SpawnMode::Wait`]). Phase
-/// 7b extends this with `DispatchHandle`, priority, deadline,
-/// idempotency key, etc.
+/// Wraps a single [`SpawnRequest`] plus the resolved [`SpawnMode`]
+/// — `Wait`, `Detached`, or `Batch`. Phase 7b also threads a
+/// per-job `priority` and `deadline` placeholder which today are
+/// reserved for future scheduling work.
 #[derive(Debug)]
 pub struct AgentJob {
     /// The spawn request derived from a parent tool call.
     pub request: SpawnRequest,
-    /// Resolved spawn mode. Phase 7a expects [`SpawnMode::Wait`];
-    /// any other value is rejected by [`FleetSpawner::spawn`] with
-    /// [`SpawnError::NotImplementedInPhase7a`].
+    /// Resolved spawn mode (Wait / Detached / Batch).
     pub mode: SpawnMode,
 }
 
@@ -103,6 +103,9 @@ impl FleetDispatcher {
         while let Some(job) = jobs.next().await {
             match self.spawn_one(job).await? {
                 SpawnHandle::Completed(result) => results.push(result),
+                // Detached / Batch jobs run in the background; the
+                // dispatcher's job here is just to start them.
+                SpawnHandle::Detached(_) | SpawnHandle::Batch(_) => {}
             }
         }
         Ok(results)

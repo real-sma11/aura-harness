@@ -74,6 +74,12 @@ pub struct SubagentKindSpec {
 }
 
 /// Request handed from the `task` tool to runtime dispatch.
+///
+/// Phase 7b additively extends the request with the parent's
+/// resolved `AgentMode` / `KernelMode` / `model_id` snapshot so the
+/// fleet adapter no longer synthesises placeholder values. The new
+/// fields are all `#[serde(default)]` so a Phase 7a-shaped JSON body
+/// continues to deserialise without change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentDispatchRequest {
     pub parent_agent_id: AgentId,
@@ -91,6 +97,43 @@ pub struct SubagentDispatchRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_tool_permissions: Option<AgentToolPermissions>,
     pub user_tool_defaults: UserToolDefaults,
+    /// Phase 7b: caller-stamped tool-call id used to dedupe
+    /// idempotent re-dispatches. `None` opts the spawn out of
+    /// dedupe (the legacy Phase 7a shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Phase 7b: explicit parent `AgentMode` snapshot. `None`
+    /// inherits the Phase-7a-default `Agent` value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_mode: Option<crate::AgentMode>,
+    /// Phase 7b: explicit parent `KernelMode` snapshot. `None`
+    /// inherits the Phase-7a-default `Audited` value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_kernel_mode: Option<crate::KernelMode>,
+    /// Phase 7b: explicit parent model identifier snapshot. Empty
+    /// string preserves the Phase-7a placeholder behaviour for
+    /// callers that did not yet thread the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_model_id: Option<String>,
+    /// Phase 7b: caller-specified `AgentMode` override for the
+    /// child. Must narrow the parent's effective mode. `None`
+    /// inherits the parent mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_mode: Option<crate::AgentMode>,
+    /// Phase 7b: caller-specified `Permissions` override for the
+    /// child. Must be a subset of the parent's. `None` inherits
+    /// the parent permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_permissions: Option<AgentPermissions>,
+    /// Phase 7b: caller-specified explicit `tool_subset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_tool_subset: Option<Vec<String>>,
+    /// Phase 7b: caller-specified isolation environment id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_isolation_id: Option<String>,
+    /// Phase 7b: caller-specified budget override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_budget: Option<SubagentBudget>,
 }
 
 /// Terminal state of a foreground subagent task.

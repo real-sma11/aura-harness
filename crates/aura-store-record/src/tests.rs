@@ -59,6 +59,10 @@ fn record_kind_known_variants_round_trip() {
         RecordKind::SteeringDecision,
         RecordKind::PolicyVerdict,
         RecordKind::PermissionsUpdate,
+        RecordKind::SubagentSpawn,
+        RecordKind::ChildCancelledByParentDeath,
+        RecordKind::ChildOrphanedByParentDeath,
+        RecordKind::OrphanReaped,
     ];
 
     for kind in variants {

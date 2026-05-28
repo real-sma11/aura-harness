@@ -79,6 +79,15 @@ async fn task_tool_subagent_result_json_shape_is_byte_identical() {
             },
             parent_tool_permissions: None,
             user_tool_defaults: UserToolDefaults::full_access(),
+            tool_call_id: None,
+            parent_mode: None,
+            parent_kernel_mode: None,
+            parent_model_id: None,
+            override_mode: None,
+            override_permissions: None,
+            override_tool_subset: None,
+            override_isolation_id: None,
+            override_budget: None,
         })
         .await
         .expect("dispatch");

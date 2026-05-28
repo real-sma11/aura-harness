@@ -9,8 +9,8 @@ use crate::sandbox::Sandbox;
 use crate::ToolConfig;
 use async_trait::async_trait;
 use aura_core::{
-    AgentId, AgentPermissions, AgentToolPermissions, Capability, SubagentDispatchRequest,
-    SubagentResult, ToolDefinition, ToolResult, UserToolDefaults,
+    AgentId, AgentMode, AgentPermissions, AgentToolPermissions, Capability, KernelMode,
+    SubagentDispatchRequest, SubagentResult, ToolDefinition, ToolResult, UserToolDefaults,
 };
 use aura_kernel::SpawnHook;
 use std::sync::Arc;
@@ -74,6 +74,14 @@ pub struct ToolContext {
     /// Optional runtime dispatch hook for foreground `task` subagents.
     /// `None` means the `task` tool fails closed.
     pub subagent_dispatch: Option<Arc<dyn SubagentDispatchHook>>,
+    /// Phase 7b: caller's resolved [`AgentMode`] snapshot. Threaded
+    /// to the `task` tool so child derivation can enforce mode
+    /// narrowing.
+    pub caller_mode: Option<AgentMode>,
+    /// Phase 7b: caller's resolved [`KernelMode`] snapshot.
+    pub caller_kernel_mode: Option<KernelMode>,
+    /// Phase 7b: caller's resolved model identifier snapshot.
+    pub caller_model_id: Option<String>,
 }
 
 /// Hook invoked by the `send_to_agent` / `agent_lifecycle` / `delegate_task`
@@ -152,6 +160,9 @@ impl ToolContext {
             agent_control_hook: None,
             agent_read_hook: None,
             subagent_dispatch: None,
+            caller_mode: None,
+            caller_kernel_mode: None,
+            caller_model_id: None,
         }
     }
 }

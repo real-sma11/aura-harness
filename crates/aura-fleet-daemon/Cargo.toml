@@ -14,7 +14,9 @@ aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 aura-fleet-dispatch = { path = "../aura-fleet-dispatch" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }
+aura-fleet-mailbox = { path = "../aura-fleet-mailbox" }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 tracing = { workspace = true }
 
 [lints]

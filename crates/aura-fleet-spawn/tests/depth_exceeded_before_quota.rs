@@ -26,18 +26,18 @@ use aura_fleet_spawn::{
     FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnError, SpawnRequest,
 };
 
-use crate::common::{open_test_store, parent_at, FakeChildRunner};
+use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
 
 #[tokio::test]
 async fn depth_exceeded_does_not_consume_quota_ticket() {
     let parent = parent_at(AgentMode::Agent, 1);
     let (store, _keep) = open_test_store();
+    let (orphans, _orphan_dir) = open_test_orphan_store();
     let registry = Arc::new(FleetRegistry::new());
     let quota = Arc::new(QuotaPool::new());
     let leases = Arc::new(ParentLeaseRegistry::new());
     let runner = Arc::new(FakeChildRunner::new());
 
-    // Custom derivation with max_depth = 1 so depth-2 children fail.
     let mut config = SubagentDerivationConfig::default_for_phase_6a();
     config.max_depth = 1;
     let derivation = Arc::new(DefaultDerivation::new(config));
@@ -47,6 +47,7 @@ async fn depth_exceeded_does_not_consume_quota_ticket() {
         registry.clone(),
         quota.clone(),
         leases.clone(),
+        orphans,
         derivation,
         runner.clone(),
         FleetSpawnerConfig::default(),
@@ -59,7 +60,8 @@ async fn depth_exceeded_does_not_consume_quota_ticket() {
                 overrides: SubagentOverrides::default(),
                 prompt: "too deep".to_string(),
                 originating_user_id: Some("user".to_string()),
-                task_compat: None,
+                tool_call_id: None,
+                cancellation: None,
             },
             SpawnMode::Wait,
         )

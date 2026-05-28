@@ -24,6 +24,7 @@ pub(crate) mod serde_helpers;
 pub(crate) mod time;
 pub(crate) mod types;
 
+pub use aura_core_modes::{AgentMode, KernelMode};
 pub use aura_core_permissions::{AgentPermissions, AgentScope, Capability};
 pub use error::{AuraError, Result};
 #[allow(deprecated)]

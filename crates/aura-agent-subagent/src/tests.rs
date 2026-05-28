@@ -88,35 +88,12 @@ fn derivation_error_permissions_widen() {
 #[test]
 fn derivation_error_mode_widens() {
     let derivation = DefaultDerivation::default();
-    // Make a Plan-mode parent that artificially allows spawn so the
-    // narrowing check runs. We achieve this by constructing a Plan
-    // parent and checking that Agent override would have been
-    // rejected for widening — but Plan!allows_spawn so we get
-    // SpawnNotAllowed first. To exercise ModeWidens specifically,
-    // we exploit the fact that ModeWidens fires AFTER allows_spawn,
-    // so we have to bypass spawn-not-allowed.
-    //
-    // The minimal repro: Agent-mode parent (allows spawn), child
-    // requests Agent mode again — this is allowed, NOT a widen.
-    // We need a parent that allows_spawn yet whose narrowing table
-    // would reject an override. Today only Agent allows_spawn AND
-    // Agent → any is permitted, so ModeWidens is structurally
-    // unreachable through the public API today. The variant exists
-    // for forward-compatibility once Plan/Debug gain limited
-    // spawn-with-narrowing semantics. Test it via the internal
-    // narrowing helper instead.
-    //
-    // Until then assert the variant constructs and Display-renders
-    // correctly so the closed taxonomy is exercised end-to-end.
-    let err = DerivationError::ModeWidens {
-        parent: AgentMode::Plan,
-        requested: AgentMode::Agent,
-    };
-    let rendered = format!("{err}");
-    assert!(rendered.contains("widens parent"), "{rendered}");
-    // And cover the rejection path through the public API by using
-    // a SpawnNotAllowed parent (which fires first) — the negative
-    // assertion below documents the current behaviour.
+    // Phase 7b moved the mode-widen check ahead of the
+    // spawn-allowed gate so that a malformed widening override gets
+    // a precise `ModeWidens` rejection rather than the broader
+    // `SpawnNotAllowed` mask when the parent's own mode also fails
+    // the spawn-allowed gate. A Plan parent requesting an Agent
+    // child must therefore surface `ModeWidens`.
     let p = parent(AgentMode::Plan, KernelMode::Audited);
     let err = derivation
         .derive(
@@ -126,8 +103,16 @@ fn derivation_error_mode_widens() {
                 ..SubagentOverrides::default()
             },
         )
-        .expect_err("plan parent cannot spawn");
-    assert!(matches!(err, DerivationError::SpawnNotAllowed(_)));
+        .expect_err("plan parent rejects agent override (widens)");
+    let rendered = format!("{err}");
+    assert!(rendered.contains("widens parent"), "{rendered}");
+    match err {
+        DerivationError::ModeWidens { parent, requested } => {
+            assert_eq!(parent, AgentMode::Plan);
+            assert_eq!(requested, AgentMode::Agent);
+        }
+        other => panic!("expected ModeWidens, got {other:?}"),
+    }
 }
 
 #[test]

@@ -13,16 +13,20 @@ aura-core-permissions = { path = "../aura-core-permissions" }
 aura-agent-subagent = { path = "../aura-agent-subagent" }
 aura-agent-kernel = { path = "../aura-agent-kernel" }
 aura-store = { path = "../aura-store" }
+aura-store-record = { path = "../aura-store-record" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+dirs = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

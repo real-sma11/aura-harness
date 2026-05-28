@@ -20,11 +20,12 @@ use aura_fleet_spawn::{
     FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnError, SpawnRequest,
 };
 
-use crate::common::{open_test_store, parent_at, FakeChildRunner};
+use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
 
 async fn assert_mode_rejected(mode: AgentMode) {
     let parent = parent_at(mode, 0);
     let (store, _keep) = open_test_store();
+    let (orphans, _orphan_dir) = open_test_orphan_store();
     let registry = Arc::new(FleetRegistry::new());
     let quota = Arc::new(QuotaPool::new());
     let leases = Arc::new(ParentLeaseRegistry::new());
@@ -34,6 +35,7 @@ async fn assert_mode_rejected(mode: AgentMode) {
         registry.clone(),
         quota.clone(),
         leases.clone(),
+        orphans,
         runner.clone(),
         FleetSpawnerConfig::default(),
     );
@@ -45,7 +47,8 @@ async fn assert_mode_rejected(mode: AgentMode) {
                 overrides: SubagentOverrides::default(),
                 prompt: "do thing".to_string(),
                 originating_user_id: Some("user-root".to_string()),
-                task_compat: None,
+                tool_call_id: None,
+                cancellation: None,
             },
             SpawnMode::Wait,
         )

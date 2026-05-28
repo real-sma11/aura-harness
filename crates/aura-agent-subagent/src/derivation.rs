@@ -98,17 +98,13 @@ impl SubagentDerivation for DefaultDerivation {
             });
         }
 
-        // 2. Spawn-allowed mode gate. Per the mode table only
-        //    AgentMode::Agent currently permits spawning; the rule
-        //    lives in `aura_core_modes::AgentMode::allows_spawn` so
-        //    the table is the single source of truth.
-        if !parent.mode.allows_spawn() {
-            return Err(DerivationError::SpawnNotAllowed(parent.mode));
-        }
-
         let mut manifest = OverrideManifest::default();
 
-        // 3. Mode override (narrowing-only).
+        // 2. Mode override (narrowing-only). Checked BEFORE
+        //    `allows_spawn` so a malformed widening request gets a
+        //    precise `ModeWidens` rejection rather than the broader
+        //    `SpawnNotAllowed` mask when the parent's own mode also
+        //    fails the spawn-allowed gate.
         let mode = if let Some(requested) = overrides.mode {
             if !narrowing_allowed(parent.mode, requested) {
                 return Err(DerivationError::ModeWidens {
@@ -126,6 +122,14 @@ impl SubagentDerivation for DefaultDerivation {
         } else {
             parent.mode
         };
+
+        // 3. Spawn-allowed mode gate. Per the mode table only
+        //    `AgentMode::Agent` currently permits spawning; the rule
+        //    lives in `aura_core_modes::AgentMode::allows_spawn` so
+        //    the table is the single source of truth.
+        if !parent.mode.allows_spawn() {
+            return Err(DerivationError::SpawnNotAllowed(parent.mode));
+        }
 
         // 4. Permissions override (intersection-only — any
         //    capability present in the request but not in the parent
@@ -229,6 +233,28 @@ impl SubagentDerivation for DefaultDerivation {
                 .applied
                 .push(OverriddenField::IsolationId(iso.clone()));
         }
+        if let Some(ty) = &overrides.subagent_type {
+            manifest
+                .applied
+                .push(OverriddenField::SubagentType(ty.clone()));
+        }
+        if let Some(addendum) = &overrides.system_prompt_addendum {
+            manifest
+                .applied
+                .push(OverriddenField::SystemPromptAddendum {
+                    chars: addendum.chars().count(),
+                });
+        }
+        if let Some(perms) = &overrides.parent_tool_permissions {
+            manifest
+                .applied
+                .push(OverriddenField::ParentToolPermissions {
+                    entries: perms.per_tool.len(),
+                });
+        }
+        if overrides.user_tool_defaults.is_some() {
+            manifest.applied.push(OverriddenField::UserToolDefaults);
+        }
 
         // 8. Compose the resolved ModeProfile from the parent's
         //    profile, swapping in the (possibly overridden) kernel
@@ -270,6 +296,10 @@ impl SubagentDerivation for DefaultDerivation {
                 parent_agent_id: parent.agent_id,
             },
             overridden_fields: manifest.clone(),
+            subagent_type: overrides.subagent_type,
+            system_prompt_addendum: overrides.system_prompt_addendum,
+            parent_tool_permissions: overrides.parent_tool_permissions,
+            user_tool_defaults: overrides.user_tool_defaults,
         };
 
         Ok((spec, manifest))

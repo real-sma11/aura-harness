@@ -21,13 +21,14 @@ use aura_fleet_spawn::{
     SubagentSpawnRecordPayload, RECORD_KIND_SUBAGENT_SPAWN,
 };
 
-use crate::common::{open_test_store, parent_at, FakeChildRunner};
+use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
 
 #[tokio::test]
 async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
     let parent = parent_at(AgentMode::Agent, 0);
     let parent_id = parent.agent_id;
     let (store, _keep) = open_test_store();
+    let (orphans, _orphan_dir) = open_test_orphan_store();
     let registry = Arc::new(FleetRegistry::new());
     let quota = Arc::new(QuotaPool::new());
     let leases = Arc::new(ParentLeaseRegistry::new());
@@ -37,6 +38,7 @@ async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
         registry.clone(),
         quota.clone(),
         leases.clone(),
+        orphans,
         runner.clone(),
         FleetSpawnerConfig::default(),
     ));
@@ -50,7 +52,8 @@ async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
                 overrides: SubagentOverrides::default(),
                 prompt: "first".to_string(),
                 originating_user_id: Some("user".to_string()),
-                task_compat: None,
+                tool_call_id: None,
+                cancellation: None,
             },
             SpawnMode::Wait,
         )
@@ -65,7 +68,8 @@ async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
                 overrides: SubagentOverrides::default(),
                 prompt: "second".to_string(),
                 originating_user_id: Some("user".to_string()),
-                task_compat: None,
+                tool_call_id: None,
+                cancellation: None,
             },
             SpawnMode::Wait,
         )
@@ -76,7 +80,9 @@ async fn two_concurrent_spawns_from_same_parent_produce_monotone_seqs() {
     handle_b.await.unwrap().expect("second spawn ok");
 
     assert_eq!(runner.invocation_count(), 2);
-    assert_eq!(quota.outstanding(), 2);
+    // Phase 7b: RAII BudgetTickets are dropped after the Wait child
+    // completes, so post-spawn outstanding counters return to zero.
+    assert_eq!(quota.outstanding(), 0, "tickets must release on drop");
 
     let entries = store
         .scan_record(parent_id, 1, 20)

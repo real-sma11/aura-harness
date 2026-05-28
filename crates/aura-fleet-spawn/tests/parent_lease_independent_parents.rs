@@ -19,7 +19,7 @@ use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
 use aura_fleet_spawn::{FleetSpawner, FleetSpawnerConfig, ParentLeaseRegistry, SpawnRequest};
 
-use crate::common::{open_test_store, parent_at, FakeChildRunner};
+use crate::common::{open_test_orphan_store, open_test_store, parent_at, FakeChildRunner};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_distinct_parents_spawn_in_parallel() {
@@ -28,6 +28,7 @@ async fn two_distinct_parents_spawn_in_parallel() {
     assert_ne!(parent_a.agent_id, parent_b.agent_id);
 
     let (store, _keep) = open_test_store();
+    let (orphans, _orphan_dir) = open_test_orphan_store();
     let registry = Arc::new(FleetRegistry::new());
     let quota = Arc::new(QuotaPool::new());
     let leases = Arc::new(ParentLeaseRegistry::new());
@@ -37,6 +38,7 @@ async fn two_distinct_parents_spawn_in_parallel() {
         registry.clone(),
         quota.clone(),
         leases.clone(),
+        orphans,
         runner.clone(),
         FleetSpawnerConfig::default(),
     ));
@@ -54,7 +56,8 @@ async fn two_distinct_parents_spawn_in_parallel() {
                     overrides: SubagentOverrides::default(),
                     prompt: "a".to_string(),
                     originating_user_id: None,
-                    task_compat: None,
+                    tool_call_id: None,
+                    cancellation: None,
                 },
                 SpawnMode::Wait,
             )
@@ -68,7 +71,8 @@ async fn two_distinct_parents_spawn_in_parallel() {
                     overrides: SubagentOverrides::default(),
                     prompt: "b".to_string(),
                     originating_user_id: None,
-                    task_compat: None,
+                    tool_call_id: None,
+                    cancellation: None,
                 },
                 SpawnMode::Wait,
             )

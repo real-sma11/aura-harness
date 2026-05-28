@@ -1,6 +1,6 @@
 //! Derived [`SubagentSpec`] + supporting attribution / lineage types.
 
-use aura_core::AgentId;
+use aura_core::{AgentId, AgentToolPermissions, UserToolDefaults};
 use aura_core_modes::{AgentMode, JoinPolicy, KernelMode, ModeProfile, ReplayMode, SpawnMode};
 use aura_core_permissions::Permissions;
 
@@ -78,4 +78,17 @@ pub struct SubagentSpec {
     pub audit_attribution: AuditAttribution,
     /// Manifest of fields the caller explicitly overrode.
     pub overridden_fields: OverrideManifest,
+    /// Phase 7b: bundled subagent kind id (e.g. `"explore"`); the
+    /// runtime uses this to look up the kind registry entry for
+    /// system-prompt / tool / capability defaults.
+    pub subagent_type: Option<String>,
+    /// Phase 7b: free-form addendum appended to the kind's system
+    /// prompt.
+    pub system_prompt_addendum: Option<String>,
+    /// Phase 7b: parent's per-tool override map forwarded to the
+    /// child for legacy resolver use.
+    pub parent_tool_permissions: Option<AgentToolPermissions>,
+    /// Phase 7b: user-level default tool policy applied to the
+    /// child. `None` defers to the runtime's default.
+    pub user_tool_defaults: Option<UserToolDefaults>,
 }

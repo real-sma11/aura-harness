@@ -6,21 +6,59 @@
 use crate::error::ToolError;
 use crate::tool::{Tool, ToolContext};
 use async_trait::async_trait;
-use aura_core::{Capability, SubagentDispatchRequest, SubagentResult, ToolDefinition, ToolResult};
+use aura_core::{
+    AgentMode, AgentPermissions, Capability, SubagentBudget, SubagentDispatchRequest,
+    SubagentResult, ToolDefinition, ToolResult,
+};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 pub const TASK_TOOL_NAME: &str = "task";
 const MAX_SUBAGENT_DEPTH: usize = 3;
 
+/// Argument shape for the `task` tool.
+///
+/// Phase 7b additively extends the original `(subagent_type,
+/// prompt)` pair with the full override surface — `mode`,
+/// `permissions`, `model`, `budget`, `isolation`, `tool_subset` —
+/// plus the dedupe key `tool_call_id`. Every override is optional;
+/// callers that don't specify any field continue to produce a
+/// byte-identical Phase 7a [`SubagentResult`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInput {
+    /// Bundled subagent type identifier.
     pub subagent_type: String,
+    /// Prompt forwarded to the child agent loop.
     pub prompt: String,
+    /// Optional runtime-approved model override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
+    /// Optional system-prompt addendum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_addendum: Option<String>,
+    /// Optional `AgentMode` override (must narrow parent mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AgentMode>,
+    /// Optional capability override (must be a subset of parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<AgentPermissions>,
+    /// Alias for `model_override` — accepted because the plan
+    /// names the field `model` on the public schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional budget override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SubagentBudget>,
+    /// Optional isolation environment identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    /// Optional explicit tool-subset (must be a subset of parent's
+    /// effective tool set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_subset: Option<Vec<String>>,
+    /// Optional caller-stamped dedupe key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 pub struct TaskTool;
@@ -50,6 +88,35 @@ impl TaskTool {
                     "system_prompt_addendum": {
                         "type": "string",
                         "description": "Optional additional instructions appended by runtime policy."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Optional AgentMode override (Agent | Plan | Ask | Debug). Must narrow parent mode."
+                    },
+                    "permissions": {
+                        "type": "object",
+                        "description": "Optional AgentPermissions override. Must be a subset of parent."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional runtime-approved model identifier; equivalent to model_override."
+                    },
+                    "budget": {
+                        "type": "object",
+                        "description": "Optional SubagentBudget override (max_iterations, max_tokens, timeout_ms)."
+                    },
+                    "isolation": {
+                        "type": "string",
+                        "description": "Optional isolation environment identifier."
+                    },
+                    "tool_subset": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional explicit tool subset; must be a subset of parent's effective tools."
+                    },
+                    "tool_call_id": {
+                        "type": "string",
+                        "description": "Optional caller-stamped dedupe key. Idempotent re-dispatch returns the same SubagentResult."
                     }
                 },
                 "required": ["subagent_type", "prompt"]
@@ -105,17 +172,28 @@ impl TaskTool {
         parent_chain.push(parent_agent_id);
         parent_chain.extend(ctx.parent_chain.iter().copied());
 
+        let model_override = input.model_override.clone().or_else(|| input.model.clone());
+
         Ok(SubagentDispatchRequest {
             parent_agent_id,
             subagent_type: input.subagent_type.clone(),
             prompt: input.prompt.clone(),
             originating_user_id: ctx.originating_user_id.clone(),
             parent_chain,
-            model_override: input.model_override.clone(),
+            model_override,
             system_prompt_addendum: input.system_prompt_addendum.clone(),
             parent_permissions: caller_permissions,
             parent_tool_permissions: ctx.caller_tool_permissions.clone(),
             user_tool_defaults: ctx.user_tool_defaults.clone(),
+            tool_call_id: input.tool_call_id.clone(),
+            parent_mode: ctx.caller_mode,
+            parent_kernel_mode: ctx.caller_kernel_mode,
+            parent_model_id: ctx.caller_model_id.clone(),
+            override_mode: input.mode,
+            override_permissions: input.permissions.clone(),
+            override_tool_subset: input.tool_subset.clone(),
+            override_isolation_id: input.isolation.clone(),
+            override_budget: input.budget.clone(),
         })
     }
 }
@@ -195,18 +273,29 @@ mod tests {
         ctx
     }
 
+    fn minimal_input() -> TaskInput {
+        TaskInput {
+            subagent_type: "explore".into(),
+            prompt: "inspect".into(),
+            model_override: None,
+            system_prompt_addendum: None,
+            mode: None,
+            permissions: None,
+            model: None,
+            budget: None,
+            isolation: None,
+            tool_subset: None,
+            tool_call_id: None,
+        }
+    }
+
     #[test]
     fn task_requires_spawn_capability() {
         let caller = AgentPermissions {
             scope: AgentScope::default(),
             capabilities: vec![Capability::ReadAgent],
         };
-        let input = TaskInput {
-            subagent_type: "explore".into(),
-            prompt: "inspect".into(),
-            model_override: None,
-            system_prompt_addendum: None,
-        };
+        let input = minimal_input();
         let err = TaskTool::build_request(&ctx(caller), &input).unwrap_err();
         assert!(err.to_string().contains("SpawnAgent"), "got: {err}");
     }
@@ -222,12 +311,7 @@ mod tests {
             AgentId::generate(),
             AgentId::generate(),
         ];
-        let input = TaskInput {
-            subagent_type: "explore".into(),
-            prompt: "inspect".into(),
-            model_override: None,
-            system_prompt_addendum: None,
-        };
+        let input = minimal_input();
         let err = TaskTool::build_request(&ctx, &input).unwrap_err();
         assert!(
             err.to_string().contains("maximum subagent depth"),

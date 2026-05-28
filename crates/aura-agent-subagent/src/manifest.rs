@@ -63,6 +63,23 @@ pub enum OverriddenField {
     },
     /// Isolation environment id was set explicitly.
     IsolationId(String),
+    /// Phase 7b: bundled subagent type was selected explicitly.
+    SubagentType(String),
+    /// Phase 7b: system prompt addendum was supplied.
+    SystemPromptAddendum {
+        /// Character length of the addendum (the addendum body
+        /// itself is recorded inside `SubagentSpec`, not duplicated
+        /// here).
+        chars: usize,
+    },
+    /// Phase 7b: parent's per-tool override map was forwarded
+    /// explicitly with this count of per-tool entries.
+    ParentToolPermissions {
+        /// Number of per-tool entries in the parent override map.
+        entries: usize,
+    },
+    /// Phase 7b: explicit user-tool defaults override.
+    UserToolDefaults,
 }
 
 /// Manifest of fields a caller explicitly overrode during

@@ -21,6 +21,9 @@ aura-auth = { path = "crates/aura-auth" }
 aura-runtime = { path = "crates/aura-runtime" }
 aura-config = { path = "crates/aura-config" }
 aura-plugin-core = { path = "crates/aura-plugin-core" }
+aura-fleet-spawn = { path = "crates/aura-fleet-spawn" }
+aura-fleet-registry = { path = "crates/aura-fleet-registry" }
+aura-fleet-daemon = { path = "crates/aura-fleet-daemon" }
 anyhow = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
@@ -39,6 +42,7 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
+tabwriter = "1.4"
 
 [workspace]
 resolver = "2"
@@ -105,16 +109,18 @@ members = [
     "crates/aura-plugin-hooks",
     "crates/aura-plugin-mcp",
     "crates/aura-plugin-connectors",
-    # Phase 7a fleet layer:
+    # Phase 7a fleet layer + Phase 7b additions:
     #   aura-fleet-registry — RwLock<HashMap<AgentId, AgentSlot>>
-    #   aura-fleet-quota    — QuotaPool + BudgetTicket (tracking-only in 7a)
-    #   aura-fleet-spawn    — FleetSpawner + ParentLeaseRegistry
-    #   aura-fleet-dispatch — FleetDispatcher (task-tool source only in 7a)
-    #   aura-fleet-daemon   — composition root wiring all four
+    #   aura-fleet-quota    — QuotaPool + BudgetTicket (Phase 7b enforces)
+    #   aura-fleet-spawn    — FleetSpawner + ParentLeaseRegistry + orphans
+    #   aura-fleet-dispatch — FleetDispatcher (mailbox-fed in 7b)
+    #   aura-fleet-mailbox  — bounded mpsc mailbox over AgentJob (Phase 7b)
+    #   aura-fleet-daemon   — composition root wiring all five
     "crates/aura-fleet-registry",
     "crates/aura-fleet-quota",
     "crates/aura-fleet-spawn",
     "crates/aura-fleet-dispatch",
+    "crates/aura-fleet-mailbox",
     "crates/aura-fleet-daemon",
 ]
 

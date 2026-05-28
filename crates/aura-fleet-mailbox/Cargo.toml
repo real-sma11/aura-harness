@@ -1,0 +1,24 @@
+[package]
+name = "aura-fleet-mailbox"
+description = "Fleet-layer mailbox — bounded mpsc channel for AgentJobs (Phase 7b)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-fleet-dispatch = { path = "../aura-fleet-dispatch" }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+aura-agent-subagent = { path = "../aura-agent-subagent" }
+aura-core = { path = "../aura-core" }
+aura-core-modes = { path = "../aura-core-modes" }
+aura-core-permissions = { path = "../aura-core-permissions" }
+aura-fleet-spawn = { path = "../aura-fleet-spawn" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true

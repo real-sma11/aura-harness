@@ -15,7 +15,7 @@ use aura_agent_subagent::{ParentContext, SubagentLineage, SubagentSpec};
 use aura_core::{AgentId, SubagentExit, SubagentResult};
 use aura_core_modes::{AgentMode, KernelMode, ModeProfile, ReplayMode, SandboxMode};
 use aura_core_permissions::{Capability, Permissions};
-use aura_fleet_spawn::{ChildRunContext, ChildRunError, ChildRunner};
+use aura_fleet_spawn::{ChildRunContext, ChildRunError, ChildRunner, OrphanStore};
 use aura_store::{RocksStore, Store};
 use parking_lot::Mutex;
 
@@ -54,6 +54,15 @@ pub fn open_test_store() -> (Arc<dyn Store>, tempfile::TempDir) {
     (Arc::new(store), dir)
 }
 
+/// Construct an [`OrphanStore`] rooted in a tempdir. Returns the
+/// store plus the tempdir keep-alive (drop the tempdir to remove
+/// every orphan file written through the store).
+pub fn open_test_orphan_store() -> (Arc<OrphanStore>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = OrphanStore::new(dir.path().to_path_buf());
+    (Arc::new(store), dir)
+}
+
 /// A [`ChildRunner`] that records every invocation and either
 /// returns a fixed [`SubagentResult`] or sleeps for a fixed
 /// duration before doing so.
@@ -89,12 +98,25 @@ impl FakeChildRunner {
 #[async_trait]
 impl ChildRunner for FakeChildRunner {
     async fn run(&self, ctx: ChildRunContext) -> Result<SubagentResult, ChildRunError> {
+        let preassigned = ctx.preassigned_agent_id;
         self.calls.lock().push((ctx.spec.clone(), ctx.prompt));
         if let Some(d) = self.delay {
-            tokio::time::sleep(d).await;
+            tokio::select! {
+                _ = tokio::time::sleep(d) => {}
+                _ = ctx.cancellation.cancelled() => {
+                    return Ok(SubagentResult {
+                        child_agent_id: Some(preassigned),
+                        final_message: String::new(),
+                        total_input_tokens: 0,
+                        total_output_tokens: 0,
+                        files_changed: Vec::new(),
+                        exit: SubagentExit::Cancelled,
+                    });
+                }
+            }
         }
         Ok(SubagentResult {
-            child_agent_id: Some(AgentId::generate()),
+            child_agent_id: Some(preassigned),
             final_message: "child done".to_string(),
             total_input_tokens: 0,
             total_output_tokens: 0,

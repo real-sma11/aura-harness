@@ -158,6 +158,7 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-fleet-quota", "fleet"),
     ("aura-fleet-spawn", "fleet"),
     ("aura-fleet-dispatch", "fleet"),
+    ("aura-fleet-mailbox", "fleet"),
     ("aura-fleet-daemon", "fleet"),
 ];
 

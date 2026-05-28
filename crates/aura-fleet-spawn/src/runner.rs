@@ -12,10 +12,9 @@
 
 use async_trait::async_trait;
 use aura_agent_subagent::SubagentSpec;
-use aura_core::{
-    AgentId, AgentPermissions, AgentToolPermissions, SubagentResult, UserToolDefaults,
-};
+use aura_core::{AgentId, SubagentResult};
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// Errors a [`ChildRunner`] may surface.
 #[derive(Debug, Error)]
@@ -27,59 +26,42 @@ pub enum ChildRunError {
     Internal(String),
 }
 
-/// Phase 7a-only carrier for the per-call SubagentDispatch fields
-/// the legacy runtime path needs but the layered
-/// [`SubagentSpec`] does not yet model.
-///
-/// **Scope**: this struct is a compatibility shim that keeps the
-/// task-tool [`SubagentResult`] byte-identical across the Phase 7a
-/// refactor. Phase 7b extends
-/// [`aura_agent_subagent::SubagentOverrides`] to absorb
-/// `subagent_type`, `system_prompt_addendum`, the explicit
-/// `parent_tool_permissions`, and `user_tool_defaults` as first-
-/// class override fields; once that lands this carrier is removed.
-#[derive(Debug, Clone)]
-pub struct TaskCompatContext {
-    /// Bundled subagent-kind identifier (e.g. `"explore"`,
-    /// `"general_purpose"`); the runner uses this to look up the
-    /// kind's allowed-capabilities / tools / system prompt.
-    pub subagent_type: String,
-    /// Free-form addendum appended to the kind's system prompt.
-    pub system_prompt_addendum: Option<String>,
-    /// Untouched parent permissions; the runner intersects these
-    /// with the kind's `allowed_capabilities` to produce the child
-    /// `Permissions`. `SubagentSpec::permissions` does NOT yet do
-    /// the kind-driven narrowing.
-    pub parent_permissions: AgentPermissions,
-    /// Parent's per-tool override map (used by the legacy
-    /// per-tool policy resolver).
-    pub parent_tool_permissions: Option<AgentToolPermissions>,
-    /// User-level default tool policy applied to children.
-    pub user_tool_defaults: UserToolDefaults,
-    /// Optional model override the parent specified explicitly.
-    pub model_override: Option<String>,
-    /// Parent agent id, propagated so the runner can register the
-    /// child's identity in the scheduler.
-    pub parent_agent_id: AgentId,
-    /// Parent's `parent_chain` snapshot. Used to forward audit
-    /// attribution into the child's identity record.
-    pub parent_chain: Vec<AgentId>,
-}
-
 /// Bundle of data the [`ChildRunner`] receives per call. Wrapping
-/// the args in a struct keeps the trait signature stable as Phase
-/// 7b grows the carrier surface (and lets the runtime adapter ship
-/// the optional [`TaskCompatContext`] without rewriting the trait).
+/// the args in a struct keeps the trait signature stable as the
+/// override surface grows.
+///
+/// Phase 7b retires the Phase 7a `TaskCompatContext` shim: every
+/// field the legacy task path needed (`subagent_type`,
+/// `system_prompt_addendum`, `parent_tool_permissions`,
+/// `user_tool_defaults`, parent lineage / model snapshot) is now
+/// modelled directly on [`SubagentSpec`] / [`ChildRunContext`].
 #[derive(Debug)]
 pub struct ChildRunContext {
-    /// Derived spec from `aura-agent-subagent`.
+    /// Derived spec from `aura-agent-subagent`. Carries the full
+    /// resolved + narrowed surface the runner needs to bring up a
+    /// child loop.
     pub spec: SubagentSpec,
     /// Initial prompt for the child.
     pub prompt: String,
     /// Originating user id for audit attribution.
     pub originating_user_id: Option<String>,
-    /// Phase 7a compatibility carrier. Phase 7b retires.
-    pub task_compat: Option<TaskCompatContext>,
+    /// Parent agent id forwarded so the runner can register the
+    /// child identity in the scheduler.
+    pub parent_agent_id: AgentId,
+    /// Parent's `parent_chain` snapshot — propagated so the child
+    /// inherits the audit attribution chain.
+    pub parent_chain: Vec<AgentId>,
+    /// Cancellation token the runner MUST poll between safe yield
+    /// points. When the token fires the runner is expected to
+    /// short-circuit with a [`SubagentResult`] whose
+    /// [`aura_core::SubagentExit::Cancelled`] tag is set.
+    pub cancellation: CancellationToken,
+    /// Pre-assigned child agent id. The spawner allocates the id
+    /// up-front so the spawn audit record and the
+    /// [`crate::SpawnHandle::Detached`] handle carry the same value;
+    /// runners that previously called into `KernelSpawnHook` MUST
+    /// thread this id back into `ChildAgentSpec::preassigned_agent_id`.
+    pub preassigned_agent_id: AgentId,
 }
 
 /// Run a derived [`SubagentSpec`] to completion and return a
@@ -88,11 +70,12 @@ pub struct ChildRunContext {
 /// Implementations are expected to:
 ///
 /// - Look up the bundled subagent kind (or other registry) the
-///   spec references via `ctx.spec.kind`.
+///   spec references via `ctx.spec.kind` / `ctx.spec.subagent_type`.
 /// - Register the child's identity with the scheduler.
 /// - Enqueue the child's initial prompt as a transaction.
 /// - Run the child agent loop to completion (with the spec's
-///   timeout).
+///   timeout), polling [`ChildRunContext::cancellation`] at every
+///   safe yield point.
 /// - Translate the agent-loop result into a [`SubagentResult`] with
 ///   the exact same field semantics as today's
 ///   `RuntimeSubagentDispatch::dispatch` so the task tool's

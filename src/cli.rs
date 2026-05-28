@@ -40,6 +40,53 @@ pub enum Commands {
     /// agent-loop wiring lands until Phase 4c (hooks/MCP/connectors)
     /// and Phase 8 (full integration).
     Plugins(PluginsCommand),
+    /// Inspect / manage live + orphaned subagents (Phase 7b).
+    ///
+    /// Subcommands `inspect` and `reap` read the on-disk orphan
+    /// store at `~/.aura/state/orphans/` and (when the daemon is
+    /// running in-process) the [`aura_fleet_registry::FleetRegistry`].
+    Agents(AgentsCommand),
+}
+
+/// `aura agents` parent command (Phase 7b).
+#[derive(Args, Debug)]
+pub struct AgentsCommand {
+    /// Agents subcommand to run.
+    #[command(subcommand)]
+    pub action: AgentsSubcommand,
+}
+
+/// Subcommands under `aura agents` (Phase 7b).
+#[derive(Subcommand, Debug)]
+pub enum AgentsSubcommand {
+    /// List live + orphaned subagents in tabular form.
+    Inspect {
+        /// Restrict listing to live (registry-tracked) agents only.
+        #[arg(long, conflicts_with_all = ["orphans", "all"])]
+        alive: bool,
+        /// Restrict listing to orphaned agents only.
+        #[arg(long, conflicts_with_all = ["alive", "all"])]
+        orphans: bool,
+        /// List both (default).
+        #[arg(long)]
+        all: bool,
+        /// Override the orphan-store root directory.
+        #[arg(long)]
+        orphan_root: Option<PathBuf>,
+    },
+    /// Reap a specific orphan or every orphan.
+    Reap {
+        /// Hex-encoded child agent id to reap. Mutually exclusive
+        /// with `--all-orphans`.
+        #[arg(value_name = "AGENT_ID")]
+        agent_id: Option<String>,
+        /// Reap every orphan currently under the orphan-store root.
+        #[arg(long, conflicts_with = "agent_id")]
+        all_orphans: bool,
+        /// Override the orphan-store root directory.
+        #[arg(long)]
+        orphan_root: Option<PathBuf>,
+    },
 }
 
 /// Arguments for the `migrate` subcommand (Phase 4a stub).

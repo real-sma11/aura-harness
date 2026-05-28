@@ -1,5 +1,6 @@
 //! Caller-supplied overrides + per-child budget.
 
+use aura_core::{AgentToolPermissions, UserToolDefaults};
 use aura_core_modes::{AgentMode, JoinPolicy, KernelMode, ReplayMode, SpawnMode};
 use aura_core_permissions::Permissions;
 
@@ -59,4 +60,22 @@ pub struct SubagentOverrides {
     pub tool_subset: Option<Vec<String>>,
     /// Pin the child to a specific isolation environment id.
     pub isolation_id: Option<String>,
+    /// Phase 7b: bundled subagent kind id (`"explore"`,
+    /// `"general_purpose"`, ...). Distinct from [`Self::kind`]
+    /// (which is a free-form role tag); `subagent_type` keys the
+    /// kind registry the runtime uses to look up the system prompt,
+    /// capability allowlist, and default model. When the dispatcher
+    /// supplies an explicit `subagent_type` it also takes precedence
+    /// over [`Self::kind`] for stamping the
+    /// `OverrideManifest::SubagentType` entry.
+    pub subagent_type: Option<String>,
+    /// Phase 7b: free-form addendum appended to the kind's
+    /// system prompt before the child runs.
+    pub system_prompt_addendum: Option<String>,
+    /// Phase 7b: parent's per-tool override map (used by the
+    /// legacy per-tool policy resolver in the child runner).
+    pub parent_tool_permissions: Option<AgentToolPermissions>,
+    /// Phase 7b: user-level default tool policy applied to the
+    /// child. `None` inherits the runtime's full-access defaults.
+    pub user_tool_defaults: Option<UserToolDefaults>,
 }

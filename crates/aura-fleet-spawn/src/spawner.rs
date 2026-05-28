@@ -1,7 +1,7 @@
-//! [`FleetSpawner`] — Phase 7a's single subagent spawn entrypoint.
+//! [`FleetSpawner`] — Phase 7b subagent spawn composition root.
 //!
-//! See the crate-level docs for the full invariant + ordering
-//! contract. This module wires the pieces together.
+//! See the crate-level docs for the per-spawn ordering contract and
+//! the SpawnMode taxonomy.
 
 use std::sync::Arc;
 
@@ -10,48 +10,48 @@ use aura_agent_subagent::{
     DefaultDerivation, DerivationError, OverrideManifest, ParentContext, SubagentDerivation,
     SubagentOverrides,
 };
-use aura_core::{AgentId, SubagentResult, Transaction, TransactionType};
+use aura_core::{AgentId, SubagentExit, SubagentResult, Transaction, TransactionType};
 use aura_core_modes::{ModeViolation, SpawnMode};
-use aura_fleet_quota::{QuotaError, QuotaPool, QuotaRequest};
+use aura_fleet_quota::{BudgetTicket, QuotaError, QuotaPool, QuotaRequest};
 use aura_fleet_registry::{AgentSlot, FleetRegistry, RegistryError};
 use aura_store::Store;
 use bytes::Bytes;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::lease::ParentLeaseRegistry;
-use crate::runner::{ChildRunContext, ChildRunError, ChildRunner, TaskCompatContext};
+use crate::handle::{BatchInner, BatchSpawn, DetachedSpawn, SpawnHandle};
+use crate::lease::{DedupedSpawn, ParentLeaseRegistry};
+use crate::orphan::{OrphanRecord, OrphanStore};
+use crate::runner::{ChildRunContext, ChildRunError, ChildRunner};
 
 /// Stable kind tag stamped on the JSON envelope written for every
-/// successful spawn. Mirrors the Phase 7+ `RecordKind::SubagentSpawn`
-/// taxonomy from `aura-store-record`. Today the on-disk record
-/// `tx_type` is [`TransactionType::System`] so the envelope's `kind`
-/// field is the canonical discriminator until the layered record
-/// schema lands.
+/// successful spawn. Phase 7b adds the matching
+/// [`aura_store_record::RecordKind::SubagentSpawn`] variant; the
+/// audit-log record header now uses it directly while this constant
+/// remains the in-payload discriminator for forward compatibility
+/// with consumers that still inspect the envelope body.
 pub const RECORD_KIND_SUBAGENT_SPAWN: &str = "subagent_spawn";
 
 /// Wire shape of the `SubagentSpawn` audit record's payload.
-///
-/// Phase 7a writes this through
-/// [`aura_agent_kernel::write_system_record`] using
-/// [`TransactionType::System`]. Phase 6+'s layered
-/// `RecordKind::SubagentSpawn` will move the `kind` discriminator
-/// out of the envelope and into the record header proper without
-/// changing the body fields, so this struct is forward-compatible
-/// with the eventual schema migration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRecordPayload {
     /// Discriminator for the System-record envelope (`"subagent_spawn"`).
     pub kind: String,
     /// Parent agent that requested the spawn.
     pub parent_agent_id: AgentId,
-    /// Freshly-allocated child agent id.
+    /// Freshly-allocated child agent id (pre-assigned by the spawner
+    /// before the child runner is invoked).
     pub child_agent_id: AgentId,
     /// Manifest of explicit overrides the parent supplied. May be
     /// empty when the child inherits every field — see
     /// [`OverrideManifest::is_empty`].
     pub override_manifest: OverrideManifest,
+    /// SpawnMode the parent's tool call resolved to.
+    pub spawn_mode: SpawnMode,
 }
 
 /// Request handed to [`FleetSpawner::spawn`].
@@ -59,37 +59,23 @@ pub struct SubagentSpawnRecordPayload {
 pub struct SpawnRequest {
     /// Atomic snapshot of the parent's session state at spawn time.
     pub parent: ParentContext,
-    /// Explicit overrides the parent's tool call supplied; all
-    /// `Option<_>` so unset fields inherit from the parent.
+    /// Explicit overrides the parent's tool call supplied.
     pub overrides: SubagentOverrides,
     /// Initial prompt seeded into the child agent loop.
     pub prompt: String,
     /// Originating user id propagated through to the child's
     /// audit attribution + scheduler identity.
     pub originating_user_id: Option<String>,
-    /// Phase 7a-only compatibility carrier. Forwarded to the
-    /// [`ChildRunner`] so the legacy task-tool path can read the
-    /// fields not yet modelled on [`SubagentSpec`]. Phase 7b
-    /// retires this field once
-    /// [`aura_agent_subagent::SubagentOverrides`] grows the full
-    /// override surface.
-    pub task_compat: Option<TaskCompatContext>,
+    /// Caller-stamped tool-call id used to dedupe idempotent
+    /// re-dispatches. `None` opts the spawn out of dedupe.
+    pub tool_call_id: Option<String>,
+    /// Optional caller-supplied cancellation token. The spawner
+    /// forks a child token from this so cancelling the parent's
+    /// token propagates into the child runner.
+    pub cancellation: Option<CancellationToken>,
 }
 
-/// Outcome of a [`FleetSpawner::spawn`] call.
-///
-/// Phase 7a only exposes [`SpawnHandle::Completed`] because the
-/// only legal [`SpawnMode`] is [`SpawnMode::Wait`]. Phase 7b adds
-/// `Pending { child_agent_id }` for `Detached` and a batch handle.
-#[derive(Debug)]
-pub enum SpawnHandle {
-    /// `SpawnMode::Wait` ran the child loop to completion in the
-    /// current task; the [`SubagentResult`] is the byte-identical
-    /// shape the task tool returns to the parent agent.
-    Completed(SubagentResult),
-}
-
-/// Errors returned by [`FleetSpawner::spawn`].
+/// Errors returned by [`FleetSpawner::spawn`] / `spawn_batch`.
 #[derive(Debug, Error)]
 pub enum SpawnError {
     /// Parent mode does not permit spawning (Plan/Ask/Debug).
@@ -102,8 +88,7 @@ pub enum SpawnError {
     #[error("spawn rejected by derivation: {0}")]
     Derivation(#[from] DerivationError),
 
-    /// Quota acquisition failed. Phase 7a's tracking-only pool
-    /// never produces this; reserved for Phase 7b enforcement.
+    /// Quota acquisition failed.
     #[error("spawn rejected by quota: {0}")]
     Quota(#[from] QuotaError),
 
@@ -119,15 +104,11 @@ pub enum SpawnError {
     #[error("spawn child runner failed: {0}")]
     Child(#[from] ChildRunError),
 
-    /// Caller asked for a [`SpawnMode`] Phase 7a does not yet
-    /// expose. Phase 7b owns `Detached` / `Batch`.
-    #[error("spawn mode {0:?} is not implemented in Phase 7a; reserved for Phase 7b")]
-    NotImplementedInPhase7a(SpawnMode),
+    /// Orphan handoff failed to write the durable orphan record.
+    #[error("spawn orphan handoff failed: {0}")]
+    Orphan(String),
 
     /// Serde failure assembling the `SubagentSpawn` audit payload.
-    /// `serde_json` can only fail here on bytes that fail to UTF-8
-    /// encode (impossible for our shape) or on a custom serialize
-    /// impl — both indicate a logic bug.
     #[error("spawn audit payload serialization failed: {0}")]
     Serialization(String),
 }
@@ -135,15 +116,21 @@ pub enum SpawnError {
 /// Construction config for [`FleetSpawner`].
 #[derive(Debug, Clone)]
 pub struct FleetSpawnerConfig {
-    /// Quota request shape applied to every spawn. Phase 7a wires
-    /// this from the resolved [`SubagentSpec::budget`].
+    /// Quota request shape applied to every spawn — concurrent-tool
+    /// ceiling forwarded into [`QuotaRequest::max_concurrent_tools`].
     pub max_concurrent_tools: u32,
+    /// Fleet-wide cancellation token. When this token fires the
+    /// spawner forks a per-child cancel from it so a global shutdown
+    /// gracefully propagates into every detached / batch child.
+    /// `None` disables fleet-shutdown propagation (default).
+    pub fleet_shutdown: Option<CancellationToken>,
 }
 
 impl Default for FleetSpawnerConfig {
     fn default() -> Self {
         Self {
             max_concurrent_tools: 4,
+            fleet_shutdown: None,
         }
     }
 }
@@ -155,6 +142,7 @@ pub struct FleetSpawner {
     registry: Arc<FleetRegistry>,
     quota: Arc<QuotaPool>,
     leases: Arc<ParentLeaseRegistry>,
+    orphans: Arc<OrphanStore>,
     derivation: Arc<dyn SubagentDerivation>,
     child_runner: Arc<dyn ChildRunner>,
     config: FleetSpawnerConfig,
@@ -162,14 +150,14 @@ pub struct FleetSpawner {
 
 impl FleetSpawner {
     /// Construct a [`FleetSpawner`] with a custom derivation.
-    /// Use [`Self::with_default_derivation`] for the standard
-    /// [`DefaultDerivation`] config.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<dyn Store>,
         registry: Arc<FleetRegistry>,
         quota: Arc<QuotaPool>,
         leases: Arc<ParentLeaseRegistry>,
+        orphans: Arc<OrphanStore>,
         derivation: Arc<dyn SubagentDerivation>,
         child_runner: Arc<dyn ChildRunner>,
         config: FleetSpawnerConfig,
@@ -179,6 +167,7 @@ impl FleetSpawner {
             registry,
             quota,
             leases,
+            orphans,
             derivation,
             child_runner,
             config,
@@ -193,6 +182,7 @@ impl FleetSpawner {
         registry: Arc<FleetRegistry>,
         quota: Arc<QuotaPool>,
         leases: Arc<ParentLeaseRegistry>,
+        orphans: Arc<OrphanStore>,
         child_runner: Arc<dyn ChildRunner>,
         config: FleetSpawnerConfig,
     ) -> Self {
@@ -201,19 +191,26 @@ impl FleetSpawner {
             registry,
             quota,
             leases,
+            orphans,
             Arc::new(DefaultDerivation::default()),
             child_runner,
             config,
         )
     }
 
-    /// Spawn a subagent. See crate-level docs for the full
-    /// ordering contract.
+    /// Read-only access to the orphan store.
+    #[must_use]
+    pub fn orphan_store(&self) -> Arc<OrphanStore> {
+        self.orphans.clone()
+    }
+
+    /// Spawn a single subagent. Dispatches into [`SpawnMode::Wait`]
+    /// or [`SpawnMode::Detached`]; batch dispatch goes through
+    /// [`Self::spawn_batch`].
     ///
     /// # Errors
     ///
-    /// Returns one of the [`SpawnError`] variants documented at
-    /// the crate root.
+    /// See [`SpawnError`].
     #[instrument(
         skip(self, request),
         fields(parent_agent_id = %request.parent.agent_id, mode = ?mode)
@@ -223,23 +220,8 @@ impl FleetSpawner {
         request: SpawnRequest,
         mode: SpawnMode,
     ) -> Result<SpawnHandle, SpawnError> {
-        // (0) SpawnMode taxonomy gate — Phase 7a only supports
-        //     `Wait`. Reject the others hard so callers cannot
-        //     silently fall through to a different semantics than
-        //     they asked for.
-        match mode {
-            SpawnMode::Wait => {}
-            SpawnMode::Detached | SpawnMode::Batch => {
-                warn!(
-                    requested = ?mode,
-                    "fleet spawner: SpawnMode reserved for Phase 7b — refusing"
-                );
-                return Err(SpawnError::NotImplementedInPhase7a(mode));
-            }
-        }
-
         // (1) Parent-mode gate. Plan/Ask/Debug short-circuit before
-        //     any state touches the lease, quota, or audit log.
+        //     any lease / quota / audit work.
         if !request.parent.mode.allows_spawn() {
             debug!(
                 parent_mode = ?request.parent.mode,
@@ -248,61 +230,63 @@ impl FleetSpawner {
             return Err(SpawnError::ModeViolation(ModeViolation::SpawnNotAllowed));
         }
 
-        let parent_agent_id = request.parent.agent_id;
+        // (2) Idempotent dedupe — same (parent, tool_call_id) within
+        //     the dedupe window short-circuits to the cached
+        //     outcome without producing a duplicate child.
+        if let Some(tool_call_id) = request.tool_call_id.clone() {
+            if let Some(cached) = self
+                .leases
+                .lookup_dedupe(request.parent.agent_id, &tool_call_id)
+            {
+                debug!(
+                    parent_agent_id = %request.parent.agent_id,
+                    tool_call_id,
+                    "fleet spawner: dedupe hit — returning cached outcome"
+                );
+                return Ok(dedupe_to_handle(cached, mode));
+            }
+        }
 
-        // (2) Per-parent audit-append lease — held across every
-        //     remaining step so two concurrent spawns from one
-        //     parent serialise their audit-record appends.
-        let _lease = self.leases.acquire(parent_agent_id).await;
+        let parent_agent_id = request.parent.agent_id;
+        let parent_chain = request.parent.lineage.chain.clone();
+        let lease = self.leases.acquire(parent_agent_id).await;
         debug!("fleet spawner: lease acquired");
 
-        // (3) Derivation — runs depth + mode + permission validation
-        //     and produces the canonical SubagentSpec. Depth is
-        //     checked FIRST inside derive so a too-deep spawn never
-        //     reaches step 4 (quota).
+        // (3) Derivation — runs depth + mode + permission validation.
         let (spec, manifest) = self
             .derivation
             .derive(&request.parent, request.overrides.clone())?;
 
         debug!(
-            child_agent_id_candidate = %spec.parent,
             depth = spec.depth,
             kernel_mode = ?spec.kernel_mode,
             override_count = manifest.applied.len(),
             "fleet spawner: spec derived"
         );
 
-        // (4) Tracking-only quota acquire. The ticket is not yet
-        //     enforced (Phase 7b) but the call ordering is fixed:
-        //     `try_acquire` runs AFTER `derive_subagent` so a
-        //     depth-rejected spawn never consumes a ticket.
-        let _ticket = self.quota.try_acquire(QuotaRequest {
+        // (4) Pre-allocate the child agent id BEFORE quota / audit /
+        //     dispatch so every downstream consumer sees the same id.
+        let child_agent_id = AgentId::generate();
+        let child_depth = u8::try_from(spec.depth).unwrap_or(u8::MAX);
+
+        // (5) Quota acquire. RAII ticket — released on drop when the
+        //     child loop completes.
+        let ticket = self.quota.try_acquire(QuotaRequest {
             agent_id: parent_agent_id,
+            child_depth,
             max_iterations: spec.budget.max_iterations,
             max_concurrent_tools: self.config.max_concurrent_tools,
             token_budget: Some(u64::from(spec.budget.max_tokens)),
         })?;
 
-        // (5) The child id is currently the inner ChildRunner's
-        //     responsibility (the legacy KernelSpawnHook allocates
-        //     fresh ids inside `spawn_child`). Phase 7a writes the
-        //     `SubagentSpawn` audit record WITHOUT the child id
-        //     (a `nil`-AgentId placeholder) because we cannot peek
-        //     at the future child id without running the runner
-        //     first, and the runner ALSO needs to write child-side
-        //     records that must happen UNDER the same lease. The
-        //     reverse ordering would leak a half-recorded spawn if
-        //     the runner failed.
-        //
-        //     Phase 7b moves child-id allocation into this crate so
-        //     the audit record carries the final id; that change is
-        //     orthogonal to the per-parent lease invariant which
-        //     this crate already enforces.
+        // (6) SubagentSpawn audit record write under the parent's
+        //     lease (linearised seq numbers).
         let manifest_payload = SubagentSpawnRecordPayload {
             kind: RECORD_KIND_SUBAGENT_SPAWN.to_string(),
             parent_agent_id,
-            child_agent_id: AgentId::default(),
+            child_agent_id,
             override_manifest: manifest.clone(),
+            spawn_mode: mode,
         };
         let manifest_bytes = serde_json::to_vec(&manifest_payload)
             .map_err(|e| SpawnError::Serialization(format!("manifest: {e}")))?;
@@ -316,40 +300,519 @@ impl FleetSpawner {
             .map_err(|e| SpawnError::Audit(e.to_string()))?;
         info!(
             seq,
+            child_agent_id = %child_agent_id,
             override_count = manifest.applied.len(),
+            mode = ?mode,
             "fleet spawner: SubagentSpawn audit record appended"
         );
 
-        // (6) Dispatch the child loop. Wait mode runs to completion
-        //     synchronously so we can return the byte-identical
-        //     SubagentResult to the parent tool call.
-        let result = self
-            .child_runner
-            .run(ChildRunContext {
-                spec: spec.clone(),
-                prompt: request.prompt,
-                originating_user_id: request.originating_user_id,
-                task_compat: request.task_compat,
-            })
-            .await?;
+        // (7) Registry slot.
+        let slot = AgentSlot::new(
+            child_agent_id,
+            Some(parent_agent_id),
+            spec.mode,
+            spec.kernel_mode,
+            spec.permissions.clone(),
+        );
+        self.registry.register(slot)?;
 
-        // (7) Registry insertion happens AFTER the runner so we can
-        //     use the runner-allocated child id from the
-        //     SubagentResult. The runner produces `None` only when
-        //     it short-circuits before child creation (e.g. unknown
-        //     kind); we skip registry for that case since there is
-        //     no child to track.
-        if let Some(child_agent_id) = result.child_agent_id {
-            let slot = AgentSlot::new(
+        // (8) Drop the lease — the audit record is appended and the
+        //     registry slot is in place. The actual child execution
+        //     does NOT need to hold the parent's audit-append lease;
+        //     subsequent spawns from the same parent are free to
+        //     proceed.
+        drop(lease);
+
+        // (9) Build the per-child cancellation token. The parent's
+        //     token cancels Wait/Batch children but NOT Detached;
+        //     the fleet shutdown token always propagates.
+        let cancellation = build_cancellation(
+            mode,
+            request.cancellation.as_ref(),
+            self.config.fleet_shutdown.as_ref(),
+        );
+
+        // (10) Dispatch per spawn mode.
+        let runner = self.child_runner.clone();
+        let registry = self.registry.clone();
+        let orphans = self.orphans.clone();
+        let dedupe_key = request.tool_call_id.clone();
+        let leases_for_dedupe = self.leases.clone();
+        let prompt = request.prompt;
+        let originating_user_id = request.originating_user_id.clone();
+        let spec_for_runner = spec.clone();
+
+        match mode {
+            SpawnMode::Wait => {
+                let result = runner
+                    .run(ChildRunContext {
+                        spec: spec_for_runner,
+                        prompt,
+                        originating_user_id,
+                        parent_agent_id,
+                        parent_chain,
+                        cancellation,
+                        preassigned_agent_id: child_agent_id,
+                    })
+                    .await?;
+                drop(ticket);
+                let _ = registry.set_state(child_agent_id, state_for_exit(&result.exit));
+                if let Some(key) = dedupe_key {
+                    leases_for_dedupe.record_dedupe(
+                        parent_agent_id,
+                        key,
+                        DedupedSpawn::WaitResult(result.clone()),
+                    );
+                }
+                Ok(SpawnHandle::Completed(result))
+            }
+            SpawnMode::Detached => {
+                // Write the orphan record immediately — a detached
+                // child is observable via `aura agents inspect` even
+                // while its parent is still alive.
+                let orphan_record = OrphanRecord {
+                    agent_id: child_agent_id,
+                    parent_lineage: parent_chain.clone(),
+                    mode: spec.mode,
+                    kernel_mode: spec.kernel_mode,
+                    spawn_mode: SpawnMode::Detached,
+                    spawned_at: Utc::now(),
+                    kind: spec.subagent_type.clone(),
+                    model_id: Some(spec.model_id.clone()),
+                    originating_user_id: originating_user_id.clone(),
+                };
+                orphans
+                    .write(&orphan_record)
+                    .map_err(|e| SpawnError::Orphan(e.to_string()))?;
+
+                let (result_tx, result_rx) = oneshot::channel::<SubagentResult>();
+                let registry_clone = registry.clone();
+                let orphans_for_task = orphans.clone();
+                let runner_clone = runner.clone();
+                let cancellation_clone = cancellation.clone();
+                tokio::spawn(async move {
+                    let outcome = runner_clone
+                        .run(ChildRunContext {
+                            spec: spec_for_runner,
+                            prompt,
+                            originating_user_id,
+                            parent_agent_id,
+                            parent_chain,
+                            cancellation: cancellation_clone,
+                            preassigned_agent_id: child_agent_id,
+                        })
+                        .await;
+                    let result = match outcome {
+                        Ok(r) => r,
+                        Err(err) => SubagentResult {
+                            child_agent_id: Some(child_agent_id),
+                            final_message: String::new(),
+                            total_input_tokens: 0,
+                            total_output_tokens: 0,
+                            files_changed: Vec::new(),
+                            exit: SubagentExit::Failed {
+                                reason: err.to_string(),
+                            },
+                        },
+                    };
+                    let _ = registry_clone.set_state(child_agent_id, state_for_exit(&result.exit));
+                    let _ = orphans_for_task.write(&OrphanRecord {
+                        agent_id: child_agent_id,
+                        parent_lineage: orphan_record.parent_lineage.clone(),
+                        mode: orphan_record.mode,
+                        kernel_mode: orphan_record.kernel_mode,
+                        spawn_mode: SpawnMode::Detached,
+                        spawned_at: orphan_record.spawned_at,
+                        kind: orphan_record.kind.clone(),
+                        model_id: orphan_record.model_id.clone(),
+                        originating_user_id: orphan_record.originating_user_id.clone(),
+                    });
+                    let _ = result_tx.send(result);
+                    drop(ticket);
+                });
+
+                if let Some(key) = dedupe_key {
+                    leases_for_dedupe.record_dedupe(
+                        parent_agent_id,
+                        key,
+                        DedupedSpawn::AgentIds(vec![child_agent_id]),
+                    );
+                }
+
+                Ok(SpawnHandle::Detached(DetachedSpawn {
+                    agent_id: child_agent_id,
+                    result_rx: Some(result_rx),
+                }))
+            }
+            SpawnMode::Batch => {
+                // `Batch` here is degenerate — a single-element
+                // batch with the default `JoinPolicy`. The proper
+                // multi-child entry point is `spawn_batch`.
+                let policy = spec.join_policy;
+                let handles = self.run_batch_single(
+                    spec_for_runner,
+                    prompt,
+                    originating_user_id,
+                    parent_agent_id,
+                    parent_chain,
+                    cancellation,
+                    child_agent_id,
+                    ticket,
+                );
+                let batch = BatchSpawn {
+                    agent_ids: vec![child_agent_id],
+                    policy,
+                    inner: handles,
+                };
+                if let Some(key) = dedupe_key {
+                    leases_for_dedupe.record_dedupe(
+                        parent_agent_id,
+                        key,
+                        DedupedSpawn::AgentIds(vec![child_agent_id]),
+                    );
+                }
+                Ok(SpawnHandle::Batch(batch))
+            }
+        }
+    }
+
+    /// Spawn a batch of subagents under the requested
+    /// [`aura_core_modes::JoinPolicy`].
+    ///
+    /// Each [`SpawnRequest`] in `requests` is derived + admitted
+    /// independently; failures during a single request are surfaced
+    /// inside the [`BatchOutcome`] rather than aborting the whole
+    /// call. The batch handle's join policy MUST be passed via the
+    /// `policy` argument so the call site is explicit about its
+    /// semantic choice (rather than reading it from each request's
+    /// spec).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError`] only for failures that prevent the
+    /// batch from being assembled at all (e.g. a derivation failure
+    /// on the FIRST request). Per-child failures are aggregated
+    /// inside the returned [`BatchSpawn`].
+    pub async fn spawn_batch(
+        &self,
+        requests: Vec<SpawnRequest>,
+        policy: aura_core_modes::JoinPolicy,
+    ) -> Result<BatchSpawn, SpawnError> {
+        let mut handles = Vec::with_capacity(requests.len());
+        let mut cancellations = Vec::with_capacity(requests.len());
+        let mut agent_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            let parent_agent_id = request.parent.agent_id;
+            if !request.parent.mode.allows_spawn() {
+                return Err(SpawnError::ModeViolation(ModeViolation::SpawnNotAllowed));
+            }
+            let lease = self.leases.acquire(parent_agent_id).await;
+            let (spec, manifest) = self
+                .derivation
+                .derive(&request.parent, request.overrides.clone())?;
+            let child_agent_id = AgentId::generate();
+            let child_depth = u8::try_from(spec.depth).unwrap_or(u8::MAX);
+            let ticket = self.quota.try_acquire(QuotaRequest {
+                agent_id: parent_agent_id,
+                child_depth,
+                max_iterations: spec.budget.max_iterations,
+                max_concurrent_tools: self.config.max_concurrent_tools,
+                token_budget: Some(u64::from(spec.budget.max_tokens)),
+            })?;
+            let manifest_payload = SubagentSpawnRecordPayload {
+                kind: RECORD_KIND_SUBAGENT_SPAWN.to_string(),
+                parent_agent_id,
+                child_agent_id,
+                override_manifest: manifest.clone(),
+                spawn_mode: SpawnMode::Batch,
+            };
+            let manifest_bytes = serde_json::to_vec(&manifest_payload)
+                .map_err(|e| SpawnError::Serialization(format!("manifest: {e}")))?;
+            let audit_tx = Transaction::new_chained(
+                parent_agent_id,
+                TransactionType::System,
+                Bytes::from(manifest_bytes),
+                None,
+            );
+            write_system_record(&self.store, parent_agent_id, audit_tx)
+                .map_err(|e| SpawnError::Audit(e.to_string()))?;
+            self.registry.register(AgentSlot::new(
                 child_agent_id,
                 Some(parent_agent_id),
                 spec.mode,
                 spec.kernel_mode,
                 spec.permissions.clone(),
+            ))?;
+            drop(lease);
+
+            let cancellation = build_cancellation(
+                if policy == aura_core_modes::JoinPolicy::Abandon {
+                    SpawnMode::Detached
+                } else {
+                    SpawnMode::Batch
+                },
+                request.cancellation.as_ref(),
+                self.config.fleet_shutdown.as_ref(),
             );
-            self.registry.register(slot)?;
+
+            agent_ids.push(child_agent_id);
+
+            match policy {
+                aura_core_modes::JoinPolicy::Abandon => {
+                    // Write orphan record + fire-and-forget.
+                    let orphan_record = OrphanRecord {
+                        agent_id: child_agent_id,
+                        parent_lineage: request.parent.lineage.chain.clone(),
+                        mode: spec.mode,
+                        kernel_mode: spec.kernel_mode,
+                        spawn_mode: SpawnMode::Batch,
+                        spawned_at: Utc::now(),
+                        kind: spec.subagent_type.clone(),
+                        model_id: Some(spec.model_id.clone()),
+                        originating_user_id: request.originating_user_id.clone(),
+                    };
+                    self.orphans
+                        .write(&orphan_record)
+                        .map_err(|e| SpawnError::Orphan(e.to_string()))?;
+                    let runner = self.child_runner.clone();
+                    let registry = self.registry.clone();
+                    let parent_chain = request.parent.lineage.chain.clone();
+                    let prompt = request.prompt;
+                    let originating_user_id = request.originating_user_id.clone();
+                    tokio::spawn(async move {
+                        let outcome = runner
+                            .run(ChildRunContext {
+                                spec,
+                                prompt,
+                                originating_user_id,
+                                parent_agent_id,
+                                parent_chain,
+                                cancellation,
+                                preassigned_agent_id: child_agent_id,
+                            })
+                            .await;
+                        let _ = match outcome {
+                            Ok(r) => registry.set_state(child_agent_id, state_for_exit(&r.exit)),
+                            Err(_) => registry
+                                .set_state(child_agent_id, aura_fleet_registry::AgentState::Failed),
+                        };
+                        drop(ticket);
+                    });
+                }
+                aura_core_modes::JoinPolicy::All | aura_core_modes::JoinPolicy::Any => {
+                    let runner = self.child_runner.clone();
+                    let registry = self.registry.clone();
+                    let parent_chain = request.parent.lineage.chain.clone();
+                    let prompt = request.prompt;
+                    let originating_user_id = request.originating_user_id.clone();
+                    let cancellation_for_task = cancellation.clone();
+                    cancellations.push(cancellation);
+                    let handle = tokio::spawn(async move {
+                        let outcome = runner
+                            .run(ChildRunContext {
+                                spec,
+                                prompt,
+                                originating_user_id,
+                                parent_agent_id,
+                                parent_chain,
+                                cancellation: cancellation_for_task,
+                                preassigned_agent_id: child_agent_id,
+                            })
+                            .await;
+                        let result = match outcome {
+                            Ok(r) => r,
+                            Err(err) => SubagentResult {
+                                child_agent_id: Some(child_agent_id),
+                                final_message: String::new(),
+                                total_input_tokens: 0,
+                                total_output_tokens: 0,
+                                files_changed: Vec::new(),
+                                exit: SubagentExit::Failed {
+                                    reason: err.to_string(),
+                                },
+                            },
+                        };
+                        let _ = registry.set_state(child_agent_id, state_for_exit(&result.exit));
+                        drop(ticket);
+                        Ok::<_, SpawnError>(result)
+                    });
+                    handles.push(handle);
+                }
+            }
         }
 
-        Ok(SpawnHandle::Completed(result))
+        let inner = match policy {
+            aura_core_modes::JoinPolicy::All => BatchInner::All(handles),
+            aura_core_modes::JoinPolicy::Any => BatchInner::Any {
+                children: handles,
+                cancellations,
+            },
+            aura_core_modes::JoinPolicy::Abandon => BatchInner::Abandon,
+        };
+        Ok(BatchSpawn {
+            agent_ids,
+            policy,
+            inner,
+        })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_batch_single(
+        &self,
+        spec: aura_agent_subagent::SubagentSpec,
+        prompt: String,
+        originating_user_id: Option<String>,
+        parent_agent_id: AgentId,
+        parent_chain: Vec<AgentId>,
+        cancellation: CancellationToken,
+        child_agent_id: AgentId,
+        ticket: BudgetTicket,
+    ) -> BatchInner {
+        let runner = self.child_runner.clone();
+        let registry = self.registry.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = runner
+                .run(ChildRunContext {
+                    spec,
+                    prompt,
+                    originating_user_id,
+                    parent_agent_id,
+                    parent_chain,
+                    cancellation,
+                    preassigned_agent_id: child_agent_id,
+                })
+                .await;
+            let result = match outcome {
+                Ok(r) => r,
+                Err(err) => SubagentResult {
+                    child_agent_id: Some(child_agent_id),
+                    final_message: String::new(),
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    files_changed: Vec::new(),
+                    exit: SubagentExit::Failed {
+                        reason: err.to_string(),
+                    },
+                },
+            };
+            let _ = registry.set_state(child_agent_id, state_for_exit(&result.exit));
+            drop(ticket);
+            Ok::<_, SpawnError>(result)
+        });
+        BatchInner::All(vec![handle])
+    }
+}
+
+/// Promote a cached dedupe outcome back into a [`SpawnHandle`]. The
+/// re-issued handle is intentionally weaker than the original: the
+/// `Detached` variant carries `None` for `result_rx` because the
+/// oneshot receiver was consumed by the first caller.
+fn dedupe_to_handle(cached: DedupedSpawn, mode: SpawnMode) -> SpawnHandle {
+    match (cached, mode) {
+        (DedupedSpawn::WaitResult(result), _) => SpawnHandle::Completed(result),
+        (DedupedSpawn::AgentIds(ids), SpawnMode::Detached) => {
+            let agent_id = ids.first().copied().unwrap_or_else(AgentId::generate);
+            SpawnHandle::Detached(DetachedSpawn {
+                agent_id,
+                result_rx: None,
+            })
+        }
+        (DedupedSpawn::AgentIds(ids), _) => SpawnHandle::Batch(BatchSpawn {
+            agent_ids: ids,
+            policy: aura_core_modes::JoinPolicy::default(),
+            inner: BatchInner::Abandon,
+        }),
+    }
+}
+
+/// Forks the per-child cancellation token from the parent's optional
+/// token + the fleet's shutdown token, per the SpawnMode rules:
+///
+/// - `Wait` / `Batch`: parent's token + fleet shutdown both
+///   propagate.
+/// - `Detached`: ONLY the fleet shutdown propagates; the parent's
+///   token is intentionally ignored so a parent that exits does not
+///   cancel its detached children.
+fn build_cancellation(
+    mode: SpawnMode,
+    parent_token: Option<&CancellationToken>,
+    fleet_shutdown: Option<&CancellationToken>,
+) -> CancellationToken {
+    let child = CancellationToken::new();
+    if let Some(shutdown) = fleet_shutdown {
+        let child_clone = child.clone();
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_clone.cancelled().await;
+            child_clone.cancel();
+        });
+    }
+    if matches!(mode, SpawnMode::Wait | SpawnMode::Batch) {
+        if let Some(parent) = parent_token {
+            let child_clone = child.clone();
+            let parent_clone = parent.clone();
+            tokio::spawn(async move {
+                parent_clone.cancelled().await;
+                child_clone.cancel();
+            });
+        }
+    }
+    child
+}
+
+fn state_for_exit(exit: &SubagentExit) -> aura_fleet_registry::AgentState {
+    match exit {
+        SubagentExit::Completed => aura_fleet_registry::AgentState::Done,
+        SubagentExit::Cancelled | SubagentExit::Rejected { .. } => {
+            aura_fleet_registry::AgentState::Cancelled
+        }
+        SubagentExit::Failed { .. } | SubagentExit::Timeout => {
+            aura_fleet_registry::AgentState::Failed
+        }
+    }
+}
+
+/// Promote a detached / batch-abandoned child to an orphan, writing
+/// the durable orphan record + a `ChildOrphanedByParentDeath` audit
+/// record under the parent's agent log.
+///
+/// This is invoked by callers that detect parent death (drop guard,
+/// task-future cancellation). The orphan store write is idempotent;
+/// the audit record write goes through
+/// [`aura_agent_kernel::write_system_record`] so a single sequence
+/// number is assigned per orphan promotion.
+///
+/// # Errors
+///
+/// Returns [`SpawnError::Orphan`] on orphan-store I/O failure and
+/// [`SpawnError::Audit`] on kernel record write failure.
+pub fn promote_to_orphan(
+    store: &Arc<dyn Store>,
+    orphans: &OrphanStore,
+    record: &OrphanRecord,
+) -> Result<(), SpawnError> {
+    let parent = record
+        .parent_lineage
+        .last()
+        .copied()
+        .unwrap_or(record.agent_id);
+    let agent_id = record.agent_id;
+    orphans
+        .write(record)
+        .map_err(|e| SpawnError::Orphan(e.to_string()))?;
+    let audit_payload = serde_json::json!({
+        "kind": "child_orphaned_by_parent_death",
+        "parent_agent_id": parent,
+        "child_agent_id": agent_id,
+    });
+    let bytes = serde_json::to_vec(&audit_payload)
+        .map_err(|e| SpawnError::Serialization(format!("orphan payload: {e}")))?;
+    let tx = Transaction::new_chained(parent, TransactionType::System, Bytes::from(bytes), None);
+    write_system_record(store, parent, tx).map_err(|e| SpawnError::Audit(e.to_string()))?;
+    warn!(
+        agent_id = %agent_id,
+        parent_agent_id = %parent,
+        "fleet spawner: child promoted to orphan"
+    );
+    Ok(())
 }

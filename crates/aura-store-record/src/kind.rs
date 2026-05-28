@@ -54,6 +54,26 @@ pub enum RecordKind {
     /// Phase 6a uses to consolidate today's `aura-runtime` direct
     /// append into the audited kernel write path.
     PermissionsUpdate,
+    /// Phase 7b: parent agent successfully derived + dispatched a
+    /// child subagent. Payload carries the `OverrideManifest` and
+    /// child agent id so an auditor can reconstruct parent intent.
+    SubagentSpawn,
+    /// Phase 7b: child agent died because its parent's task future
+    /// was dropped (panic / cancellation / natural completion) AND
+    /// the child had been spawned in `SpawnMode::Wait`. Wait-mode
+    /// children are tied to the parent's stack frame; this is the
+    /// audit record stamped when the parent goes away.
+    ChildCancelledByParentDeath,
+    /// Phase 7b: child agent was promoted to an orphan because its
+    /// parent's task future was dropped AND the child had been
+    /// spawned in `SpawnMode::Detached` (or `SpawnMode::Batch` with
+    /// `JoinPolicy::Abandon`). The orphan continues running and its
+    /// state is persisted under `~/.aura/state/orphans/<id>.json`.
+    ChildOrphanedByParentDeath,
+    /// Phase 7b: an orphan was reaped via `aura agents reap`. The
+    /// payload carries the agent id, the reap source (cli /
+    /// shutdown), and the wall-clock cancellation result.
+    OrphanReaped,
 
     /// Forward-compatibility fallback. Old `aura-node` reading newer
     /// records emits [`RecordKind::Unknown`] instead of failing

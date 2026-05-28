@@ -131,6 +131,9 @@ dependencies = [
  "aura-automaton",
  "aura-config",
  "aura-core",
+ "aura-fleet-daemon",
+ "aura-fleet-registry",
+ "aura-fleet-spawn",
  "aura-kernel",
  "aura-memory",
  "aura-plugin-core",
@@ -156,6 +159,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "tabwriter",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -510,11 +514,13 @@ dependencies = [
  "aura-core",
  "aura-core-modes",
  "aura-fleet-dispatch",
+ "aura-fleet-mailbox",
  "aura-fleet-quota",
  "aura-fleet-registry",
  "aura-fleet-spawn",
  "aura-store",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -527,6 +533,21 @@ dependencies = [
  "aura-core-modes",
  "aura-fleet-spawn",
  "futures-util",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "aura-fleet-mailbox"
+version = "0.1.0"
+dependencies = [
+ "aura-agent-subagent",
+ "aura-core",
+ "aura-core-modes",
+ "aura-core-permissions",
+ "aura-fleet-dispatch",
+ "aura-fleet-spawn",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -570,14 +591,18 @@ dependencies = [
  "aura-fleet-registry",
  "aura-store",
  "aura-store-db",
+ "aura-store-record",
  "bytes",
  "chrono",
+ "dirs",
+ "futures-util",
  "parking_lot",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3765,6 +3790,15 @@ checksum = "a75fb188eb626b924683e3b95e3a48e63551fcfb51949de2f06a9d91dbee93c9"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "tabwriter"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fce91f2f0ec87dff7e6bcbbeb267439aa1188703003c6055193c821487400432"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
