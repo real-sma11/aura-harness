@@ -121,10 +121,11 @@ pub struct AgentLoopConfig {
     /// the manifest are passed through unchanged, so core filesystem /
     /// shell tools stay visible regardless of classifier state.
     ///
-    /// Populated via [`aura_protocol::SessionInit::intent_classifier`]
-    /// (see `aura-os-super-agent::harness_handoff`) to let the harness
-    /// reproduce the aura-os CEO super-agent's tier-1/tier-2 filtering
-    /// without baking the tool manifest into the harness binary.
+    /// Populated via [`aura_protocol::AgentCapabilities::intent_classifier`]
+    /// on the [`aura_protocol::RuntimeRequest`] submitted to `POST /v1/run`.
+    /// This lets the harness reproduce the aura-os CEO super-agent's
+    /// tier-1/tier-2 filtering without baking the tool manifest into
+    /// the harness binary.
     ///
     /// [`intent_classifier_manifest`]: Self::intent_classifier_manifest
     pub intent_classifier: Option<Arc<IntentClassifier>>,

@@ -49,16 +49,15 @@ pub(in crate::gateway) async fn submit_tx_handler(
 
     // Phase 5: reject mid-session `AgentPermissions` mutation.
     //
-    // Per-session permissions are baked in at `SessionInit` time (see
-    // `Session::apply_init`) and applied to the kernel `PolicyConfig`
-    // during session bootstrap. Any attempt to ship a new permission
-    // bundle via `/tx` (regardless of transaction kind) is refused so a
-    // running session cannot escalate its own capabilities.
+    // Per-run permissions are baked in from the `RuntimeRequest` and
+    // applied to the kernel `PolicyConfig` during session bootstrap. Any
+    // attempt to ship a new permission bundle via `/tx` (regardless of
+    // transaction kind) is refused so a running session cannot escalate its
+    // own capabilities.
     if matches!(tx_type, TransactionType::System) && carries_agent_permissions_mutation(&payload) {
         return Err((
             StatusCode::FORBIDDEN,
-            "permissions: AgentPermissions are frozen per session; send a new SessionInit instead"
-                .to_string(),
+            "permissions: AgentPermissions are frozen per run; start a new run instead".to_string(),
         ));
     }
 

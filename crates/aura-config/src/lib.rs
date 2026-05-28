@@ -350,12 +350,8 @@ impl Drop for ConfigGuard {
 /// [`ConfigGuard`]. Intended for `#[cfg(test)]` use: production code
 /// should never call this.
 ///
-/// Note that [`loaded`] caches a `&'static AuraConfig` snapshot the
-/// first time it is called per process; tests that need to read the
-/// installed config should use the fields directly via the
-/// [`ConfigGuard`] interface (e.g. observing behavior through
-/// downstream functions that re-read the slot) rather than relying on
-/// `loaded()` reflecting the override.
+/// [`loaded`], [`agent`], and [`reasoner`] all clone the current slot,
+/// so they observe the override while the guard is alive.
 pub fn install_for_test(cfg: AuraConfig) -> ConfigGuard {
     let mut guard = slot().lock().unwrap_or_else(PoisonError::into_inner);
     let previous = std::mem::replace(&mut *guard, cfg);

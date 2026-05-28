@@ -42,8 +42,8 @@ pub struct ToolContext {
     /// declared `Path<AgentId>` where `AgentId` is a `Uuid`, so passing the
     /// truncated harness hash here is a silent 400 — the reply is lost.
     /// Populated by the runtime from `SessionState::skill_agent_id`
-    /// (which carries `template_agent_id` when set, otherwise the raw
-    /// `agent_id` string the OS server passes in `SessionInit`).
+    /// (which carries `RuntimeRequest.agent_identity.template_id` when set,
+    /// otherwise the raw runtime agent id).
     pub caller_external_agent_id: Option<String>,
     /// Phase 5: caller's scope + capability grants. Cross-agent tools (e.g.
     /// `spawn_agent`) enforce strict-subset semantics against this bundle.

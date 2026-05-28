@@ -13,9 +13,8 @@
 //! On the inbound side, multiple rejection paths historically returned
 //! a `StatusCode::into_response()` with no log at all (auth-middleware
 //! 401, governor 429, body-limit 413, timeout 408, WS slot full,
-//! oversized `SessionInit` open-then-close — see the comment on
-//! [`crate::gateway::session::chat::classify_ws_frame`]). This module
-//! gives those rejections a shared visual surface so an operator
+//! inbound-frame parse errors). This module gives those rejections a
+//! shared visual surface so an operator
 //! scanning a single log file sees the same `→ in` / `← out` pairing
 //! for inbound traffic that already exists for outbound calls.
 //!
@@ -123,7 +122,7 @@ pub fn inbound_failure_block(view: InboundFailureView<'_>) {
 
 /// Render a single-line rejection notice for paths that don't have a
 /// natural HTTP request/response shape — WebSocket upgrade refusals,
-/// inbound-frame parse errors, oversized `SessionInit`, etc.
+/// inbound-frame parse errors, malformed control messages, etc.
 ///
 /// `scope` is a short tag like `"upgrade"`, `"upgrade.automaton"`,
 /// `"framing"`. `reason` is a stable label that mirrors the error

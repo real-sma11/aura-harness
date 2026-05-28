@@ -155,7 +155,7 @@ pub struct AgentRunnerConfig {
     /// Template agent UUID forwarded as the `X-Aura-Agent-Id` header
     /// on outbound `/v1/messages` calls. Mirrors the chat path's
     /// `SessionState::aura_agent_id` (populated from
-    /// `SessionInit::aura_agent_id`). Without this, automaton runs
+    /// `RuntimeRequest.project.aura_agent_id`). Without this, automaton runs
     /// hit `aura-router` without an agent identity and Cloudflare's
     /// WAF treats them as unsanctioned API traffic, returning the
     /// HTML challenge page (status 403) that's been stalling SWE-bench.

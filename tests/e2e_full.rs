@@ -821,7 +821,7 @@ async fn ws_cfg_project_id() {
 }
 
 #[tokio::test]
-async fn ws_cfg_minimal_session_init() {
+async fn ws_cfg_minimal_runtime_request() {
     let server = start_mock_server().await;
     let ws_path = server.workspaces_path().join("cfg-minimal");
     std::fs::create_dir_all(&ws_path).unwrap();
@@ -836,7 +836,7 @@ async fn ws_cfg_minimal_session_init() {
     let tools = ready["tools"].as_array().unwrap();
     assert!(
         !tools.is_empty(),
-        "should get default tools with minimal init"
+        "should get default tools with minimal runtime request"
     );
 }
 
@@ -899,7 +899,7 @@ async fn ws_cfg_session_ready_includes_agent_and_core_tools() {
 }
 
 #[tokio::test]
-async fn ws_cfg_session_init_with_model_override() {
+async fn ws_cfg_runtime_request_with_model_override() {
     let server = start_mock_server().await;
     let ws_path = server.workspaces_path().join("cfg-model");
     std::fs::create_dir_all(&ws_path).unwrap();

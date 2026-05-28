@@ -444,9 +444,10 @@ pub(super) async fn build_kernel_with_config(
     // so cross-agent tools can ship a server-resolvable caller id as
     // `originating_agent_id` / `parent_agent_id` instead of the truncated
     // harness blake3 hash. `skill_agent_id` is populated from
-    // `SessionInit.template_agent_id` (the `aura-os-server` `agents.agent_id`
-    // UUID) when present, with a fallback to the raw `agent_id` string —
-    // see `SessionState::apply_init` in `state.rs`. Without this wire-up
+    // `RuntimeRequest.agent_identity.template_id` (the `aura-os-server`
+    // `agents.agent_id` UUID) when present, with a fallback to the raw
+    // `agent_id` string — see `SessionState::from_runtime_request` in
+    // `state.rs`. Without this wire-up
     // the server-side `spawn_cross_agent_reply_callback` POSTs to
     // `/api/agents/{16_char_hex}/events/stream`, which the
     // `Path<AgentId = Uuid>` extractor rejects with 400 and the async

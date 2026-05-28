@@ -16,7 +16,7 @@ pub const DEFAULT_SUBAGENT_TIMEOUT_MS: u64 = 300_000;
 ///
 /// - [`SubagentBudget::default`]'s `max_iterations`,
 /// - `aura_runtime::session::state::Session::max_turns` default and the
-///   wire-level `SessionInit.max_turns` fallback,
+///   wire-level `RuntimeRequest.model.max_turns` override,
 /// - `aura_agent::AgentLoopConfig::{max_iterations, max_turns_per_task,
 ///   max_iterations_per_task}` defaults,
 /// - `aura_agent::AgentRunnerConfig::max_agentic_iterations` default,
@@ -26,7 +26,7 @@ pub const DEFAULT_SUBAGENT_TIMEOUT_MS: u64 = 300_000;
 /// cast `MAX_TURNS as usize` at the call site so this constant remains
 /// the only place the numeric value lives. Callers wanting a different
 /// bound — typically tests asserting budget-exhaustion behavior, or
-/// clients sending an explicit `SessionInit.max_turns` — still pass an
+/// clients sending an explicit `RuntimeRequest.model.max_turns` — still pass an
 /// override locally; the constant only governs the default.
 pub const MAX_TURNS: u32 = 300;
 
