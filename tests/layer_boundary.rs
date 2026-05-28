@@ -97,6 +97,13 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     //   aura-plugin-core — declarative manifest + install + cache + marketplace
     ("aura-plugin-api", "plugin"),
     ("aura-plugin-core", "plugin"),
+    // Phase 4c plugin runtime surfaces:
+    //   aura-plugin-hooks      — HookEngine + 10 Codex/Claude events
+    //   aura-plugin-mcp        — stdio JSON-RPC client + connection manager
+    //   aura-plugin-connectors — registry of plugin-contributed endpoints
+    ("aura-plugin-hooks", "plugin"),
+    ("aura-plugin-mcp", "plugin"),
+    ("aura-plugin-connectors", "plugin"),
 ];
 
 #[test]

@@ -455,6 +455,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-plugin-connectors"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "aura-plugin-core"
 version = "0.1.0"
 dependencies = [
@@ -467,6 +474,29 @@ dependencies = [
  "toml",
  "tracing",
  "walkdir",
+]
+
+[[package]]
+name = "aura-plugin-hooks"
+version = "0.1.0"
+dependencies = [
+ "aura-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "aura-plugin-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

@@ -114,16 +114,95 @@ fn cmd_plugins(args: PluginsCommand) -> anyhow::Result<()> {
                 println!("{id:<32} active={active}");
             }
         }
-        PluginsSubcommand::Enable { id } => {
-            update_plugin_enable(&aura_home.path, &id, true)?;
-            println!("enabled {id}");
+        PluginsSubcommand::Enable { id, yes, no } => {
+            cmd_plugin_enable(&aura_home.path, &cache, &id, yes, no)?;
         }
         PluginsSubcommand::Disable { id } => {
-            update_plugin_enable(&aura_home.path, &id, false)?;
+            update_plugin_enable(&aura_home.path, &id, false, None)?;
             println!("disabled {id}");
         }
     }
     Ok(())
+}
+
+/// `aura plugins enable` flow with trust-prompt support.
+///
+/// Reads the prior `[plugins.<id>]` state from `config.toml`, hands
+/// the cache + state to [`aura_plugin_core::enable_with_prompter`]
+/// with the appropriate prompter (`AlwaysYes` for `--yes`,
+/// `AlwaysNo` for `--no`, `TtyPrompter` otherwise), and writes the
+/// resulting decision back to `config.toml`.
+fn cmd_plugin_enable(
+    aura_home: &std::path::Path,
+    cache: &aura_plugin_core::PluginCache,
+    id: &str,
+    yes: bool,
+    no: bool,
+) -> anyhow::Result<()> {
+    use aura_plugin_core::{
+        enable_with_prompter, AlwaysNo, AlwaysYes, EnableDecision, TtyPrompter,
+    };
+
+    let prior = read_plugin_enable_state(aura_home, id)?;
+
+    let outcome = if yes {
+        enable_with_prompter(cache, id, prior, &mut AlwaysYes)
+    } else if no {
+        enable_with_prompter(cache, id, prior, &mut AlwaysNo)
+    } else {
+        enable_with_prompter(cache, id, prior, &mut TtyPrompter)
+    }
+    .with_context(|| format!("enabling plugin `{id}`"))?;
+
+    match outcome.decision {
+        EnableDecision::Enabled => {
+            update_plugin_enable(
+                aura_home,
+                id,
+                outcome.enabled_after,
+                Some(outcome.trusted_after),
+            )?;
+            println!("enabled {id} (v{})", outcome.version);
+        }
+        EnableDecision::AlreadyTrusted => {
+            update_plugin_enable(aura_home, id, true, Some(true))?;
+            println!("enabled {id} (v{}; already trusted)", outcome.version);
+        }
+        EnableDecision::TrustDeclined => {
+            println!("trust declined; plugin not enabled");
+        }
+    }
+    Ok(())
+}
+
+/// Read `[plugins.<id>]` from `<aura_home>/config.toml`, returning a
+/// snapshot of the `enabled` / `trusted` booleans. Returns the empty
+/// state when the file or section is missing.
+fn read_plugin_enable_state(
+    aura_home: &std::path::Path,
+    id: &str,
+) -> anyhow::Result<aura_plugin_core::PluginEnableState> {
+    use std::fs;
+
+    let config_path = aura_home.join("config.toml");
+    if !config_path.exists() {
+        return Ok(aura_plugin_core::PluginEnableState::default());
+    }
+    let body = fs::read_to_string(&config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let root: toml::Value =
+        toml::from_str(&body).with_context(|| format!("parsing {}", config_path.display()))?;
+    let table = root
+        .get("plugins")
+        .and_then(|p| p.get(id))
+        .and_then(|p| p.as_table());
+    let enabled = table
+        .and_then(|t| t.get("enabled"))
+        .and_then(toml::Value::as_bool);
+    let trusted = table
+        .and_then(|t| t.get("trusted"))
+        .and_then(toml::Value::as_bool);
+    Ok(aura_plugin_core::PluginEnableState { enabled, trusted })
 }
 
 /// Minimal `~/.aura/config.toml` mutation: read (or synthesise) the
@@ -139,6 +218,7 @@ fn update_plugin_enable(
     aura_home: &std::path::Path,
     id: &str,
     enabled: bool,
+    trusted: Option<bool>,
 ) -> anyhow::Result<()> {
     use std::fs;
 
@@ -173,6 +253,9 @@ fn update_plugin_enable(
         .ok_or_else(|| anyhow::anyhow!("[plugins.{id}] entry must be a table"))?;
 
     plugin_table.insert("enabled".to_string(), toml::Value::Boolean(enabled));
+    if let Some(t) = trusted {
+        plugin_table.insert("trusted".to_string(), toml::Value::Boolean(t));
+    }
 
     let serialised = toml::to_string_pretty(&root).context("serialising updated config.toml")?;
 

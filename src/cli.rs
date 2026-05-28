@@ -79,9 +79,23 @@ pub enum PluginsSubcommand {
     /// List installed plugins and their active versions.
     List,
     /// Enable a plugin in `AURA_HOME/config.toml` (`enabled = true`).
+    ///
+    /// When the cached manifest has `trust.require_explicit_trust = true`
+    /// and the plugin is not already trusted in operator config, the
+    /// flow prompts the operator on the TTY. `--yes` skips the
+    /// prompt and accepts trust; `--no` skips the prompt and
+    /// declines (the plugin is NOT enabled).
     Enable {
         /// Plugin id (matches the manifest `id` field).
         id: String,
+        /// Bypass the trust prompt and accept trust automatically.
+        /// Mutually exclusive with `--no`.
+        #[arg(long, conflicts_with = "no")]
+        yes: bool,
+        /// Bypass the trust prompt and decline trust automatically.
+        /// Mutually exclusive with `--yes`.
+        #[arg(long, conflicts_with = "yes")]
+        no: bool,
     },
     /// Disable a plugin in `AURA_HOME/config.toml` (`enabled = false`).
     Disable {

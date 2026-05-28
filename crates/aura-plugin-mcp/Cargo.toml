@@ -1,0 +1,31 @@
+[package]
+name = "aura-plugin-mcp"
+description = "Stdio JSON-RPC MCP client + first-active-wins connection manager for Aura plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# Tiny Rust echo "MCP server" binary used by the integration test.
+# Defining it inside this crate keeps the test portable across Unix
+# and Windows (no per-OS shell script fixtures) and gives the test
+# binary a stable `CARGO_BIN_EXE_echo_mcp_server` env var path.
+[[bin]]
+name = "echo_mcp_server"
+path = "src/bin/echo_mcp_server.rs"
+test = false
+doctest = false
+bench = false
+
+[lints]
+workspace = true

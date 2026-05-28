@@ -80,6 +80,11 @@ members = [
     # Phase 4b plugin layer (in-process API + on-disk manifest pipeline)
     "crates/aura-plugin-api",
     "crates/aura-plugin-core",
+    # Phase 4c plugin runtime surfaces (hook engine + MCP + connectors).
+    # No agent-loop wiring yet; Phase 8 lands the consumer side.
+    "crates/aura-plugin-hooks",
+    "crates/aura-plugin-mcp",
+    "crates/aura-plugin-connectors",
 ]
 
 [profile.dev]
