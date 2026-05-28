@@ -23,5 +23,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 tracing = { workspace = true }
 
+[dev-dependencies]
+insta = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Phase 9: `aura-core` is re-exported through `aura-fleet-spawn`
+# and used by call sites that consume the daemon handle, so
+# machete misses the indirect use; we keep the explicit dep so
+# the layer-boundary test can audit the topology directly from
+# the manifest.
+[package.metadata.cargo-machete]
+ignored = ["aura-core"]
+
 [lints]
 workspace = true

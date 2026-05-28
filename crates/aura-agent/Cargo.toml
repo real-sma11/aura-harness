@@ -16,7 +16,10 @@ aura-compaction = { path = "../aura-compaction" }
 aura-reasoner = { path = "../aura-reasoner" }
 aura-store = { path = "../aura-store" }
 aura-tools = { path = "../aura-tools" }
-aura-auth = { path = "../aura-auth" }
+# Phase 9: aura-agent no longer depends on aura-auth.
+# Credential storage was moved out to the surface layer
+# (aura-surface-auth); see crates/aura-agent/src/session_bootstrap.rs
+# load_auth_token / default_agent_config_with_auth.
 aura-plugin-hooks = { path = "../aura-plugin-hooks" }
 anyhow = { workspace = true }
 serde = { workspace = true }

@@ -1,9 +1,93 @@
 # Aura Harness — Architecture
 
-This document describes the system architecture in two sections:
+This document describes the system architecture in three sections:
 
-1. **Architecture** — every crate from most fundamental to least, with key types and submodules.
-2. **User Flows** — how data moves through the system from the user's perspective.
+1. **Layer overview** — the Phase 9 layered crate architecture
+   (the documented invariants the workspace ships with today).
+2. **Architecture** — every crate from most fundamental to least, with key types and submodules.
+3. **User Flows** — how data moves through the system from the user's perspective.
+
+---
+
+## Part 0: Layer overview (Phase 9)
+
+The architecture refactor (Phases 1 → 9) split the workspace into
+ten layers. Each crate is named `aura-<layer>-<name>` and may
+depend only on crates whose layer is the same or lower. CI
+enforces this via `tests/layer_boundary.rs`:
+
+```text
+core   <  store  <  config  <  model   <  context  <
+plugin <  exec   <  agent   <  fleet   <  surface
+```
+
+### Layers, in dependency order
+
+| Layer    | Purpose                                                                  | Crates                                                                                                                                       |
+|----------|--------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| core     | Behavior-free IDs, wire types, capability enums, auth/mode primitives.   | `aura-core-types`, `aura-core-modes`, `aura-core-permissions`, `aura-core-auth`, `aura-core-protocol`, `aura-protocol`, `aura-core` (shell). |
+| store    | Durable storage: agent state, append-only audit, snapshot I/O.           | `aura-store-db`, `aura-store-record`, `aura-store-snapshot`, `aura-store` (shell).                                                            |
+| config   | Single source of truth for env vars + TOML config.                       | `aura-config`.                                                                                                                                |
+| model    | LLM provider trait + streaming completions.                              | `aura-model-reasoner`, `aura-reasoner` (shell).                                                                                               |
+| context  | Read-only context assembly (memory, skills, compaction, prompts).        | `aura-context-prompts`, `aura-context-memory`, `aura-context-compaction`, `aura-context-skills`, plus the `aura-{prompts,memory,compaction,skills}` shells. |
+| plugin   | Plugin manifest schema, in-process API, hooks, MCP, connectors.          | `aura-plugin-api`, `aura-plugin-core`, `aura-plugin-hooks`, `aura-plugin-mcp`, `aura-plugin-connectors`.                                       |
+| exec     | Tool catalog, execution runner, sandbox, policy, isolation, conflict.    | `aura-exec-conflict`, `aura-exec-isolation`, `aura-exec-policy`, `aura-exec-sandbox`, `aura-exec-tools`, `aura-exec-runner`, `aura-tools`.    |
+| agent    | Single-agent turn loop + audited kernel + steering + subagent derivation.| `aura-agent-loop`, `aura-agent-kernel`, `aura-agent-steering`, `aura-agent-subagent`, `aura-agent`, `aura-kernel` (shell).                     |
+| fleet    | Multi-agent registry, spawn, dispatch, quota, mailbox, daemon.           | `aura-fleet-registry`, `aura-fleet-spawn`, `aura-fleet-dispatch`, `aura-fleet-quota`, `aura-fleet-mailbox`, `aura-fleet-daemon`.               |
+| surface  | Composition roots: CLI / TUI / SDK / automaton / auth.                   | `aura-surface-cli`, `aura-surface-sdk`, `aura-surface-terminal`, `aura-surface-automaton`, `aura-surface-auth`, `aura-runtime`, `aura-terminal`, `aura-automaton`, `aura-auth`. |
+
+### Layer dependency rules
+
+- A crate may depend on crates in the same layer or any lower
+  layer. Upward edges fail CI via `tests/layer_boundary.rs`.
+- Every `crates/<crate>/src/lib.rs` carries a `//! Layer:
+  <layer>` doc-comment that must match the `KNOWN_CRATES` table
+  in the boundary test (audited by the
+  `every_crate_carries_a_matching_layer_doc_tag` test).
+- A single documented exception remains:
+  `aura-tools -> aura-kernel` is allowlisted as a Phase 10
+  follow-up (the deep fix is to relocate `Executor` /
+  `ExecuteContext` / `SpawnHook` traits to the exec layer). See
+  `WARN_ONLY_UPWARD_EDGES` in `tests/layer_boundary.rs`.
+
+### AgentMode resolution priority (Phase 9)
+
+`AgentMode` (Agent / Plan / Ask / Debug) is the headline gate
+consulted before every external effect. Phase 9 wires the
+resolution order at session start:
+
+1. **CLI flag** — `aura --mode <agent|plan|ask|debug>` (clap
+   `ModeFlag` from `aura-surface-cli`).
+2. **TUI slash command** — `/mode <agent|plan|ask|debug>` parsed
+   by `aura_surface_terminal::SlashModeCommand`.
+3. **SDK field** — `aura_surface_sdk::SessionConfig::mode`.
+4. **Daemon default** — `aura_config::FleetConfig::default_mode`
+   (overridable via the `AURA_FLEET_DEFAULT_MODE` env var).
+5. **Fallback** — `AgentMode::Agent`.
+
+`aura_fleet_daemon::resolve_session_mode` consumes an
+`AgentModeInputs` and applies the priority deterministically.
+The result is recorded on the session and propagated to every
+child agent through `aura-agent-subagent::derive_subagent`
+(children may only narrow, never widen).
+
+### Pre-Phase-1 → Phase 9 migration notes
+
+| Pre-Phase-1 crate / module | New home (Phase 9)                                                                                                          |
+|----------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `aura-core`                | Re-export shell. Real contents in `aura-core-{types,modes,permissions,auth,protocol}`.                                       |
+| `aura-kernel`              | Re-export shell over `aura-agent-kernel`.                                                                                    |
+| `aura-store`               | Re-export shell over `aura-store-db` (+ `aura-store-record`, `aura-store-snapshot`).                                         |
+| `aura-reasoner`            | Re-export shell over `aura-model-reasoner`.                                                                                  |
+| `aura-prompts`             | Re-export shell over `aura-context-prompts`.                                                                                 |
+| `aura-memory`              | Re-export shell over `aura-context-memory`.                                                                                  |
+| `aura-skills`              | Re-export shell over `aura-context-skills`.                                                                                  |
+| `aura-compaction`          | Re-export shell over `aura-context-compaction`.                                                                              |
+| `aura-terminal`            | Re-classified at the `surface` layer; new `aura-surface-terminal` shell re-exports the TUI + adds `SlashModeCommand`.        |
+| `aura-automaton`           | Re-classified at the `surface` layer; new `aura-surface-automaton` shell re-exports the automaton host.                      |
+| `aura-auth`                | Re-classified at the `surface` layer (ZosClient + CredentialStore). Token primitive types stay at `core` in `aura-core-auth` and are re-exported via `aura-surface-auth`. |
+| `aura-runtime` (Phase 9)   | Stays at the surface layer; the CLI bits gain a new public type surface in `aura-surface-cli`. SDK surface lands as `aura-surface-sdk`. The body migration of `src/main.rs` / `aura-runtime/src/main.rs` into `aura-surface-cli::run` is incremental. |
+| `spawn_lock`               | Removed in Phase 7a. Replaced by `aura-fleet-spawn::ParentLeaseRegistry` (per-parent audit-append lease).                     |
 
 ---
 

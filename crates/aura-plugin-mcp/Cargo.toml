@@ -16,6 +16,12 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 
+# Phase 9: `serde` and `tracing` are used by the in-crate `bin`
+# (echo_mcp_server) and the dev integration test; cargo machete
+# only inspects the library target so flags them as unused.
+[package.metadata.cargo-machete]
+ignored = ["serde", "tracing"]
+
 # Tiny Rust echo "MCP server" binary used by the integration test.
 # Defining it inside this crate keeps the test portable across Unix
 # and Windows (no per-OS shell script fixtures) and gives the test

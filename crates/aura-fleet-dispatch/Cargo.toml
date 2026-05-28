@@ -16,5 +16,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+# Phase 9: `async-trait` and `tokio` are wired in for the
+# upcoming dispatcher trait + spawn-driven event loop work; the
+# Phase 7a single-source adapter compiles without them but the
+# deps stay manifest-pinned for the Phase 10 follow-up.
+[package.metadata.cargo-machete]
+ignored = ["async-trait", "tokio"]
+
 [lints]
 workspace = true

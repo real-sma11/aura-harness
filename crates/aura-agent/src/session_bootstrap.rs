@@ -99,11 +99,20 @@ pub fn build_executor_router() -> (ExecutorRouter, Vec<ToolDefinition>) {
     (executor_router, tools)
 }
 
+/// Phase 9: returns the JWT obtained from the `AURA_ROUTER_JWT`
+/// environment variable, or `None` when the variable is unset.
+///
+/// Previously this helper also probed the OS keyring via
+/// `aura_auth::CredentialStore::load_token`. Phase 9 moves the
+/// keyring lookup to the surface layer (`aura-surface-auth` /
+/// `aura-surface-cli`) because credential storage is a surface
+/// concern (see plan §5 cross-cutting ownership). The surface
+/// composition root is responsible for composing the env-var
+/// fallback with the credential-store fallback before invoking
+/// [`default_agent_config_with_auth`].
 #[must_use]
 pub fn load_auth_token() -> Option<String> {
-    std::env::var("AURA_ROUTER_JWT")
-        .ok()
-        .or_else(aura_auth::CredentialStore::load_token)
+    std::env::var("AURA_ROUTER_JWT").ok()
 }
 
 // `ProviderSelection` / `select_provider` were removed in Wave 4. The
@@ -133,9 +142,23 @@ pub fn load_auth_token() -> Option<String> {
 /// user-selected model and never fall through to the env seed.
 #[must_use]
 pub fn default_agent_config(model: impl Into<String>) -> AgentLoopConfig {
+    default_agent_config_with_auth(model, load_auth_token())
+}
+
+/// Phase 9 explicit-auth-token form of [`default_agent_config`].
+///
+/// Surface-layer callers compose their own auth-token resolution
+/// (env var + credential store + SDK-provided override) and pass
+/// the resulting `Option<String>` here so this agent-layer
+/// helper never reaches into the OS keyring.
+#[must_use]
+pub fn default_agent_config_with_auth(
+    model: impl Into<String>,
+    auth_token: Option<String>,
+) -> AgentLoopConfig {
     AgentLoopConfig {
         system_prompt: default_system_prompt(),
-        auth_token: load_auth_token(),
+        auth_token,
         ..AgentLoopConfig::for_agent(model)
     }
 }

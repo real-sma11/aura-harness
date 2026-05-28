@@ -73,5 +73,13 @@ terminal_size = { workspace = true }
 tempfile = { workspace = true }
 insta = { workspace = true }
 
+# Phase 9: `aura-context-skills` and `aura-fleet-daemon` are held
+# as direct deps so the runtime can reach into the
+# Phase 8 plugin-skills wiring and the Phase 7a fleet daemon
+# without an extra migration touch. The lib.rs `pub use`s do not
+# always name them today (the surface migration is incremental).
+[package.metadata.cargo-machete]
+ignored = ["aura-context-skills", "aura-fleet-daemon"]
+
 [lints]
 workspace = true

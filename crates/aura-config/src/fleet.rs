@@ -27,19 +27,26 @@
 //! | `AURA_FLEET_MAX_CONCURRENT_AGENTS` | u32 | `32` | [`FleetConfig::max_concurrent_agents`] |
 //! | `AURA_FLEET_SHUTDOWN_GRACE_MS` | u64 | `30_000` | [`FleetConfig::shutdown_grace_ms`] |
 //! | `AURA_FLEET_ORPHAN_ON_PARENT_DEATH` | bool | `true` | [`FleetConfig::orphan_on_parent_death`] |
+//! | `AURA_FLEET_DEFAULT_MODE` | string | `agent` | [`FleetConfig::default_mode`] |
 
+use aura_core_modes::AgentMode;
 use serde::{Deserialize, Serialize};
 
 use crate::env::{
-    lookup_bool, lookup_numeric, AURA_FLEET_EMBEDDED_DAEMON, AURA_FLEET_MAX_CONCURRENT_AGENTS,
-    AURA_FLEET_ORPHAN_ON_PARENT_DEATH, AURA_FLEET_SHUTDOWN_GRACE_MS, FALSY_LITERALS,
-    TRUTHY_LITERALS,
+    lookup_bool, lookup_numeric, AURA_FLEET_DEFAULT_MODE, AURA_FLEET_EMBEDDED_DAEMON,
+    AURA_FLEET_MAX_CONCURRENT_AGENTS, AURA_FLEET_ORPHAN_ON_PARENT_DEATH,
+    AURA_FLEET_SHUTDOWN_GRACE_MS, FALSY_LITERALS, TRUTHY_LITERALS,
 };
 
 const DEFAULT_EMBEDDED_DAEMON: bool = true;
 const DEFAULT_MAX_CONCURRENT_AGENTS: u32 = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 30_000;
 const DEFAULT_ORPHAN_ON_PARENT_DEATH: bool = true;
+/// Daemon-default rung of the Phase 9 [`AgentMode`] resolution
+/// priority. Overridable via `AURA_FLEET_DEFAULT_MODE`; falls
+/// through to [`AgentMode::Agent`] which is also the absolute
+/// fallback at the bottom of the resolution chain.
+const DEFAULT_FLEET_MODE: AgentMode = AgentMode::Agent;
 
 /// Fleet daemon + spawn knobs. See the module-level docs for invariants.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +66,21 @@ pub struct FleetConfig {
     /// On parent process death, detached children: detach (`true`) or
     /// cancel (`false`).
     pub orphan_on_parent_death: bool,
+    /// Daemon-default rung of the Phase 9 [`AgentMode`] resolution
+    /// priority chain.
+    ///
+    /// The chain (highest precedence first):
+    /// 1. CLI flag (`aura --mode <name>`)
+    /// 2. TUI `/mode <name>` slash command
+    /// 3. SDK `SessionConfig::mode`
+    /// 4. **This field** — daemon-wide default
+    /// 5. [`AgentMode::Agent`] absolute fallback
+    ///
+    /// Operators set this through `AURA_FLEET_DEFAULT_MODE` (env)
+    /// or the `[fleet] default_mode = "..."` TOML key; both expect
+    /// the lower-snake serde representation
+    /// (`agent|plan|ask|debug`).
+    pub default_mode: AgentMode,
 }
 
 impl FleetConfig {
@@ -70,6 +92,7 @@ impl FleetConfig {
             max_concurrent_agents: DEFAULT_MAX_CONCURRENT_AGENTS,
             shutdown_grace_ms: DEFAULT_SHUTDOWN_GRACE_MS,
             orphan_on_parent_death: DEFAULT_ORPHAN_ON_PARENT_DEATH,
+            default_mode: DEFAULT_FLEET_MODE,
         }
     }
 
@@ -100,6 +123,25 @@ impl FleetConfig {
             TRUTHY_LITERALS,
             FALSY_LITERALS,
         );
+        if let Some(raw) = std::env::var(AURA_FLEET_DEFAULT_MODE)
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            cfg.default_mode = match raw.as_str() {
+                "agent" => AgentMode::Agent,
+                "plan" => AgentMode::Plan,
+                "ask" => AgentMode::Ask,
+                "debug" => AgentMode::Debug,
+                _ => {
+                    return Err(crate::ConfigError::InvalidValue {
+                        name: AURA_FLEET_DEFAULT_MODE,
+                        raw,
+                        message: "expected one of agent|plan|ask|debug".to_string(),
+                    });
+                }
+            };
+        }
         Ok(cfg)
     }
 }
@@ -120,6 +162,7 @@ mod tests {
         std::env::remove_var(AURA_FLEET_MAX_CONCURRENT_AGENTS);
         std::env::remove_var(AURA_FLEET_SHUTDOWN_GRACE_MS);
         std::env::remove_var(AURA_FLEET_ORPHAN_ON_PARENT_DEATH);
+        std::env::remove_var(AURA_FLEET_DEFAULT_MODE);
     }
 
     #[test]
@@ -129,6 +172,27 @@ mod tests {
         assert_eq!(cfg.max_concurrent_agents, DEFAULT_MAX_CONCURRENT_AGENTS);
         assert_eq!(cfg.shutdown_grace_ms, DEFAULT_SHUTDOWN_GRACE_MS);
         assert!(cfg.orphan_on_parent_death);
+        assert_eq!(cfg.default_mode, AgentMode::Agent);
+    }
+
+    #[test]
+    fn from_env_parses_default_mode() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_fleet_env();
+        std::env::set_var(AURA_FLEET_DEFAULT_MODE, "plan");
+        let cfg = FleetConfig::from_env().expect("plan parses");
+        assert_eq!(cfg.default_mode, AgentMode::Plan);
+        clear_fleet_env();
+    }
+
+    #[test]
+    fn from_env_rejects_unknown_default_mode() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_fleet_env();
+        std::env::set_var(AURA_FLEET_DEFAULT_MODE, "yolo");
+        let err = FleetConfig::from_env().expect_err("yolo is not a known mode");
+        assert!(matches!(err, crate::ConfigError::InvalidValue { .. }));
+        clear_fleet_env();
     }
 
     #[test]

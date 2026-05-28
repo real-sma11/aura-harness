@@ -1,8 +1,17 @@
 //! # aura-auth
 //!
+//! Layer: surface
+//!
 //! Authentication client and credential storage for the Aura CLI.
 //!
-//! Layer: core (Phase 1 — narrowing in progress, see crate notes).
+//! Phase 9 reclassifies this crate at the surface layer: the
+//! network client (`ZosClient`) and the OS-keyring/file
+//! credential persistence (`CredentialStore`) are surface-side
+//! concerns per the plan's "Secrets" bullet (§5 cross-cutting
+//! ownership). Token primitive types (`AccessToken`,
+//! `RefreshToken`, `Token`, `StoredSession`, `AuthError`) remain
+//! at the core layer in `aura-core-auth` and are re-exported here
+//! for source compatibility.
 //!
 //! Provides:
 //! - [`ZosClient`] for authenticating against the zOS API (`zosapi.zero.tech`)

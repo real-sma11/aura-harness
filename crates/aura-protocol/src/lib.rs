@@ -1,5 +1,7 @@
 //! Shared wire protocol types for the Aura harness WebSocket API.
 //!
+//! Layer: core
+//!
 //! Defines the inbound (client → server) and outbound (server → client)
 //! message format for the `/stream` WebSocket endpoint.
 //!

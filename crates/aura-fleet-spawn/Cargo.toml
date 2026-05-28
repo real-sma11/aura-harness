@@ -35,5 +35,11 @@ aura-store-db = { path = "../aura-store-db" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
 
+# Phase 9: `aura-store-record` is consumed through the
+# `aura-store` compatibility shell; the explicit dep stays for
+# audit-record schema discoverability.
+[package.metadata.cargo-machete]
+ignored = ["aura-store-record"]
+
 [lints]
 workspace = true

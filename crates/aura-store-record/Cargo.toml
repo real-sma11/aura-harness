@@ -23,5 +23,13 @@ blake3 = { workspace = true }
 proptest = { workspace = true }
 blake3 = { workspace = true }
 
+# Phase 9: `aura-core-types` is held as a forward-compat dep
+# alongside `aura-core` so the Phase 10 record-side migration
+# can land without manifest churn (cargo machete misses the
+# Phase 2 transitional re-export path that lives inside
+# aura-core today).
+[package.metadata.cargo-machete]
+ignored = ["aura-core-types"]
+
 [lints]
 workspace = true

@@ -181,12 +181,20 @@ jobs:
         run: cargo deny check
 
   # ---------------------------------------------------------------------------
-  # Security advisories (informational — Wave 0 relaxes this so upstream
-  # advisories don't hard-block builds. Revisit when W5 lands.)
+  # Security advisories.
+  #
+  # Phase 9 rationale (see deny.toml [advisories] block): we keep
+  # `continue-on-error: true` so a day-one upstream advisory disclosure
+  # does not break the workspace build; in exchange `cargo deny check`
+  # enforces a 30-day patch window via the [advisories] config block.
+  # Operators must clear new advisories within 30 days or they become a
+  # `cargo deny check` failure (which IS hard-fail in this workflow).
   # ---------------------------------------------------------------------------
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # Phase 9: deliberate soft-fail. The hard-fail gate is `cargo deny
+    # check`, which honours the 30-day advisory window in deny.toml.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -216,3 +224,42 @@ jobs:
       - name: cargo audit
         working-directory: aura-harness
         run: cargo audit
+
+  # ---------------------------------------------------------------------------
+  # Phase 9: unused-workspace-dependency check (`cargo machete`).
+  #
+  # Hard-fails when any workspace crate declares a dependency that is
+  # never imported. Prevents accidental fan-out as the layered
+  # architecture splits/recombines crates.
+  # ---------------------------------------------------------------------------
+  machete:
+    name: cargo machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: aura-harness
+
+      - name: Checkout aura-os sibling
+        uses: actions/checkout@v4
+        with:
+          repository: cypher-asi/aura-os
+          path: aura-os
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: aura-harness
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: cargo machete
+        working-directory: aura-harness
+        run: cargo machete

@@ -1,5 +1,7 @@
 //! # aura-terminal
 //!
+//! Layer: surface
+//!
 //! Cyber-retro terminal UI library for AURA CLI.
 //!
 //! This crate provides a standalone terminal UI that can be embedded in any
@@ -17,9 +19,9 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use aura_terminal::{Terminal, App, Theme};
+//! use aura_terminal::{Terminal, App, Theme, TerminalError};
 //!
-//! fn main() -> anyhow::Result<()> {
+//! fn main() -> Result<(), TerminalError> {
 //!     let theme = Theme::cyber();
 //!     let mut terminal = Terminal::new(theme)?;
 //!     let mut app = App::new();

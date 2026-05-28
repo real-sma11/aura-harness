@@ -1,5 +1,7 @@
 //! # aura-agent-steering
 //!
+//! Layer: agent
+//!
 //! Stateful steering evaluators + per-turn registry extracted from
 //! `aura-agent::agent_loop::steering` during Phase 6a of the
 //! agent-first architecture refactor.

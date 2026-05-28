@@ -1,0 +1,16 @@
+[package]
+name = "aura-surface-sdk"
+description = "Phase 9 surface-layer SDK: AuraClient + AuraSession over aura-core-protocol."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core-modes = { path = "../aura-core-modes" }
+aura-core-protocol = { path = "../aura-core-protocol" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

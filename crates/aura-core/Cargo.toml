@@ -23,5 +23,11 @@ base64 = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 
+# Phase 9: `aura-core-types` is re-exported through this shell
+# crate; cargo machete misses the use because it lives behind a
+# `pub use aura_core_types::*;` line.
+[package.metadata.cargo-machete]
+ignored = ["aura-core-types"]
+
 [lints]
 workspace = true

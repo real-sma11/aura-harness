@@ -141,6 +141,7 @@ dependencies = [
  "aura-reasoner",
  "aura-runtime",
  "aura-store",
+ "aura-surface-cli",
  "aura-terminal",
  "aura-tools",
  "axum",
@@ -179,7 +180,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aura-agent-steering",
- "aura-auth",
  "aura-compaction",
  "aura-config",
  "aura-core",
@@ -318,6 +318,7 @@ name = "aura-config"
 version = "0.1.0"
 dependencies = [
  "aura-core",
+ "aura-core-modes",
  "dirs",
  "serde",
  "serde_json",
@@ -524,6 +525,9 @@ dependencies = [
  "aura-plugin-core",
  "aura-plugin-hooks",
  "aura-store",
+ "insta",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -839,6 +843,53 @@ name = "aura-store-snapshot"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-surface-auth"
+version = "0.1.0"
+dependencies = [
+ "aura-auth",
+ "aura-core-auth",
+]
+
+[[package]]
+name = "aura-surface-automaton"
+version = "0.1.0"
+dependencies = [
+ "aura-automaton",
+]
+
+[[package]]
+name = "aura-surface-cli"
+version = "0.1.0"
+dependencies = [
+ "aura-config",
+ "aura-core-modes",
+ "aura-surface-auth",
+ "aura-surface-sdk",
+ "aura-surface-terminal",
+ "clap",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-surface-sdk"
+version = "0.1.0"
+dependencies = [
+ "aura-core-modes",
+ "aura-core-protocol",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aura-surface-terminal"
+version = "0.1.0"
+dependencies = [
+ "aura-core-modes",
+ "aura-terminal",
  "thiserror 1.0.69",
 ]
 

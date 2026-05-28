@@ -1,0 +1,13 @@
+[package]
+name = "aura-surface-automaton"
+description = "Phase 9 surface-layer relocation shell for the Aura automaton host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-automaton = { path = "../aura-automaton" }
+
+[lints]
+workspace = true

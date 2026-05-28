@@ -1,0 +1,15 @@
+[package]
+name = "aura-surface-terminal"
+description = "Phase 9 surface-layer relocation shell for the Aura TUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-terminal = { path = "../aura-terminal" }
+aura-core-modes = { path = "../aura-core-modes" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

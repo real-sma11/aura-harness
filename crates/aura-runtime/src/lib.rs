@@ -1,5 +1,7 @@
 //! # aura-runtime
 //!
+//! Layer: surface
+//!
 //! Runtime crate for Aura (router, scheduler, workers).
 //!
 //! The compiled binary name is declared in `Cargo.toml`'s `[[bin]]`

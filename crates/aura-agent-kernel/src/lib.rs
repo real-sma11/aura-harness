@@ -1,4 +1,6 @@
-//! # aura-kernel
+//! # aura-agent-kernel
+//!
+//! Layer: agent
 //!
 //! Deterministic kernel for Aura.
 //!

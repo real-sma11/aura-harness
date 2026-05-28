@@ -1,5 +1,7 @@
 //! # aura-agent
 //!
+//! Layer: agent
+//!
 //! Multi-step agentic orchestration layer for AURA.
 //!
 //! This crate owns the intelligent agent loop that wraps the kernel's

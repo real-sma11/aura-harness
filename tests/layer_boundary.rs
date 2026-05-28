@@ -7,12 +7,15 @@
 //! workspace-internal dependency edge that points "upward" in the
 //! layer stack.
 //!
-//! Phase 6c (context-memory inversion) promotes the
-//! `aura-context-memory -> aura-agent` edge from warn-only to
-//! fail-on-detect. Every other upward edge that pre-existed is kept
-//! warn-only (see [`WARN_ONLY_UPWARD_EDGES`]) until its own phase
-//! retires it. Phase 9 will promote the remaining warn-only edges to
-//! strict mode.
+//! Phase 6c (context-memory inversion) introduced the
+//! [`WARN_ONLY_UPWARD_EDGES`] allowlist with a single carve-out
+//! for an outstanding `aura-tools -> aura-kernel` edge that Phase 5
+//! left behind. Phase 9 promotes the rest of the workspace to
+//! strict mode: every upward edge that is NOT in
+//! [`WARN_ONLY_UPWARD_EDGES`] now fails CI. The Phase 9 audit also
+//! validates that every `crates/<crate>/src/lib.rs` carries a
+//! `//! Layer: <layer>` doc-comment tag that matches the
+//! `KNOWN_CRATES` / naming-convention assignment.
 //!
 //! ## Layer order (lowest → highest)
 //!
@@ -20,7 +23,8 @@
 //! `exec` < `agent` < `fleet` < `surface`.
 //!
 //! Equal or downward edges are silently accepted. Upward edges and
-//! cross-shortcut edges produce a single `eprintln!` line each.
+//! cross-shortcut edges produce a single `eprintln!` line each
+//! and (unless allowlisted) cause the test to fail.
 //!
 //! ## Parsing
 //!
@@ -53,14 +57,27 @@ const LAYER_ORDER: &[&str] = &[
 /// edge appears in the `crates/*/Cargo.toml` files. Adding to this
 /// list requires a phase reference and a TODO so it can be retired.
 ///
-/// Phase 6c (context-memory inversion) deliberately omits any
-/// `("aura-context-memory", "aura-agent")` entry: that edge is now
-/// fail-on-detect. Phase 9 promotes the remaining warn-only edges
-/// to strict mode.
+/// Phase 9 strict-mode rule: this list should be EMPTY (or every
+/// entry must carry an explicit TODO with a phase reference and a
+/// reason why the edge cannot be broken without follow-up work).
+/// Silent allowlist entries are forbidden.
+///
+/// The single Phase 9 carve-out is the legacy exec→agent edge from
+/// `aura-tools` (Phase 5 exec split) to `aura-kernel` (a Phase 6a
+/// compatibility shell). The deep fix is to relocate
+/// `ExecuteContext`, `Executor`, `ExecutorError`, and `SpawnHook`
+/// from `aura-agent-kernel` to the exec layer (likely
+/// `aura-exec-runner` or a new `aura-exec-traits` crate); the
+/// follow-up is tracked as **Phase 10** and is intentionally NOT
+/// inlined into Phase 9 to keep this commit focused on the
+/// surface-layer split and CI-strict promotion.
 const WARN_ONLY_UPWARD_EDGES: &[(&str, &str)] = &[
-    // Phase 5 exec layer split left `aura-tools` (a re-export shell
-    // that still pulls in the legacy `aura-kernel` crate) as the one
-    // unavoidable cross-layer edge. Tracked for cleanup in Phase 9.
+    // TODO(phase-10-executor-trait-relocation): break the last
+    // remaining exec→agent edge by moving the Executor /
+    // ExecuteContext / SpawnHook traits out of aura-agent-kernel
+    // and into the exec layer. Re-evaluate at the start of Phase
+    // 10; until then, this entry stays warn-only so the surface
+    // promotion in Phase 9 is not blocked.
     ("aura-tools", "aura-kernel"),
 ];
 
@@ -125,7 +142,11 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-agent", "agent"),
     // Phase 3 placeholder, populated in Phase 6a.
     ("aura-agent-steering", "agent"),
-    ("aura-auth", "core"),
+    // Phase 9 reclassifies aura-auth from `core` to `surface`: the
+    // network client (ZosClient) and credential persistence
+    // (CredentialStore) are surface-side concerns. Token primitive
+    // types stay at the core layer in aura-core-auth.
+    ("aura-auth", "surface"),
     ("aura-automaton", "surface"),
     ("aura-runtime", "surface"),
     ("aura-protocol", "core"),
@@ -160,7 +181,106 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-fleet-dispatch", "fleet"),
     ("aura-fleet-mailbox", "fleet"),
     ("aura-fleet-daemon", "fleet"),
+    // Phase 9 surface layer (5 new crates):
+    //   aura-surface-cli       — CLI composition root (ModeFlag,
+    //                            mode-resolution priority inputs).
+    //   aura-surface-sdk       — external AuraClient / AuraSession
+    //                            shape over aura-core-protocol.
+    //   aura-surface-terminal  — TUI surface-layer shell over the
+    //                            legacy aura-terminal crate, adds
+    //                            SlashModeCommand parsing.
+    //   aura-surface-automaton — automaton host surface-layer shell
+    //                            over the legacy aura-automaton.
+    //   aura-surface-auth      — zOS HTTP client + credential
+    //                            storage surface-layer shell over
+    //                            the legacy aura-auth.
+    ("aura-surface-cli", "surface"),
+    ("aura-surface-sdk", "surface"),
+    ("aura-surface-terminal", "surface"),
+    ("aura-surface-automaton", "surface"),
+    ("aura-surface-auth", "surface"),
 ];
+
+/// Phase 9 strict-mode addition: verify every `crates/<name>/src/lib.rs`
+/// carries a `//! Layer: <layer>` doc-comment tag matching the
+/// `KNOWN_CRATES` / naming-convention assignment.
+///
+/// The doc tag is a human-readable guardrail (see plan §5
+/// cross-cutting ownership, "Layer doc tags"). Cargo manifest is
+/// the primary source of truth — this test only verifies the
+/// source-level tag is present and consistent so the two surfaces
+/// don't drift.
+#[test]
+fn every_crate_carries_a_matching_layer_doc_tag() {
+    let workspace_root = workspace_root();
+    let crates_dir = workspace_root.join("crates");
+
+    let mut offenders: Vec<String> = Vec::new();
+    let entries = fs::read_dir(&crates_dir).expect("crates dir readable");
+    for entry in entries.flatten() {
+        let manifest = entry.path().join("Cargo.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let Ok(manifest_contents) = fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let Some(name) = parse_package_name(&manifest_contents) else {
+            continue;
+        };
+        let Some(expected_layer) = layer_for(&name) else {
+            continue;
+        };
+
+        let lib_path = entry.path().join("src").join("lib.rs");
+        if !lib_path.is_file() {
+            // Binary-only crates may not carry a `lib.rs`; skip
+            // them — the manifest source remains authoritative.
+            continue;
+        }
+        let Ok(lib_contents) = fs::read_to_string(&lib_path) else {
+            offenders.push(format!(
+                "{}: cannot read lib.rs to validate //! Layer: tag",
+                name
+            ));
+            continue;
+        };
+
+        let tag_line = lib_contents
+            .lines()
+            .find(|l| l.trim_start().starts_with("//! Layer:"));
+        match tag_line {
+            Some(line) => {
+                let body = line
+                    .trim_start()
+                    .trim_start_matches("//!")
+                    .trim()
+                    .trim_start_matches("Layer:")
+                    .trim();
+                // Allow trailing notes after the layer word
+                // (e.g. "core (Phase 1 — narrowing)"). We just
+                // require the first whitespace-delimited token to
+                // match the expected layer.
+                let first_word = body.split_whitespace().next().unwrap_or("");
+                if first_word != expected_layer {
+                    offenders.push(format!(
+                        "{name}: //! Layer: tag declares `{first_word}` \
+                         but Cargo manifest classifies it as `{expected_layer}`"
+                    ));
+                }
+            }
+            None => offenders.push(format!(
+                "{name}: missing `//! Layer: {expected_layer}` doc-comment tag in src/lib.rs"
+            )),
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "//! Layer: doc-tag audit failures:\n  - {}",
+        offenders.join("\n  - ")
+    );
+}
 
 #[test]
 fn warn_on_upward_layer_dependencies() {

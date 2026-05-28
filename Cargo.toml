@@ -8,6 +8,16 @@ publish = false
 name = "aura"
 path = "src/main.rs"
 
+# Phase 9: `aura-fleet-daemon` and `aura-fleet-registry` are kept
+# as direct deps of the root binary so the embedded-daemon code
+# path can opt in without touching the manifest. The fleet daemon
+# is reached today through `aura-runtime`; the direct deps are a
+# Phase 10 wiring affordance — and the doc comment in `src/cli.rs`
+# already names `aura_fleet_registry::FleetRegistry` so the type
+# remains discoverable.
+[package.metadata.cargo-machete]
+ignored = ["aura-fleet-daemon", "aura-fleet-registry"]
+
 [dependencies]
 aura-terminal = { path = "crates/aura-terminal" }
 aura-core = { path = "crates/aura-core" }
@@ -24,6 +34,12 @@ aura-plugin-core = { path = "crates/aura-plugin-core" }
 aura-fleet-spawn = { path = "crates/aura-fleet-spawn" }
 aura-fleet-registry = { path = "crates/aura-fleet-registry" }
 aura-fleet-daemon = { path = "crates/aura-fleet-daemon" }
+# Phase 9: the root binary pulls in the surface-layer composition
+# root for the `--mode <agent|plan|ask|debug>` flag type and the
+# AgentMode resolution-priority helpers. Full migration of the CLI
+# body into aura-surface-cli is incremental — see crate-level
+# docs and CHANGELOG.md Phase 9 section.
+aura-surface-cli = { path = "crates/aura-surface-cli" }
 anyhow = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
@@ -122,6 +138,17 @@ members = [
     "crates/aura-fleet-dispatch",
     "crates/aura-fleet-mailbox",
     "crates/aura-fleet-daemon",
+    # Phase 9 surface layer:
+    #   aura-surface-cli       — CLI composition root + ModeFlag
+    #   aura-surface-sdk       — external AuraClient/AuraSession SDK
+    #   aura-surface-terminal  — TUI surface-layer shell + SlashModeCommand
+    #   aura-surface-automaton — automaton host surface-layer shell
+    #   aura-surface-auth      — zOS HTTP client + credential storage
+    "crates/aura-surface-cli",
+    "crates/aura-surface-sdk",
+    "crates/aura-surface-terminal",
+    "crates/aura-surface-automaton",
+    "crates/aura-surface-auth",
 ]
 
 [profile.dev]

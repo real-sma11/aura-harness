@@ -1,5 +1,7 @@
 //! # aura-config
 //!
+//! Layer: config
+//!
 //! Single source of truth for **agent behavior knobs** and the **shared
 //! LLM retry / thinking env vars** consumed by `aura-agent`,
 //! `aura-automaton`, and `aura-reasoner`. After Phase 1 of the
@@ -66,6 +68,7 @@
 //! | `AURA_FLEET_MAX_CONCURRENT_AGENTS` | u32 | `32` | [`FleetConfig::max_concurrent_agents`] |
 //! | `AURA_FLEET_SHUTDOWN_GRACE_MS` | u64 | `30_000` | [`FleetConfig::shutdown_grace_ms`] |
 //! | `AURA_FLEET_ORPHAN_ON_PARENT_DEATH` | bool | `true` | [`FleetConfig::orphan_on_parent_death`] |
+//! | `AURA_FLEET_DEFAULT_MODE` | string | `agent` | [`FleetConfig::default_mode`] |
 //! | `AURA_SUBAGENT_MAX_DEPTH` | u32 | `8` | [`SubagentConfig::max_depth`] |
 //! | `AURA_SUBAGENT_DEFAULT_MAX_TOKENS` | u32 | `64_000` | [`SubagentConfig::default_max_tokens`] |
 //! | `AURA_SUBAGENT_DEFAULT_MAX_ITERATIONS` | u32 | `50` | [`SubagentConfig::default_max_iterations`] |

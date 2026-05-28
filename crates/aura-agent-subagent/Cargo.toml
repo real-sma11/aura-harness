@@ -18,5 +18,12 @@ uuid = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 
+# Phase 9: `aura-core-types` and `uuid` are pulled in for the
+# Phase-7b override surface that lands in subsequent migration
+# work; the type names are referenced from `aura-fleet-spawn`
+# via re-export rather than directly in this crate's lib.rs.
+[package.metadata.cargo-machete]
+ignored = ["aura-core-types", "uuid"]
+
 [lints]
 workspace = true

@@ -17,5 +17,12 @@ tracing = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
+# Phase 9: `tracing` is wired in for the lease-acquire / release
+# spans that land in the Phase 10 follow-up; the crate compiles
+# today without it but the dep is kept so the wiring is
+# manifest-stable.
+[package.metadata.cargo-machete]
+ignored = ["tracing"]
+
 [lints]
 workspace = true

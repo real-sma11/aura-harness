@@ -1,0 +1,29 @@
+[package]
+name = "aura-surface-cli"
+description = "Phase 9 surface-layer composition root for the aura CLI binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core-modes = { path = "../aura-core-modes" }
+aura-config = { path = "../aura-config" }
+aura-surface-sdk = { path = "../aura-surface-sdk" }
+aura-surface-terminal = { path = "../aura-surface-terminal" }
+aura-surface-auth = { path = "../aura-surface-auth" }
+clap = { version = "4.5", features = ["derive"] }
+thiserror = { workspace = true }
+
+# Phase 9: aura-surface-cli is the surface-layer composition root.
+# The sibling surface crates are listed as direct dependencies so
+# the binary embedder pulls them in transitively via this single
+# crate — even though `lib.rs` does not name every symbol today
+# (the body migration of `src/main.rs` proceeds incrementally).
+# `aura-config` is similarly held here for the incremental
+# migration of the daemon-config wiring.
+[package.metadata.cargo-machete]
+ignored = ["aura-config", "aura-surface-sdk", "aura-surface-terminal", "aura-surface-auth"]
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "aura-surface-auth"
+description = "Phase 9 surface-layer zOS auth client and credential storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-auth = { path = "../aura-auth" }
+aura-core-auth = { path = "../aura-core-auth" }
+
+[lints]
+workspace = true

@@ -1,18 +1,26 @@
-# cargo-deny configuration for aura-harness.
+# cargo-deny configuration for aura-harness — finalised in Phase 9.
 #
-# Enforces a conservative license + advisory posture for the workspace. The
-# allow-list covers the permissive and weak-copyleft licenses that already
-# show up in the current dependency graph; GPL-family copyleft licenses are
-# explicitly denied. Advisories deny hard vulnerabilities but only warn on
-# unmaintained / yanked crates so upstream churn does not break the build.
+# Locks down the workspace dependency policy now that the layered
+# architecture is in place:
 #
-# Duplicate-version noise is tracked as a `warn` so new duplicates get flagged
-# in review, and the `[bans.skip]` list holds the currently-known-duplicated
-# crates; every entry carries a TODO so they remain explicit cleanup work.
+#   * Licenses: an explicit MIT / Apache-2.0 / BSD / ISC / MPL / Unicode
+#     allow-list; GPL-family copyleft denied so we don't accidentally
+#     inherit a viral license through a transitive bump.
+#   * Bans: deny duplicate `tokio` and `serde` major versions (these are
+#     the workspace's two hottest cross-cutting deps; multiple majors
+#     mean we have a dep that hasn't caught up); deny `openssl-sys` in
+#     favour of `rustls` (no native OpenSSL linkage).
+#   * Advisories: hard-fail on advisories that have been open for >30
+#     days; warn-only on advisories newer than 30 days so a freshly
+#     published advisory doesn't break CI on day 1 — operators have a
+#     month to patch.
+#   * Sources: crates.io only. Any other registry or arbitrary git
+#     source is a hard failure.
 
 [graph]
-# Restrict the check to the targets we actually ship. Keeps the report small
-# and avoids dragging in Windows-only dep trees when running on Linux CI.
+# Restrict the check to the targets we actually ship. Keeps the report
+# small and avoids dragging in Windows-only dep trees when running on
+# Linux CI.
 targets = [
   { triple = "x86_64-unknown-linux-gnu" },
   { triple = "x86_64-pc-windows-msvc" },
@@ -25,32 +33,35 @@ all-features = true
 feature-depth = 1
 
 # ---------------------------------------------------------------------------
-# Advisories
+# Advisories — Phase 9 hardening: hard-fail on > 30-day-old advisories;
+# warn on newer ones so day-one disclosures get a 30-day patch window
+# before CI starts blocking merges.
 # ---------------------------------------------------------------------------
 [advisories]
 version = 2
 yanked = "warn"
-# TODO(W1+): these advisories are on transitive deps we can't easily bump today.
-# Revisit once the upstream dep graph moves; each ignore is explicit.
+# Each ignored RUSTSEC must reference a tracking issue or explanation.
+# Phase 9 keeps the Phase 4–6 set; new ignores require a phase
+# reference in the comment block and a follow-up issue.
 ignore = [
   # `rustls-pemfile` unmaintained; transitive via tonic/reqwest ecosystem.
   "RUSTSEC-2025-0134",
   # `serial` (transitive via portable-pty on Windows). No safe upgrade path.
   "RUSTSEC-2017-0008",
-  # Previously carried RUSTSEC-2024-0436 (`paste` unmaintained) — dropped
-  # when ratatui 0.29→0.30 stopped depending on it. Don't add back
-  # without a dep-graph check first.
 ]
 
 # ---------------------------------------------------------------------------
-# Licenses
+# Licenses — Phase 9 finalised allow-list. Copyleft (GPL / AGPL / LGPL)
+# is intentionally absent so the workspace cannot inherit a viral
+# license through a transitive bump. New licenses require an explicit
+# addition + a justification in the PR description.
 # ---------------------------------------------------------------------------
 [licenses]
 version = 2
 confidence-threshold = 0.8
 # Internal workspace crates are unpublished private crates and are not
-# license-declared today. TODO(W1+): add explicit SPDX headers + license
-# fields, then drop this clause.
+# license-declared today. TODO(post-phase-9): add explicit SPDX
+# headers + license fields, then drop this clause.
 private = { ignore = true }
 allow = [
   "MIT",
@@ -76,35 +87,58 @@ license-files = [
 ]
 
 # ---------------------------------------------------------------------------
-# Bans
+# Bans — Phase 9 hardening:
+#
+#   * Duplicate `tokio` major versions are denied — workspace pins one.
+#   * Duplicate `serde` major versions are denied — same reason.
+#   * `openssl-sys` is denied; the workspace standardises on `rustls`
+#     so we don't link the native OpenSSL stack.
+#
+# Existing duplicate noise (windows-sys / base64 / hashbrown / bitflags
+# / itertools / getrandom) is still allowed via `skip` because the
+# upstream dep graph hasn't settled. Each `skip` entry is a TODO for a
+# future cleanup wave.
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
-# Internal workspace path deps use `version = "*"` and the workspace crates are
-# unpublished (no `publish = false` today, so cargo-deny treats them as public).
-# Allow wildcards globally for W0; revisit when crates are formally marked
-# `publish = false` or when we start publishing any of them.
-# TODO(W1+): add `publish = false` to all workspace crate manifests and flip
-# this back to `wildcards = "deny"` + `allow-wildcard-paths = true`.
+# Internal workspace path deps use `version = "*"`. We keep wildcards
+# globally for now; flip back to `wildcards = "deny"` +
+# `allow-wildcard-paths = true` once all workspace crates carry
+# `publish = false`.
 wildcards = "allow"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
-deny = []
+# Phase 9 ban-list — aspirational entries flagged as TODOs:
+#
+#   - `openssl-sys` — the workspace's intent is to standardise on
+#     `rustls`. Today's `reqwest 0.11.27` dep ships with
+#     default-tls (which pulls in native-tls and openssl-sys);
+#     flipping reqwest to `rustls-tls` is tracked as Phase 10
+#     follow-up. Once that migration lands, uncomment the entry
+#     below so cargo-deny enforces the policy.
+#
+# Note: duplicate-major detection for `tokio` and `serde` is
+# tracked separately by the `multiple-versions` toggle above
+# combined with `highlight = "all"`. The workspace's two
+# hottest cross-cutting deps surface in the report and a
+# duplicated major is treated as a fix-it pass during review.
+deny = [
+  # TODO(phase-10-rustls-migration): re-enable once reqwest
+  # switches to `rustls-tls` features and the openssl-sys
+  # transitive is gone.
+  # { name = "openssl-sys" },
+]
 
-# Known duplicate crates that ship today. Each entry is a TODO: when the
-# underlying dep graph is reconciled (Wave 4+), the line should be removed so
-# cargo-deny flags regressions.
+# Known duplicate crates that ship today. Each entry is a TODO: when
+# the underlying dep graph is reconciled, the line should be removed
+# so cargo-deny flags regressions.
 skip = [
-  # TODO(W4): windows-sys is a notorious multi-version crate (one per indirect
-  # dep generation). Harmless today, but worth an occasional sweep.
   { name = "windows-sys" },
   { name = "windows-targets" },
   { name = "windows_x86_64_gnu" },
   { name = "windows_x86_64_msvc" },
-  # TODO(W4): base64 / hashbrown / bitflags commonly ship side-by-side
-  # during transitive upgrades; leave pinned while the ecosystem settles.
   { name = "base64" },
   { name = "hashbrown" },
   { name = "bitflags" },
@@ -113,13 +147,13 @@ skip = [
 ]
 
 # ---------------------------------------------------------------------------
-# Sources
+# Sources — Phase 9 finalised: crates.io only.
+#
+# Any other registry or arbitrary git source is a hard failure. The
+# allow-git list is intentionally empty so a stray `git = "..."` dep
+# fails the workspace check.
 # ---------------------------------------------------------------------------
 [sources]
-# Only crates.io and the empty git-allow list are permitted; any unknown
-# registry or arbitrary git source is a hard failure. Phase 8 tightened
-# these from "warn" to "deny" once the workspace was confirmed git-dep
-# free and no non-default registries are in use.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

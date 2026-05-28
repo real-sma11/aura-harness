@@ -1,0 +1,86 @@
+---
+source: crates/aura-fleet-daemon/tests/mode_resolution_priority.rs
+expression: cases
+---
+[
+  {
+    "case": "01_all_unset__fallback",
+    "cli": null,
+    "tui": null,
+    "sdk": null,
+    "daemon": null,
+    "resolved": "agent"
+  },
+  {
+    "case": "02_daemon_only_plan",
+    "cli": null,
+    "tui": null,
+    "sdk": null,
+    "daemon": "plan",
+    "resolved": "plan"
+  },
+  {
+    "case": "03_sdk_wins_over_daemon",
+    "cli": null,
+    "tui": null,
+    "sdk": "ask",
+    "daemon": "plan",
+    "resolved": "ask"
+  },
+  {
+    "case": "04_tui_wins_over_sdk_and_daemon",
+    "cli": null,
+    "tui": "debug",
+    "sdk": "ask",
+    "daemon": "plan",
+    "resolved": "debug"
+  },
+  {
+    "case": "05_cli_wins_over_all_others",
+    "cli": "plan",
+    "tui": "debug",
+    "sdk": "ask",
+    "daemon": "agent",
+    "resolved": "plan"
+  },
+  {
+    "case": "06_cli_only_agent",
+    "cli": "agent",
+    "tui": null,
+    "sdk": null,
+    "daemon": null,
+    "resolved": "agent"
+  },
+  {
+    "case": "07_tui_only_debug",
+    "cli": null,
+    "tui": "debug",
+    "sdk": null,
+    "daemon": null,
+    "resolved": "debug"
+  },
+  {
+    "case": "08_sdk_only_ask",
+    "cli": null,
+    "tui": null,
+    "sdk": "ask",
+    "daemon": null,
+    "resolved": "ask"
+  },
+  {
+    "case": "09_daemon_wins_when_higher_rungs_none",
+    "cli": null,
+    "tui": null,
+    "sdk": null,
+    "daemon": "debug",
+    "resolved": "debug"
+  },
+  {
+    "case": "10_cli_plan_overrides_daemon_ask",
+    "cli": "plan",
+    "tui": null,
+    "sdk": null,
+    "daemon": "ask",
+    "resolved": "plan"
+  }
+]

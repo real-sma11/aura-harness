@@ -1,5 +1,6 @@
 //! CLI argument definitions and parsing.
 
+use aura_surface_cli::ModeFlag;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -9,6 +10,14 @@ use std::path::PathBuf;
     about = "AURA CLI - Autonomous Universal Reasoning Architecture"
 )]
 pub struct Cli {
+    /// Phase 9: top-level `AgentMode` override. Highest rung of the
+    /// documented resolution priority chain (CLI > TUI slash > SDK
+    /// field > daemon default > `AgentMode::Agent` fallback). The
+    /// flag is resolved at session start by the fleet daemon's
+    /// `resolve_session_mode` helper.
+    #[arg(long = "mode", value_enum, global = true)]
+    pub mode: Option<ModeFlag>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

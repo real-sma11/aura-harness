@@ -1,3 +1,14 @@
+//! # aura-automaton
+//!
+//! Layer: surface
+//!
+//! Headless automaton host: built-in flows (`DevLoopAutomaton`,
+//! `SpecGenAutomaton`, `TaskRunAutomaton`), the `AutomatonRuntime`
+//! scheduler, the `TickContext` injection point, and the
+//! `AutomatonEvent` event surface. Phase 9 reclassifies this crate
+//! at the surface layer; the surface-layer relocation shell
+//! `aura-surface-automaton` re-exports it so layer-boundary tests
+//! see a single surface-layer entry while consumers migrate.
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]

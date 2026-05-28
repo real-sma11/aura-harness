@@ -44,6 +44,11 @@ pub const AURA_FLEET_EMBEDDED_DAEMON: &str = "AURA_FLEET_EMBEDDED_DAEMON";
 pub const AURA_FLEET_MAX_CONCURRENT_AGENTS: &str = "AURA_FLEET_MAX_CONCURRENT_AGENTS";
 pub const AURA_FLEET_SHUTDOWN_GRACE_MS: &str = "AURA_FLEET_SHUTDOWN_GRACE_MS";
 pub const AURA_FLEET_ORPHAN_ON_PARENT_DEATH: &str = "AURA_FLEET_ORPHAN_ON_PARENT_DEATH";
+/// Phase 9 default mode for the fleet daemon. Wire format is the
+/// snake-case [`aura_core_modes::AgentMode`] serde representation —
+/// `agent|plan|ask|debug`. Consumed by [`crate::fleet::FleetConfig`]
+/// as the daemon-default rung of the AgentMode resolution priority.
+pub const AURA_FLEET_DEFAULT_MODE: &str = "AURA_FLEET_DEFAULT_MODE";
 pub const AURA_SUBAGENT_MAX_DEPTH: &str = "AURA_SUBAGENT_MAX_DEPTH";
 pub const AURA_SUBAGENT_DEFAULT_MAX_TOKENS: &str = "AURA_SUBAGENT_DEFAULT_MAX_TOKENS";
 pub const AURA_SUBAGENT_DEFAULT_MAX_ITERATIONS: &str = "AURA_SUBAGENT_DEFAULT_MAX_ITERATIONS";
@@ -80,6 +85,7 @@ pub const ENV_VAR_NAMES: &[&str] = &[
     AURA_FLEET_MAX_CONCURRENT_AGENTS,
     AURA_FLEET_SHUTDOWN_GRACE_MS,
     AURA_FLEET_ORPHAN_ON_PARENT_DEATH,
+    AURA_FLEET_DEFAULT_MODE,
     AURA_SUBAGENT_MAX_DEPTH,
     AURA_SUBAGENT_DEFAULT_MAX_TOKENS,
     AURA_SUBAGENT_DEFAULT_MAX_ITERATIONS,

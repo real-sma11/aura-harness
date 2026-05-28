@@ -50,8 +50,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aura_config::PluginsConfig;
+use aura_config::{FleetConfig, PluginsConfig};
 use aura_context_skills::SkillRegistry;
+use aura_core_modes::AgentMode;
 use aura_fleet_dispatch::FleetDispatcher;
 use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
@@ -68,6 +69,53 @@ use tracing::info;
 pub use aura_fleet_dispatch::AgentJob;
 pub use aura_fleet_mailbox::{Mailbox, MailboxConfig, MailboxError, MailboxSender};
 pub use aura_plugin_core::PluginLoadError;
+
+/// Inputs to the documented Phase 9 [`AgentMode`] resolution
+/// priority. Bundled into a struct so child-agent inheritance can
+/// hand the same shape to [`resolve_session_mode`] when narrowing.
+///
+/// Priority (highest precedence first):
+///
+/// 1. `cli_flag` — `aura --mode <agent|plan|ask|debug>`
+/// 2. `tui_slash` — TUI `/mode <agent|plan|ask|debug>` slash
+///    command
+/// 3. `sdk_field` — `aura_surface_sdk::SessionConfig::mode`
+/// 4. `daemon_default` — `aura_config::FleetConfig::default_mode`
+/// 5. Fallback — [`AgentMode::Agent`]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentModeInputs {
+    /// CLI flag override (`aura --mode <name>`).
+    pub cli_flag: Option<AgentMode>,
+    /// TUI slash-command override (`/mode <name>`).
+    pub tui_slash: Option<AgentMode>,
+    /// SDK [`SessionConfig::mode`] field.
+    pub sdk_field: Option<AgentMode>,
+    /// Daemon-wide default
+    /// ([`FleetConfig::default_mode`]).
+    pub daemon_default: Option<AgentMode>,
+}
+
+/// Resolve the session [`AgentMode`] from the documented Phase 9
+/// priority chain.
+///
+/// The fallback is [`AgentMode::Agent`] when every input is
+/// `None`. See [`AgentModeInputs`] for the per-rung semantics.
+#[must_use]
+pub fn resolve_session_mode(inputs: AgentModeInputs) -> AgentMode {
+    inputs
+        .cli_flag
+        .or(inputs.tui_slash)
+        .or(inputs.sdk_field)
+        .or(inputs.daemon_default)
+        .unwrap_or(AgentMode::Agent)
+}
+
+/// Convenience: extract the daemon-default rung from a typed
+/// [`FleetConfig`].
+#[must_use]
+pub fn daemon_default_mode(fleet: &FleetConfig) -> AgentMode {
+    fleet.default_mode
+}
 
 /// Wiring config consumed at daemon construction time.
 #[derive(Debug, Clone, Default)]

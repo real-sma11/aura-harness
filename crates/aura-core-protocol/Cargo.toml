@@ -14,5 +14,11 @@ serde = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 
+# Phase 9: `aura-core-types` is held as a forward-compat dep
+# (the rich wire shapes referenced in lib.rs docs migrate here in
+# a follow-up phase; the types live in `aura-core-types` today).
+[package.metadata.cargo-machete]
+ignored = ["aura-core-types"]
+
 [lints]
 workspace = true

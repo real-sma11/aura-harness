@@ -1,5 +1,7 @@
 //! # aura-tools
 //!
+//! Layer: exec
+//!
 //! Tool executor and catalog for filesystem and command operations.
 //!
 //! This crate provides:
