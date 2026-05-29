@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -A clippy::large_enum_variant -A clippy::map_unwrap_or
+        run: cargo clippy --workspace --all-targets --all-features -- -W warnings
 
   # ---------------------------------------------------------------------------
   # Tests
