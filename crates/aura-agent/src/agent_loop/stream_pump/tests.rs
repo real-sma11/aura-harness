@@ -11,7 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use aura_reasoner::{
     ContentBlock, Message, ModelResponse, OutputItem, ProviderTrace, ResponseEvent,
-    ResponseEventStream, Role, StopReason, Usage,
+    ResponseEventStream, Role, StopReason, StreamPhase, Usage,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -208,6 +208,79 @@ async fn pump_stream_event_timeout_surfaces_typed_error() {
         outcome,
         StreamPumpOutcome::Error(AgentError::StreamTimeout { .. })
     ));
+}
+
+/// A stream that emits a keepalive (ping/delta) every `< stream_event_timeout`
+/// must NOT trip `StreamTimeout`, even when the total span before the
+/// first completed block far exceeds the boundary. This is the
+/// liveness contract: pings/deltas reset the per-event window so a
+/// long extended-thinking block stays alive.
+#[tokio::test(start_paused = true)]
+async fn pump_keepalive_resets_liveness_timeout() {
+    let executor = CountingExecutor::default();
+    let config = AgentLoopConfig {
+        stream_event_timeout: Duration::from_secs(5),
+        ..AgentLoopConfig::for_agent("claude-test-model")
+    };
+
+    // 5 gaps of 3s = 15s of "thinking" — 3x the 5s boundary — but no
+    // single inter-frame gap exceeds it, so the pump must complete.
+    let gap = Duration::from_secs(3);
+    let stream: ResponseEventStream = Box::pin(futures_util::stream::unfold(0usize, move |i| async move {
+        if i < 4 {
+            tokio::time::sleep(gap).await;
+            Some((
+                Ok::<_, aura_reasoner::StreamError>(ResponseEvent::Keepalive(StreamPhase::Thinking)),
+                i + 1,
+            ))
+        } else if i == 4 {
+            tokio::time::sleep(gap).await;
+            Some((
+                Ok(ResponseEvent::Completed {
+                    end_turn: Some(true),
+                    usage: Usage::new(1, 1),
+                }),
+                i + 1,
+            ))
+        } else {
+            None
+        }
+    }));
+
+    let mut state = super::super::LoopState::new_for_tests(&config, Vec::new());
+    let notify = Arc::new(Notify::new());
+    let notify_clone = Arc::clone(&notify);
+
+    let driver = tokio::spawn(async move {
+        let outcome = drive_stream(
+            test_ctx(&config, &executor),
+            stream,
+            &mut state,
+            "test-model",
+        )
+        .await;
+        notify_clone.notify_one();
+        outcome
+    });
+
+    // Advance the paused clock in 3s steps; each step releases one
+    // inter-frame sleep without ever letting a 5s timeout window
+    // elapse. Yield first so the driver re-arms its next
+    // `timeout(5s, stream.next())` before we advance.
+    for _ in 0..10 {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(3)).await;
+    }
+
+    let res = tokio::time::timeout(Duration::from_secs(600), notify.notified()).await;
+    assert!(res.is_ok(), "pump should complete, not hang/timeout");
+    let outcome = driver.await.expect("driver join");
+    assert!(
+        matches!(outcome, StreamPumpOutcome::Completed { .. }),
+        "keepalive-fed stream must complete, not trip StreamTimeout"
+    );
 }
 
 /// Confirm the pump uses true per-tool concurrency: when three

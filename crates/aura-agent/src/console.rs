@@ -32,6 +32,9 @@
 //! inline — that would inject ANSI escape bytes into the value
 //! string and confuse [`wrap_row`]'s column math.
 
+use std::time::Duration;
+
+use aura_reasoner::StreamPhase;
 use colored::Colorize;
 use tracing::info;
 
@@ -168,6 +171,86 @@ pub fn tools_block(
             len = len_str,
         ));
     }
+    out.push_str(&format!("{}", "└─".dimmed()));
+    info!(target: CONSOLE_TARGET, "{out}");
+}
+
+/// Human-readable label for a [`StreamPhase`] used in the live
+/// transcript trail.
+fn stream_phase_label(phase: StreamPhase) -> &'static str {
+    match phase {
+        StreamPhase::Connecting => "stream open",
+        StreamPhase::Thinking => "thinking",
+        StreamPhase::Text => "writing",
+        StreamPhase::ToolInput => "tool_input",
+        StreamPhase::Ping => "ping",
+    }
+}
+
+/// Emit a single continuation line marking a streaming phase
+/// transition (e.g. the model entering its extended-thinking block),
+/// stamped with the elapsed time since the request opened.
+///
+/// Rendered between the request block and the eventual response /
+/// tools block so a long, otherwise-silent turn shows a live trail of
+/// what the model is doing — and the `t+` clock makes a creeping
+/// stall visible before the per-event liveness timeout fires.
+pub fn stream_phase_line(phase: StreamPhase, elapsed: Duration) {
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let body = format!(
+        "{}   {} {:<12} (t+{})",
+        "│".dimmed(),
+        "⋯".bright_black(),
+        stream_phase_label(phase),
+        human_duration_ms(elapsed_ms),
+    );
+    info!(target: CONSOLE_TARGET, "{body}");
+}
+
+/// Inputs to [`stream_timeout_block`]. Captures the state of the
+/// stalled stream at the moment the per-event liveness timeout fired.
+pub struct StreamTimeoutView {
+    /// Configured `stream_event_timeout`, in milliseconds.
+    pub elapsed_ms: u64,
+    /// Last streaming phase observed before the stall, if any frame
+    /// arrived at all (`None` => the stream stalled before the first
+    /// liveness frame, i.e. a slow time-to-first-byte).
+    pub last_phase: Option<StreamPhase>,
+    /// Bytes of thinking content accumulated before the stall.
+    pub thinking_bytes: usize,
+    /// Bytes of assistant text accumulated before the stall.
+    pub text_bytes: usize,
+}
+
+/// Render a dedicated failure block when the streaming pump's
+/// per-event liveness timeout fires. Symmetric to
+/// [`anthropic_response_block`] but red — turns the previously-silent
+/// 90s gap into an actionable box naming the stalled phase and how
+/// much content had streamed before the stream went quiet.
+pub fn stream_timeout_block(view: &StreamTimeoutView) {
+    let mut out = String::new();
+    let header = "← stream_event_timeout".red().bold();
+    let tag = destination_tag("aura-network", None);
+    out.push_str(&format!("{} {header}  {tag}\n", "┌─".dimmed()));
+    out.push_str(&wrap_row(
+        "class",
+        &format!(
+            "{:<22} elapsed {:>7}",
+            "stream_event_timeout",
+            human_duration_ms(view.elapsed_ms)
+        ),
+    ));
+    let phase_label = view
+        .last_phase
+        .map_or("none (no content yet)", stream_phase_label);
+    out.push_str(&wrap_row(
+        "stalled",
+        &format!(
+            "last phase={phase_label} · {} thinking / {} text",
+            human_bytes(view.thinking_bytes),
+            human_bytes(view.text_bytes),
+        ),
+    ));
     out.push_str(&format!("{}", "└─".dimmed()));
     info!(target: CONSOLE_TARGET, "{out}");
 }
@@ -510,6 +593,35 @@ mod tests {
         let tag = destination_tag("aura-network", None);
         assert_eq!(tag, "[aura-network]");
         colored::control::unset_override();
+    }
+
+    #[test]
+    fn stream_phase_line_renders_each_phase() {
+        for phase in [
+            StreamPhase::Connecting,
+            StreamPhase::Thinking,
+            StreamPhase::Text,
+            StreamPhase::ToolInput,
+            StreamPhase::Ping,
+        ] {
+            stream_phase_line(phase, Duration::from_millis(2_300));
+        }
+    }
+
+    #[test]
+    fn stream_timeout_block_renders_with_and_without_phase() {
+        stream_timeout_block(&StreamTimeoutView {
+            elapsed_ms: 90_000,
+            last_phase: Some(StreamPhase::Thinking),
+            thinking_bytes: 7_480,
+            text_bytes: 0,
+        });
+        stream_timeout_block(&StreamTimeoutView {
+            elapsed_ms: 90_000,
+            last_phase: None,
+            thinking_bytes: 0,
+            text_bytes: 0,
+        });
     }
 
     #[test]

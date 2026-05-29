@@ -195,13 +195,18 @@ pub struct AgentLoopConfig {
     /// Layer E.3: per-event boundary timeout for the streaming
     /// sampling pump (Rule 6.2). Each `stream.try_next().await`
     /// is wrapped with `tokio::time::timeout(stream_event_timeout, …)`
-    /// so a silent stream surfaces as an
+    /// so a genuinely silent stream surfaces as an
     /// [`AgentError::StreamTimeout`](crate::AgentError::StreamTimeout)
-    /// instead of hanging the turn forever. Default `90s` —
-    /// comfortably above the typical inter-event gap (Anthropic
-    /// ping cadence is 10–15s) but below the parent
-    /// `stream_timeout` (`300s`) so the per-event timeout fires
-    /// first and the operator sees the more specific error.
+    /// instead of hanging the turn forever. This measures the gap
+    /// between *liveness frames*, not completed blocks: pings and
+    /// intra-block deltas surface as [`aura_reasoner::ResponseEvent::Keepalive`]
+    /// and reset the window, so a long extended-thinking block (which
+    /// streams thinking deltas but completes no top-level item for a
+    /// while) does NOT trip the timeout. Default `90s` — comfortably
+    /// above the typical inter-frame gap (Anthropic ping cadence is
+    /// 10–15s) but below the parent `stream_timeout` (`300s`) so the
+    /// per-event timeout fires first and the operator sees the more
+    /// specific error.
     pub stream_event_timeout: Duration,
     /// Layer E.3: per-tool execution timeout enforced inside the
     /// streaming pump's `spawn_tool_call` wrapper (Rule 6.2).

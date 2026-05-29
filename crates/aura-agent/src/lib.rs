@@ -174,10 +174,13 @@ pub enum AgentError {
     /// Layer E.3: raised by the streaming sampling pump when
     /// `tokio::time::timeout(config.stream_event_timeout, …)` elapses
     /// waiting for the next [`aura_reasoner::ResponseEvent`]
-    /// (Rule 6.2 boundary timeout). `elapsed_ms` carries the
-    /// configured boundary value so the surfacing surface (CLI,
-    /// dashboards) can attribute the failure without a config
-    /// roundtrip.
+    /// (Rule 6.2 boundary timeout). Because pings and intra-block
+    /// deltas surface as [`aura_reasoner::ResponseEvent::Keepalive`]
+    /// and reset the window, this fires only on a genuinely silent
+    /// stream (no frame at all for the full boundary) — not on a
+    /// slow-but-alive one. `elapsed_ms` carries the configured
+    /// boundary value so the surfacing surface (CLI, dashboards) can
+    /// attribute the failure without a config roundtrip.
     #[error("stream event timeout after {elapsed_ms}ms waiting for next response event")]
     StreamTimeout {
         /// Configured `stream_event_timeout` in milliseconds.

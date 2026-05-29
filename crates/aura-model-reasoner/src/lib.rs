@@ -53,7 +53,7 @@ pub use anthropic::{AnthropicConfig, AnthropicProvider, ENV_FALLBACK_MODEL};
 pub use error::ReasonerError;
 pub use response_stream::{
     response_stream_from_event_stream, response_stream_from_response, OutputItem, ResponseEvent,
-    ResponseEventStream, StreamError,
+    ResponseEventStream, StreamError, StreamPhase,
 };
 
 // ============================================================================

@@ -35,7 +35,8 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 
 use crate::types::{
-    ContentBlock, PartialToolUse, StopReason, StreamAccumulator, StreamEvent, Usage,
+    ContentBlock, PartialToolUse, StopReason, StreamAccumulator, StreamContentType, StreamEvent,
+    Usage,
 };
 use crate::{ModelResponse, StreamEventStream};
 
@@ -118,6 +119,28 @@ pub enum StreamError {
     },
 }
 
+/// Coarse classification of the raw streaming frame that produced a
+/// [`ResponseEvent::Keepalive`]. Lets a consumer log *what* the model
+/// is doing during a long turn (e.g. a multi-second extended-thinking
+/// block) without re-deriving it from the swallowed wire frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPhase {
+    /// Stream is open but no content block has started yet
+    /// (`message_start` / HTTP metadata / inter-block `message_delta`).
+    Connecting,
+    /// An extended-thinking block is streaming (`thinking` /
+    /// `signature` deltas, or a thinking `content_block_start`).
+    Thinking,
+    /// An assistant text block is streaming (`text` deltas or a text
+    /// `content_block_start`).
+    Text,
+    /// A `tool_use` block's input JSON is streaming (`input_json`
+    /// deltas or a tool_use `content_block_start`).
+    ToolInput,
+    /// A provider keepalive `ping` — pure liveness, no content phase.
+    Ping,
+}
+
 /// Provider-neutral high-level event emitted while the model is
 /// streaming. Mirrors codex's `ResponseEvent` enum.
 #[derive(Debug)]
@@ -126,6 +149,14 @@ pub enum ResponseEvent {
     /// driver dispatches based on the inner [`OutputItem`] variant
     /// (e.g. spawn a tool future on `ToolUse`).
     OutputItemDone(OutputItem),
+    /// A raw transport/provider frame (ping or intra-block delta)
+    /// arrived that did not complete a top-level item. Carries no
+    /// content — only a liveness signal plus the current
+    /// [`StreamPhase`] — so a consumer can reset a per-event timeout
+    /// (a healthy but slow stream is not a dead one) and surface the
+    /// streaming phase to operators. The agent-side pump treats this
+    /// as a no-op for accumulation/ordering purposes.
+    Keepalive(StreamPhase),
     /// Terminal event for this sampling request. `end_turn` is `Some(true)`
     /// when the model signalled it intends to stop, `Some(false)` when
     /// it explicitly signalled more work, and `None` when the provider
@@ -293,7 +324,43 @@ impl AdapterState {
                     }
                 }
             }
-            _ => {}
+            // Every other frame is an intra-block delta or a keepalive
+            // ping. These used to be silently swallowed by the unfold
+            // loop, which meant a consumer's per-event timeout only saw
+            // *completed* blocks and could not tell a slow-but-alive
+            // stream from a dead one. We now surface each as a
+            // phase-tagged [`ResponseEvent::Keepalive`] so the consumer
+            // can reset its liveness timer and log the streaming phase.
+            StreamEvent::Ping => {
+                self.pending
+                    .push_back(Ok(ResponseEvent::Keepalive(StreamPhase::Ping)));
+            }
+            StreamEvent::MessageStart { .. }
+            | StreamEvent::HttpMeta { .. }
+            | StreamEvent::MessageDelta { .. } => {
+                self.pending
+                    .push_back(Ok(ResponseEvent::Keepalive(StreamPhase::Connecting)));
+            }
+            StreamEvent::ContentBlockStart { content_type, .. } => {
+                let phase = match content_type {
+                    StreamContentType::Thinking => StreamPhase::Thinking,
+                    StreamContentType::Text => StreamPhase::Text,
+                    StreamContentType::ToolUse { .. } => StreamPhase::ToolInput,
+                };
+                self.pending.push_back(Ok(ResponseEvent::Keepalive(phase)));
+            }
+            StreamEvent::ThinkingDelta { .. } | StreamEvent::SignatureDelta { .. } => {
+                self.pending
+                    .push_back(Ok(ResponseEvent::Keepalive(StreamPhase::Thinking)));
+            }
+            StreamEvent::TextDelta { .. } => {
+                self.pending
+                    .push_back(Ok(ResponseEvent::Keepalive(StreamPhase::Text)));
+            }
+            StreamEvent::InputJsonDelta { .. } => {
+                self.pending
+                    .push_back(Ok(ResponseEvent::Keepalive(StreamPhase::ToolInput)));
+            }
         }
     }
 
@@ -508,22 +575,74 @@ mod tests {
         while let Some(event) = stream.next().await {
             collected.push(event.expect("test stream never yields Err"));
         }
-        assert_eq!(collected.len(), 3);
+        // Keepalives now interleave with completed items (one per
+        // swallowed delta / start / message_delta frame); filter them
+        // out to assert the completed-item backbone is unchanged.
+        let items: Vec<&ResponseEvent> = collected
+            .iter()
+            .filter(|e| !matches!(e, ResponseEvent::Keepalive(_)))
+            .collect();
+        assert_eq!(items.len(), 3);
         assert!(matches!(
-            &collected[0],
+            items[0],
             ResponseEvent::OutputItemDone(OutputItem::Message { text }) if text == "hello world"
         ));
         assert!(matches!(
-            &collected[1],
+            items[1],
             ResponseEvent::OutputItemDone(OutputItem::ToolUse { name, .. }) if name == "read_file"
         ));
         assert!(matches!(
-            &collected[2],
+            items[2],
             ResponseEvent::Completed {
                 end_turn: Some(false),
                 ..
             }
         ));
+        // The deltas/starts must surface as liveness signals so a
+        // consumer's per-event timeout sees a slow-but-alive stream.
+        assert!(
+            collected
+                .iter()
+                .any(|e| matches!(e, ResponseEvent::Keepalive(StreamPhase::Text))),
+            "text deltas must surface a Text keepalive"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_stream_from_event_stream_surfaces_phase_tagged_keepalives() {
+        use crate::types::StreamContentType;
+        let events: Vec<Result<StreamEvent, ReasonerError>> = vec![
+            Ok(StreamEvent::MessageStart {
+                message_id: "msg".into(),
+                model: "test".into(),
+                input_tokens: Some(1),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+            Ok(StreamEvent::Ping),
+            Ok(StreamEvent::ContentBlockStart {
+                index: 0,
+                content_type: StreamContentType::Thinking,
+            }),
+            Ok(StreamEvent::ThinkingDelta {
+                thinking: "let me think".into(),
+            }),
+            Ok(StreamEvent::ContentBlockStop { index: 0 }),
+            Ok(StreamEvent::MessageStop),
+        ];
+        let underlying: StreamEventStream = Box::pin(futures_util::stream::iter(events));
+        let mut stream = response_stream_from_event_stream(underlying);
+        let mut phases = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let Ok(ResponseEvent::Keepalive(phase)) = &event {
+                phases.push(*phase);
+            }
+        }
+        // message_start -> Connecting, ping -> Ping,
+        // content_block_start(thinking) + thinking delta -> Thinking.
+        assert!(phases.contains(&StreamPhase::Connecting));
+        assert!(phases.contains(&StreamPhase::Ping));
+        assert!(phases.contains(&StreamPhase::Thinking));
     }
 
     #[tokio::test]
@@ -577,7 +696,15 @@ mod tests {
         let underlying: StreamEventStream = Box::pin(futures_util::stream::iter(events));
         let mut stream = response_stream_from_event_stream(underlying);
 
-        match stream.next().await.expect("stream should emit abort") {
+        // Skip the liveness keepalives (message_start / content_block_start
+        // / input_json deltas) that now precede the terminal abort.
+        let terminal = loop {
+            let event = stream.next().await.expect("stream should emit abort");
+            if !matches!(event, Ok(ResponseEvent::Keepalive(_))) {
+                break event;
+            }
+        };
+        match terminal {
             Err(StreamError::StreamAbortedWithPartial {
                 reason,
                 partial_tool_use: Some(partial),

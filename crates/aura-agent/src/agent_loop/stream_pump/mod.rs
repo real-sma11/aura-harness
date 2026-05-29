@@ -50,8 +50,12 @@
 //!   partially-drained tool batch.
 //! - **Per-event timeout (Rule 6.2)**: each `stream.try_next()` call
 //!   is wrapped with `tokio::time::timeout(stream_event_timeout, …)`
-//!   so a silent stream surfaces as
-//!   [`crate::AgentError::StreamTimeout`] instead of hanging.
+//!   so a *genuinely* silent stream surfaces as
+//!   [`crate::AgentError::StreamTimeout`] instead of hanging. Pings
+//!   and intra-block deltas arrive as
+//!   [`aura_reasoner::ResponseEvent::Keepalive`] and reset the
+//!   window (and drive the phase-transition transcript lines), so a
+//!   slow-but-alive thinking block is not mistaken for a dead stream.
 //! - **Per-tool timeout (Rule 6.2)**: each spawned tool future is
 //!   wrapped with `tokio::time::timeout(per_tool_timeout, …)` and a
 //!   hung tool resolves to a synthetic

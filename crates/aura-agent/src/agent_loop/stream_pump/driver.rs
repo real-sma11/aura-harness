@@ -17,14 +17,15 @@
 //! the legacy buffered path until a follow-up wires a tap stream.
 
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use aura_reasoner::{OutputItem, ResponseEvent, ResponseEventStream, Usage};
+use aura_reasoner::{OutputItem, ResponseEvent, ResponseEventStream, StreamPhase, Usage};
 use futures_util::stream::FuturesOrdered;
 use futures_util::StreamExt;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::console;
 use crate::events::AgentLoopEvent;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
 use crate::AgentError;
@@ -79,6 +80,11 @@ pub(super) async fn drive_stream(
     let mut usage = Usage::default();
     let stream_event_timeout = config.stream_event_timeout;
     let per_tool_timeout = config.per_tool_timeout;
+    // Liveness/phase trail: `stream_started` stamps the `t+` clock on
+    // phase-transition lines, and `logged_phase` debounces the trail
+    // so only an actual phase change emits a line (not every delta).
+    let stream_started = Instant::now();
+    let mut logged_phase: Option<StreamPhase> = None;
 
     loop {
         let next_step =
@@ -112,12 +118,22 @@ pub(super) async fn drive_stream(
                 return cancelled_outcome(&snap, Vec::new());
             }
             StreamStep::TimedOut => {
-                return StreamPumpOutcome::Error(AgentError::StreamTimeout {
-                    elapsed_ms: stream_event_timeout
-                        .as_millis()
-                        .try_into()
-                        .unwrap_or(u64::MAX),
+                let elapsed_ms = stream_event_timeout
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                // Turn the previously-silent stall into an actionable
+                // box: which phase the stream died in and how much
+                // content had streamed before it went quiet.
+                let thinking_bytes = thinking_chunks.iter().map(|(t, _)| t.len()).sum();
+                let text_bytes = text_chunks.iter().map(String::len).sum();
+                console::stream_timeout_block(&console::StreamTimeoutView {
+                    elapsed_ms,
+                    last_phase: logged_phase,
+                    thinking_bytes,
+                    text_bytes,
                 });
+                return StreamPumpOutcome::Error(AgentError::StreamTimeout { elapsed_ms });
             }
             StreamStep::TransportErr(err) => {
                 return match err {
@@ -194,6 +210,20 @@ pub(super) async fn drive_stream(
                         },
                         other => StreamPumpOutcome::Error(AgentError::Stream(other)),
                     };
+                }
+                ResponseEvent::Keepalive(phase) => {
+                    // A ping or intra-block delta. Reaching this arm
+                    // already reset the per-event liveness timeout
+                    // (the stream yielded an item, so the loop
+                    // re-enters `next_stream_step` with a fresh
+                    // window). A genuine content-phase change also
+                    // emits one transcript line so a long turn shows
+                    // its progress. Pings are pure liveness and stay
+                    // off the transcript to keep it quiet.
+                    if phase != StreamPhase::Ping && logged_phase != Some(phase) {
+                        console::stream_phase_line(phase, stream_started.elapsed());
+                        logged_phase = Some(phase);
+                    }
                 }
             },
         }
