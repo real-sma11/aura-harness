@@ -460,6 +460,17 @@ pub(super) async fn build_kernel_with_config(
         }
     }
 
+    // Thread this session's resolved model into the tool context so
+    // cross-agent tools (`send_to_agent`, `delegate_task`) forward it
+    // to the target agent's turn. Cross-agent recipients usually have
+    // no server-side configured model, so without this the recipient's
+    // harness session opens with an empty model and the turn fails with
+    // "model name must not be empty". Blank model is left unset so the
+    // builder keeps the legacy null-model wire behavior.
+    if !session.model.trim().is_empty() {
+        resolver = resolver.with_caller_model_id(session.model.clone());
+    }
+
     let router = executor::build_executor_router(resolver);
 
     let config = KernelConfig {

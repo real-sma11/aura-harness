@@ -55,7 +55,24 @@ pub struct SendToAgentOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_user_id: Option<String>,
     pub delivered: bool,
+    /// Human-readable guidance surfaced to the calling LLM in the tool
+    /// result body. Set on a successful delivery to spell out the
+    /// async-reply contract so the model waits for the target's reply
+    /// to arrive on its own instead of trying to poll the target's
+    /// state. Elided (and `None`) on the permission-gate-only
+    /// [`SendToAgentTool::evaluate`] path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
+
+/// Guidance string stamped onto a successful [`SendToAgentOutcome`].
+/// Kept as a constant so the wording stays consistent across the tool
+/// body and is greppable from tests.
+pub(crate) const ASYNC_REPLY_NOTE: &str =
+    "Delivered. The target agent's reply will be delivered back to you automatically \
+     as a new message in this conversation once it finishes responding. Do NOT poll, \
+     and do NOT call get_agent_state to fetch the reply — simply end your turn. You \
+     will be re-invoked with the reply when it is ready, and can relay it then.";
 
 pub struct SendToAgentTool;
 
@@ -71,8 +88,13 @@ impl SendToAgentTool {
     pub fn definition() -> ToolDefinition {
         ToolDefinition::new(
             SEND_TO_AGENT_TOOL_NAME,
-            "Send a user-message-shaped payload to another agent within the \
-             caller's scope. Requires Capability::ControlAgent.",
+            "Send a message to another agent within the caller's scope. \
+             Requires Capability::ControlAgent. Delivery is asynchronous: \
+             the call returns once the message is delivered, and the target \
+             agent's reply is delivered back to you automatically as a new \
+             message in this conversation when it finishes. Do not poll the \
+             target or call get_agent_state to retrieve the reply — just end \
+             your turn; you will be re-invoked with the reply when it is ready.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -97,6 +119,7 @@ impl SendToAgentTool {
             parent_agent_id: caller_external_id(ctx),
             originating_user_id: ctx.originating_user_id.clone(),
             delivered: false,
+            note: None,
         })
     }
 }
@@ -172,10 +195,14 @@ impl Tool for SendToAgentTool {
                 ctx.originating_user_id.as_deref(),
                 &input.content,
                 input.attachments.clone(),
+                ctx.caller_model_id.as_deref(),
             )
             .await
         {
-            Ok(()) => outcome.delivered = true,
+            Ok(()) => {
+                outcome.delivered = true;
+                outcome.note = Some(ASYNC_REPLY_NOTE.to_string());
+            }
             Err(err) => {
                 return Ok(ToolResult::failure(
                     SEND_TO_AGENT_TOOL_NAME,
@@ -280,6 +307,7 @@ mod tests {
             _originating_user_id: Option<&str>,
             _content: &str,
             _attachments: Option<serde_json::Value>,
+            _model: Option<&str>,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -301,6 +329,7 @@ mod tests {
             _originating_user_id: Option<&str>,
             _task: &str,
             _context: Option<&serde_json::Value>,
+            _model: Option<&str>,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -418,6 +447,50 @@ mod tests {
             "successful send_to_agent must announce async reply delivery; got: {:?}",
             result.metadata
         );
+
+        // The model-facing body must also spell out the async-reply
+        // contract so the LLM waits for the reply to arrive on its own
+        // instead of offering to poll the target's state.
+        let outcome: SendToAgentOutcome = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            outcome.note.as_deref(),
+            Some(ASYNC_REPLY_NOTE),
+            "successful send_to_agent body must carry the async-reply note so the LLM \
+             does not try to poll for the reply; got: {outcome:?}"
+        );
+    }
+
+    /// The caller's resolved model id must be forwarded to the runtime
+    /// side-effect layer as `model`, so the target agent's turn runs on
+    /// a real model. Cross-agent recipients usually have no server-side
+    /// configured model, so a missing model leaves the recipient's
+    /// harness session empty and the turn fails with "model name must
+    /// not be empty".
+    #[tokio::test]
+    async fn send_to_agent_forwards_caller_model_id_to_hook() {
+        let caller = AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::ControlAgent],
+        };
+        let mut tctx = ctx(caller);
+        tctx.caller_model_id = Some("aura-claude-sonnet-4-6".into());
+        let hook = CapturingHook::new();
+        tctx.agent_control_hook = Some(hook.clone() as Arc<dyn crate::tool::AgentControlHook>);
+
+        let result = SendToAgentTool
+            .execute(
+                &tctx,
+                serde_json::json!({ "agent_id": "target-id", "content": "hi" }),
+            )
+            .await
+            .expect("execute");
+        assert!(result.ok);
+
+        assert_eq!(
+            hook.captured_model().as_deref(),
+            Some("aura-claude-sonnet-4-6"),
+            "send_to_agent must forward the caller's model so the target turn has a model"
+        );
     }
 
     /// Capturing hook that records the `parent_agent_id` value
@@ -429,16 +502,21 @@ mod tests {
     /// agent's REST URL.
     struct CapturingHook {
         captured_parent: std::sync::Mutex<Option<String>>,
+        captured_model: std::sync::Mutex<Option<String>>,
     }
 
     impl CapturingHook {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 captured_parent: std::sync::Mutex::new(None),
+                captured_model: std::sync::Mutex::new(None),
             })
         }
         fn captured(&self) -> Option<String> {
             self.captured_parent.lock().unwrap().clone()
+        }
+        fn captured_model(&self) -> Option<String> {
+            self.captured_model.lock().unwrap().clone()
         }
     }
 
@@ -451,8 +529,10 @@ mod tests {
             _originating_user_id: Option<&str>,
             _content: &str,
             _attachments: Option<serde_json::Value>,
+            model: Option<&str>,
         ) -> Result<(), String> {
             *self.captured_parent.lock().unwrap() = parent_agent_id.map(str::to_string);
+            *self.captured_model.lock().unwrap() = model.map(str::to_string);
             Ok(())
         }
         async fn lifecycle(
@@ -471,6 +551,7 @@ mod tests {
             _: Option<&str>,
             _: &str,
             _: Option<&serde_json::Value>,
+            _model: Option<&str>,
         ) -> Result<(), String> {
             Ok(())
         }

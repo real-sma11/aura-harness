@@ -180,6 +180,7 @@ impl AgentControlHook for AuraServerAgentHook {
         _originating_user_id: Option<&str>,
         content: &str,
         attachments: Option<Value>,
+        model: Option<&str>,
     ) -> Result<(), String> {
         let url = self.endpoint(&format!("/api/agents/{target_agent_id}/events/stream"));
         // `originating_agent_id` enables the server-side async callback
@@ -210,7 +211,15 @@ impl AgentControlHook for AuraServerAgentHook {
             .json(&json!({
                 "content": content,
                 "action": null,
-                "model": null,
+                // Forward the caller's model so the target agent's turn
+                // runs on a real model. Cross-agent recipients usually
+                // have no server-side configured model (the UI sends the
+                // model per-turn from client state), so a `null` here
+                // leaves the recipient's harness session with an empty
+                // model and the turn fails with "model name must not be
+                // empty". `effective_model(&agent, body.model)` on the
+                // server prefers this value when present.
+                "model": model,
                 "commands": null,
                 "project_id": null,
                 "attachments": attachments,
@@ -265,6 +274,7 @@ impl AgentControlHook for AuraServerAgentHook {
         _originating_user_id: Option<&str>,
         task: &str,
         context: Option<&Value>,
+        model: Option<&str>,
     ) -> Result<(), String> {
         let url = self.endpoint(&format!("/api/agents/{target_agent_id}/delegate_task"));
         let response = self
@@ -288,6 +298,7 @@ impl AgentControlHook for AuraServerAgentHook {
             None,
             &format!("Delegated task:\n\n{task}"),
             context.cloned(),
+            model,
         )
         .await
     }
@@ -538,6 +549,7 @@ mod tests {
             Some("user-root"),
             "hello",
             None,
+            Some("aura-claude-sonnet-4-6"),
         )
         .await
         .expect("deliver_message call");
@@ -560,6 +572,12 @@ mod tests {
             Some(false),
             "deliver_message must always join the target's existing chat session; got: {body}"
         );
+        assert_eq!(
+            body.get("model").and_then(Value::as_str),
+            Some("aura-claude-sonnet-4-6"),
+            "deliver_message must forward the caller's model so the target turn runs on a \
+             real model instead of failing with an empty model; got: {body}"
+        );
     }
 
     /// Companion to the above: when the caller agent id is unknown
@@ -574,7 +592,7 @@ mod tests {
         let base_url = spawn_capturing_chat_stream_mock(captured.clone()).await;
 
         let hook = AuraServerAgentHook::new(base_url, Some("test-jwt".into()));
-        hook.deliver_message("target-agent", None, None, "hello", None)
+        hook.deliver_message("target-agent", None, None, "hello", None, None)
             .await
             .expect("deliver_message call");
 
@@ -587,6 +605,11 @@ mod tests {
             body.get("from_agent_id").is_some_and(Value::is_null),
             "missing parent_agent_id must also null out from_agent_id so the \
              recipient's chat panel does not render a meaningless badge; got: {body}"
+        );
+        assert!(
+            body.get("model").is_some_and(Value::is_null),
+            "a missing caller model must serialize as a JSON null so the server \
+             falls back to the target agent's configured model; got: {body}"
         );
     }
 
@@ -614,6 +637,7 @@ mod tests {
             Some("caller-agent"),
             Some("user-root"),
             "hello",
+            None,
             None,
         )
         .await

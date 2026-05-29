@@ -90,6 +90,15 @@ pub struct ToolContext {
 #[async_trait]
 pub trait AgentControlHook: Send + Sync {
     /// Deliver a user-message-shaped payload to `target`.
+    ///
+    /// `model` is the **caller's** resolved model id (from
+    /// [`ToolContext::caller_model_id`]). It is forwarded so the
+    /// target's turn runs on a real model: cross-agent recipients
+    /// often have no server-side configured model (the UI sends the
+    /// model per-turn from client state), so omitting it leaves the
+    /// recipient's harness session with an empty model and the turn
+    /// fails with "model name must not be empty". `None` preserves the
+    /// legacy null-model wire value for callers without a known model.
     async fn deliver_message(
         &self,
         target_agent_id: &str,
@@ -97,6 +106,7 @@ pub trait AgentControlHook: Send + Sync {
         originating_user_id: Option<&str>,
         content: &str,
         attachments: Option<serde_json::Value>,
+        model: Option<&str>,
     ) -> Result<(), String>;
 
     /// Apply a lifecycle transition to `target`.
@@ -109,6 +119,9 @@ pub trait AgentControlHook: Send + Sync {
     ) -> Result<(), String>;
 
     /// Emit a Delegate-tagged task to `target`.
+    ///
+    /// `model` mirrors [`Self::deliver_message`]: the caller's resolved
+    /// model id so the delegated turn runs on a real model.
     async fn delegate_task(
         &self,
         target_agent_id: &str,
@@ -116,6 +129,7 @@ pub trait AgentControlHook: Send + Sync {
         originating_user_id: Option<&str>,
         task: &str,
         context: Option<&serde_json::Value>,
+        model: Option<&str>,
     ) -> Result<(), String>;
 }
 

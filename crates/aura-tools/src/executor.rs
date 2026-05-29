@@ -45,6 +45,12 @@ pub struct ToolExecutor {
     /// harness hash. See the field doc on `ToolContext` for the full
     /// rationale and the matching server-side wiring.
     caller_external_agent_id: Option<String>,
+    /// Caller's resolved model id, forwarded into
+    /// [`ToolContext::caller_model_id`] so cross-agent tools can ship
+    /// the caller's model to the target agent's turn (the recipient
+    /// usually has no server-side configured model). `None` leaves the
+    /// downstream null-model behavior unchanged.
+    caller_model_id: Option<String>,
 }
 
 impl ToolExecutor {
@@ -71,6 +77,7 @@ impl ToolExecutor {
             parent_chain: Vec::new(),
             originating_user_id: None,
             caller_external_agent_id: None,
+            caller_model_id: None,
         }
     }
 
@@ -164,6 +171,20 @@ impl ToolExecutor {
         self
     }
 
+    /// Set the caller's resolved model id. Forwarded into
+    /// [`ToolContext::caller_model_id`] so cross-agent tools
+    /// (`send_to_agent`, `delegate_task`) can ship the caller's model
+    /// to the target agent's turn. Blank/whitespace is treated as
+    /// unset so the downstream null-model wire value is preserved.
+    #[must_use]
+    pub fn with_caller_model_id(mut self, model_id: impl Into<String>) -> Self {
+        let value = model_id.into();
+        if !value.trim().is_empty() {
+            self.caller_model_id = Some(value);
+        }
+        self
+    }
+
     /// Create a tool executor with default config.
     ///
     /// **Phase 5 hardening note:** [`ToolConfig::default`] now yields a
@@ -227,6 +248,7 @@ impl ToolExecutor {
         let mut tool_ctx = ToolContext::new(sandbox, self.config.clone());
         tool_ctx.caller_agent_id = Some(ctx.agent_id);
         tool_ctx.caller_external_agent_id = self.caller_external_agent_id.clone();
+        tool_ctx.caller_model_id = self.caller_model_id.clone();
         tool_ctx.caller_permissions = self.caller_permissions.clone();
         tool_ctx.caller_tool_permissions = self.caller_tool_permissions.clone();
         tool_ctx.user_tool_defaults = self.user_tool_defaults.clone();

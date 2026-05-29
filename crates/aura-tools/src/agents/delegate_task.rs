@@ -119,6 +119,7 @@ impl Tool for DelegateTaskTool {
                 ctx.originating_user_id.as_deref(),
                 &input.task,
                 input.context.as_ref(),
+                ctx.caller_model_id.as_deref(),
             )
             .await
         {

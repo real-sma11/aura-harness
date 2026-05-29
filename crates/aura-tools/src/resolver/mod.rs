@@ -195,6 +195,17 @@ impl ToolResolver {
         self
     }
 
+    /// Attach the caller's resolved model id so cross-agent tools
+    /// (`send_to_agent`, `delegate_task`) forward it to the target
+    /// agent's turn. See [`ToolExecutor::with_caller_model_id`] for the
+    /// rationale (cross-agent recipients usually have no server-side
+    /// configured model).
+    #[must_use]
+    pub fn with_caller_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.inner = self.inner.with_caller_model_id(model_id);
+        self
+    }
+
     /// Visible tools for a profile (delegates to the catalog + config).
     #[must_use]
     pub fn visible_tools(&self, profile: ToolProfile) -> Vec<ToolDefinition> {
