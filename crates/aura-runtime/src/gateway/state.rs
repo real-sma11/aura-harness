@@ -87,6 +87,15 @@ pub struct RouterState {
     /// against the automaton-run path.
     pub(crate) pending_chat_runs:
         Arc<DashMap<String, std::sync::Mutex<Option<crate::gateway::session::Session>>>>,
+    /// `run_id` (UUID string) → live, reattachable chat run.
+    ///
+    /// Part C: each `POST /v1/run` (Chat) spawns a driver task that
+    /// owns the [`crate::gateway::session::Session`] and turn execution
+    /// independently of any WebSocket. `WS /stream/:run_id` becomes a
+    /// thin adapter that replays the run's history and continues live,
+    /// so a dropped server↔harness socket can be re-established without
+    /// killing the turn. Multiple attaches to the same run are allowed.
+    pub(crate) chat_runs: crate::gateway::session::chat_run::ChatRunRegistry,
 }
 
 /// Input bundle for [`RouterState::new`].
@@ -136,6 +145,7 @@ impl RouterState {
             router_url: cfg.router_url,
             ws_slots: Arc::new(Semaphore::new(ws::MAX_WS_CONNS_PER_NODE)),
             pending_chat_runs: Arc::new(DashMap::new()),
+            chat_runs: Arc::new(DashMap::new()),
         }
     }
 }
@@ -158,6 +168,7 @@ impl Clone for RouterState {
             router_url: self.router_url.clone(),
             ws_slots: self.ws_slots.clone(),
             pending_chat_runs: self.pending_chat_runs.clone(),
+            chat_runs: self.chat_runs.clone(),
         }
     }
 }

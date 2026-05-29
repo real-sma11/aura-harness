@@ -16,6 +16,7 @@
 //! - [`tests`] — unit tests extracted alongside the state split.
 
 mod chat;
+pub(crate) mod chat_run;
 pub(crate) mod cross_agent_hook;
 mod generation;
 mod helpers;
