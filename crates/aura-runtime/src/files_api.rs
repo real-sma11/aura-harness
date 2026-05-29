@@ -338,7 +338,7 @@ mod tests {
         fn count(entries: &[WalkedEntry]) -> usize {
             entries
                 .iter()
-                .map(|e| 1 + e.children.as_deref().map(count).unwrap_or(0))
+                .map(|e| 1 + e.children.as_deref().map_or(0, count))
                 .sum()
         }
         let n = count(&entries);
