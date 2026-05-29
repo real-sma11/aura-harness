@@ -18,6 +18,16 @@ use tokio::time::{timeout, Duration};
 
 const TOOL_APPROVAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How long a tool-approval prompt waits for a client response before
+/// the harness auto-denies (once). Part C decision (i): with the chat
+/// run decoupled from the WS, a prompt may be emitted while no client
+/// is attached. The prompt is queued into the run's replay history (so
+/// a reattaching client can respond), and the turn blocks here for this
+/// window. On timeout we auto-DENY (never auto-approve) with
+/// `remember = Once`, so the agent loop can proceed safely and a later
+/// reconnect is not bound by a stale forever/session decision.
+const TOOL_APPROVAL_NO_CLIENT_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Per-connection prompt registry keyed by `request_id`.
 #[derive(Debug)]
 pub(crate) struct ToolApprovalBroker {
@@ -99,7 +109,30 @@ impl ToolApprovalPrompter for ToolApprovalBroker {
             return Err(ToolApprovalError::DeliveryFailed);
         }
 
-        rx.await.map_err(|_| ToolApprovalError::Cancelled)
+        // Block for a long window so a client that is currently
+        // detached (dropped server↔harness socket) can reattach, replay
+        // the queued `ToolApprovalPrompt` from history, and respond.
+        // On timeout, auto-deny once rather than hanging the turn
+        // indefinitely or auto-approving.
+        match timeout(TOOL_APPROVAL_NO_CLIENT_TIMEOUT, rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err(ToolApprovalError::Cancelled),
+            Err(_) => {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&request_id);
+                tracing::warn!(
+                    request_id = %request_id,
+                    timeout_secs = TOOL_APPROVAL_NO_CLIENT_TIMEOUT.as_secs(),
+                    "Tool approval received no response within the window; auto-denying once"
+                );
+                Ok(ToolApprovalResponse {
+                    decision: ToolState::Deny,
+                    remember: ToolApprovalRemember::Once,
+                })
+            }
+        }
     }
 }
 
@@ -173,6 +206,44 @@ mod tests {
             .expect("prompt task joins")
             .expect("approval");
         assert_eq!(response.decision, ToolState::Allow);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prompt_auto_denies_when_no_response_within_window() {
+        // Part C decision (i): a prompt emitted while no client is
+        // attached blocks the turn for a long window (its frame is
+        // queued into the run's replay history for a reattaching
+        // client), then auto-DENIES once rather than hanging or
+        // auto-approving.
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+        let broker = Arc::new(ToolApprovalBroker::new(outbound_tx));
+        let broker_for_prompt = Arc::clone(&broker);
+        let prompt_task =
+            tokio::spawn(async move { broker_for_prompt.prompt(prompt("req-timeout")).await });
+
+        // The prompt is delivered to the outbound channel (history).
+        let delivered = outbound_rx.recv().await.expect("prompt delivered");
+        assert!(matches!(
+            delivered,
+            OutboundMessage::ToolApprovalPrompt(ref p) if p.request_id == "req-timeout"
+        ));
+
+        // No response is ever sent. The paused-time runtime fast-forwards
+        // past the no-client window; the broker resolves to an auto-deny.
+        let response = prompt_task
+            .await
+            .expect("prompt task joins")
+            .expect("auto-deny resolves to Ok");
+        assert_eq!(response.decision, ToolState::Deny);
+        assert!(matches!(response.remember, Remember::Once));
+        assert!(
+            broker
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "auto-deny clears the pending entry"
+        );
     }
 
     #[tokio::test]

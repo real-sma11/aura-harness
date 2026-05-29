@@ -26,7 +26,7 @@ mod state;
 mod tests;
 mod tool_approval;
 
-pub(crate) use chat::handle_chat_ws_connection;
+pub(crate) use chat_run::{handle_chat_ws_attach, spawn_chat_run};
 pub(crate) use helpers::{prepare_chat_session, ChatRequestError};
 pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;

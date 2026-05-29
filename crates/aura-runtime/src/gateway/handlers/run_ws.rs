@@ -4,8 +4,9 @@
 //! `SessionInit` first frame) and `/stream/automaton/:id` (event-only
 //! automaton stream) collapse into a single `/stream/:run_id` route.
 //! Disambiguation happens by run id: chat runs sit in
-//! [`super::RouterState::pending_chat_runs`]; automaton runs are
-//! tracked by the [`aura_engine::automaton::AutomatonBridge`].
+//! [`super::RouterState::chat_runs`] (reattachable driver tasks);
+//! automaton runs are tracked by the
+//! [`aura_engine::automaton::AutomatonBridge`].
 
 use super::super::*;
 use axum::response::Response;
@@ -65,37 +66,18 @@ pub(in crate::gateway) async fn run_ws_handler(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    let auth_token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(String::from);
-
-    // Phase A dispatch: chat runs land in `pending_chat_runs`,
-    // automaton runs are looked up via the bridge. Chat sessions
-    // take priority — the run-id allocator never collides because
-    // chat runs use a freshly minted UUID and automaton runs use
-    // their own (also UUID-shaped) ids; if a future regression let
-    // an overlap slip through, the chat branch takes the run.
-    if let Some(entry) = state.pending_chat_runs.remove(&run_id) {
-        let (_key, session_slot) = entry;
-        let session = match session_slot.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        let Some(session) = session else {
-            warn!(run_id = %run_id, "chat run slot already taken");
-            crate::inbound_console::ws_rejection_line(
-                "upgrade.run",
-                "already_attached",
-                Some(&format!("run_id={run_id}")),
-            );
-            return StatusCode::CONFLICT.into_response();
-        };
-        let ctx = crate::gateway::session::WsContext::from_state(&state, auth_token);
+    // Part C dispatch: chat runs live in `chat_runs` (a driver task
+    // owns the session); automaton runs are looked up via the bridge.
+    // Chat runs take priority — the run-id allocator never collides
+    // because chat runs use a freshly minted UUID and automaton runs
+    // use their own (also UUID-shaped) ids. Unlike the pre-Part-C
+    // one-shot path, attaching is non-destructive: multiple concurrent
+    // attaches to the same run are allowed, and a dropped socket can
+    // reattach (history replay + live) without killing the turn.
+    if let Some(handle) = state.chat_runs.get(&run_id).map(|entry| entry.value().clone()) {
         return ws
             .on_upgrade(move |socket| async move {
-                crate::gateway::session::handle_chat_ws_connection(socket, session, ctx).await;
+                crate::gateway::session::handle_chat_ws_attach(socket, handle, run_id).await;
                 drop(permit);
             })
             .into_response();

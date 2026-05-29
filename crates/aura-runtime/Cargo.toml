@@ -98,6 +98,10 @@ terminal_size = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
+# `test-util` enables tokio's paused-clock test helpers
+# (`#[tokio::test(start_paused = true)]`) used by the chat tool-approval
+# auto-deny-timeout test, without affecting the production build.
+tokio = { workspace = true, features = ["test-util"] }
 
 # Phase 9: `aura-context-skills` and `aura-fleet-daemon` are held
 # as direct deps so the runtime can reach into the

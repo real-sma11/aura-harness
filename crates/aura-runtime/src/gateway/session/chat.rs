@@ -1,11 +1,22 @@
-//! WebSocket connection handler and turn management.
+//! Chat run driver and turn management.
 //!
-//! Phase A note: the WS no longer accepts an `InboundMessage::SessionInit`
-//! first frame. Sessions are fully applied via `POST /v1/run` before
-//! the client attaches, so [`handle_chat_ws_connection`] receives an
-//! already-prepared [`Session`] and emits `SessionReady` as the first
-//! server-side frame.
+//! Part C: the chat turn loop is decoupled from any single WebSocket.
+//! [`run_chat_driver`] owns the [`Session`] and runs the turn loop in a
+//! background task spawned by `POST /v1/run` (see
+//! [`super::chat_run::spawn_chat_run`]). Inbound commands arrive over an
+//! mpsc fed by the WS adapter ([`super::chat_run::handle_chat_ws_attach`]);
+//! outbound frames are emitted into a replay-aware
+//! [`super::chat_run::ChatEventChannel`] so a dropped server↔harness
+//! socket can reattach (history replay + live) without killing the turn.
+//!
+//! Two behavior changes vs the pre-Part-C one-shot WS handler:
+//! - A WS close NEVER cancels the active turn; it only ends that attach.
+//!   Cancellation is explicit (`InboundMessage::Cancel`) or via run stop
+//!   (the driver's `shutdown` token).
+//! - WS framing/transport errors are handled per-attach by the adapter
+//!   and are not broadcast as `Error` frames to other attached clients.
 
+use super::chat_run::{ChatEventChannel, CHAT_RUN_IDLE_RETENTION};
 use super::generation::{self, GenerationTurn};
 use super::helpers;
 use super::{Session, ToolApprovalBroker, WsContext};
@@ -16,9 +27,8 @@ use aura_agent::{
     AgentLoop, AgentLoopEvent, AgentLoopResult, KernelModelGateway, KernelToolGateway,
 };
 use aura_reasoner::{ContentBlock, ImageSource, Message, Role};
-use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
-use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -39,132 +49,60 @@ struct AgentTurn {
     message_id: String,
 }
 
-/// Why the WebSocket loop should tear down. Discriminating these three
-/// matters because they imply very different operator actions: a
-/// `PeerClose` is normal client disconnect, a `TransportError` usually
-/// indicates a protocol-level failure (e.g. malformed WS frame, oversized
-/// frame past tungstenite's default cap, axum extractor error) that the
-/// operator needs to see in the log, and a `StreamEnded` means the
-/// inbound half hit EOF without a close frame (often a half-closed TCP
-/// from the peer).
-#[derive(Debug)]
-enum CloseReason {
-    PeerClose,
-    TransportError(String),
-    StreamEnded,
-}
-
-/// Classification of a raw WebSocket frame.
-enum WsAction {
-    Message(String),
-    Close(CloseReason),
-    Continue,
-}
-
-/// Classify a raw WebSocket receive result.
+/// Drive a chat run's full turn lifecycle, decoupled from any WS.
 ///
-/// Splits the three "we're done" cases (clean peer close, transport
-/// error, EOF) into distinct `CloseReason` variants so the loop can log
-/// each at the right level and emit a structured `OutboundMessage::Error`
-/// on transport failure. Folding all three into one variant (the prior
-/// shape of this function) caused a class of bugs where an oversized
-/// `SessionInit` exceeding a per-message cap produced a silent ~3ms
-/// open-then-close with no error on the wire.
-fn classify_ws_frame(msg_result: Option<Result<WsMessage, axum::Error>>) -> WsAction {
-    match msg_result {
-        Some(Ok(WsMessage::Text(text))) => WsAction::Message(text),
-        Some(Ok(WsMessage::Close(_))) => WsAction::Close(CloseReason::PeerClose),
-        Some(Err(err)) => WsAction::Close(CloseReason::TransportError(err.to_string())),
-        None => WsAction::Close(CloseReason::StreamEnded),
-        Some(Ok(_)) => WsAction::Continue,
-    }
-}
-
-/// Emit a single appropriately-levelled log line describing why the WS
-/// loop is tearing down. `phase` is a short tag like "idle",
-/// "active_agent_turn", or "active_generation_turn" so the operator can
-/// see at a glance what the connection was doing when it died.
+/// `session` is already populated by [`super::prepare_chat_session`].
+/// The driver attaches the approval broker (wired to the run's event
+/// channel), emits `SessionReady` into the replay history, then loops:
+/// it consumes [`InboundMessage`]s from `commands_rx` (fed by every WS
+/// adapter) and emits outbound frames into `outbound_tx` (which the
+/// forwarder fans out to history + live subscribers).
 ///
-/// Transport errors also surface as a `ws.framing transport_error`
-/// rejection line under the `aura::console` target so the visual
-/// transcript shows the silent open-then-close paths the
-/// [`classify_ws_frame`] doc-comment flags.
-fn log_ws_close_reason(session_id: &str, reason: &CloseReason, phase: &str) {
-    match reason {
-        CloseReason::PeerClose => {
-            debug!(%session_id, phase, "client sent close frame");
-        }
-        CloseReason::StreamEnded => {
-            debug!(%session_id, phase, "websocket inbound stream ended");
-        }
-        CloseReason::TransportError(err) => {
-            warn!(
-                %session_id,
-                phase,
-                error = %err,
-                "websocket transport error, tearing down connection"
-            );
-            crate::inbound_console::ws_rejection_line(
-                "framing",
-                "transport_error",
-                Some(&format!("phase={phase} session={session_id} {err}")),
-            );
-        }
-    }
-}
-
-/// Handle a chat WebSocket connection through its full lifecycle.
-///
-/// `session` is already populated by [`super::prepare_chat_session`] —
-/// the WS handler attaches the outbound channel + approval broker and
-/// emits `SessionReady` as the first server-side frame, then enters
-/// the turn loop.
-pub async fn handle_chat_ws_connection(socket: WebSocket, mut session: Session, ctx: WsContext) {
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(1024);
-
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = outbound_rx.recv().await {
-            match serde_json::to_string(&msg) {
-                Ok(json) => {
-                    let message_type = outbound_message_type(&json);
-                    if ws_tx.send(WsMessage::Text(json)).await.is_err() {
-                        warn!(
-                            %message_type,
-                            "WebSocket outbound send failed; client likely disconnected"
-                        );
-                        break;
-                    }
-                }
-                Err(e) => error!(error = %e, "Failed to serialize outbound message"),
-            }
-        }
-    });
-
+/// Lifecycle (plan Part C decisions ii/v): the run survives WS drops;
+/// it is reaped only when fully idle (no active turn) with zero
+/// attached clients for [`CHAT_RUN_IDLE_RETENTION`], or on explicit
+/// stop via `shutdown`.
+pub(super) async fn run_chat_driver(
+    mut session: Session,
+    ctx: WsContext,
+    events: Arc<ChatEventChannel>,
+    outbound_tx: mpsc::Sender<OutboundMessage>,
+    mut commands_rx: mpsc::Receiver<InboundMessage>,
+    attach_count: Arc<AtomicUsize>,
+    shutdown: CancellationToken,
+) {
     session.tool_approval_broker = Some(Arc::new(ToolApprovalBroker::new(outbound_tx.clone())));
-    info!(session_id = %session.session_id, "Chat WebSocket connection opened");
+    info!(session_id = %session.session_id, "Chat run driver started");
 
-    // Phase A: the WS no longer accepts an `InboundMessage::SessionInit`
-    // first frame. The session is already applied; bootstrap the
-    // kernel-side state (SessionStart transaction + capability install
-    // record + scheduler identity registration) and emit `SessionReady`
-    // before entering the turn loop.
+    // Bootstrap kernel-side state (SessionStart transaction + capability
+    // install record + scheduler identity registration) and emit
+    // `SessionReady` into the event channel so every (re)attaching
+    // client replays it before live traffic.
     helpers::emit_session_ready(&mut session, &outbound_tx, &ctx).await;
 
     let mut active_turn: Option<ActiveTurn> = None;
 
     loop {
         if let Some(ref mut turn) = active_turn {
-            let action = run_active_turn_select(&mut ws_rx, turn, &mut session, &outbound_tx).await;
+            let action =
+                drive_active_turn(&mut commands_rx, turn, &mut session, &outbound_tx, &shutdown)
+                    .await;
             match action {
-                TurnAction::TurnFinished => {
-                    active_turn = None;
-                }
+                TurnAction::TurnFinished => active_turn = None,
                 TurnAction::Close => break,
                 TurnAction::Continue => {}
             }
         } else {
-            match run_idle_select(&mut ws_rx, &mut session, &outbound_tx, &ctx).await {
+            match drive_idle(
+                &mut commands_rx,
+                &mut session,
+                &outbound_tx,
+                &ctx,
+                &attach_count,
+                &shutdown,
+            )
+            .await
+            {
                 IdleAction::StartTurn(turn) => active_turn = Some(turn),
                 IdleAction::Close => break,
                 IdleAction::Continue => {}
@@ -172,21 +110,17 @@ pub async fn handle_chat_ws_connection(socket: WebSocket, mut session: Session, 
         }
     }
 
-    info!(session_id = %session.session_id, "WebSocket connection closed");
+    // Teardown: cancel any in-flight turn so its background task stops
+    // promptly, then mark the channel done so a late attach replays
+    // history without waiting on a live receiver that will never fire.
+    match active_turn {
+        Some(ActiveTurn::Agent(agent)) => agent.cancel_token.cancel(),
+        Some(ActiveTurn::Generation(gen)) => gen.cancel_token.cancel(),
+        None => {}
+    }
+    events.mark_done();
+    info!(session_id = %session.session_id, "Chat run driver stopped");
     drop(outbound_tx);
-    let _ = send_task.await;
-}
-
-fn outbound_message_type(json: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(|ty| ty.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 enum TurnAction {
@@ -195,48 +129,43 @@ enum TurnAction {
     Continue,
 }
 
-async fn run_active_turn_select(
-    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+/// Advance an active turn: react to one inbound command, the turn's
+/// own completion, or an explicit shutdown.
+///
+/// Crucially, a closed command channel (`recv()` → `None`, i.e. every
+/// WS adapter dropped and the run is being torn down) does NOT cancel
+/// the turn here; the only cancellation paths are an explicit
+/// `InboundMessage::Cancel` or `shutdown`.
+async fn drive_active_turn(
+    commands_rx: &mut mpsc::Receiver<InboundMessage>,
     turn: &mut ActiveTurn,
     session: &mut Session,
     outbound_tx: &mpsc::Sender<OutboundMessage>,
+    shutdown: &CancellationToken,
 ) -> TurnAction {
     match turn {
         ActiveTurn::Agent(agent) => {
             tokio::select! {
                 biased;
-                msg_result = ws_rx.next() => {
-                    match classify_ws_frame(msg_result) {
-                        WsAction::Message(raw) => {
-                            handle_msg_during_turn(&raw, &agent.cancel_token, session, outbound_tx);
+                () = shutdown.cancelled() => {
+                    info!(session_id = %session.session_id, "Chat run stopped during agent turn; cancelling turn");
+                    agent.cancel_token.cancel();
+                    TurnAction::Close
+                }
+                cmd = commands_rx.recv() => {
+                    match cmd {
+                        Some(msg) => {
+                            handle_msg_during_turn(msg, &agent.cancel_token, session, outbound_tx);
                             TurnAction::Continue
                         }
-                        WsAction::Close(reason) => {
-                            log_ws_close_reason(&session.session_id, &reason, "active_agent_turn");
-                            if let CloseReason::TransportError(err) = &reason {
-                                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                                    code: "ws_transport_error".into(),
-                                    message: format!("WebSocket transport error during agent turn: {err}"),
-                                    recoverable: false,
-                                    support_id: None,
-                                }));
-                            }
-                            agent.cancel_token.cancel();
-                            TurnAction::Close
-                        }
-                        WsAction::Continue => TurnAction::Continue,
+                        // Command channel fully closed: registry entry
+                        // removed AND every attach gone. Close the run
+                        // (post-loop teardown cancels the turn).
+                        None => TurnAction::Close,
                     }
                 }
                 join_result = &mut agent.join_handle => {
-                    let message_id = agent.message_id.clone();
-                    if let Err(e) = (&mut agent.stream_forward_handle).await {
-                        error!(
-                            session_id = %session.session_id,
-                            error = %e,
-                            "Stream forward task failed"
-                        );
-                    }
-                    helpers::finalize_turn(session, join_result, &message_id, outbound_tx).await;
+                    complete_agent_turn(join_result, agent, session, outbound_tx).await;
                     TurnAction::TurnFinished
                 }
             }
@@ -244,44 +173,22 @@ async fn run_active_turn_select(
         ActiveTurn::Generation(gen) => {
             tokio::select! {
                 biased;
-                msg_result = ws_rx.next() => {
-                    match classify_ws_frame(msg_result) {
-                        WsAction::Message(raw) => {
-                            handle_msg_during_turn(&raw, &gen.cancel_token, session, outbound_tx);
+                () = shutdown.cancelled() => {
+                    info!(session_id = %session.session_id, "Chat run stopped during generation; cancelling turn");
+                    gen.cancel_token.cancel();
+                    TurnAction::Close
+                }
+                cmd = commands_rx.recv() => {
+                    match cmd {
+                        Some(msg) => {
+                            handle_msg_during_turn(msg, &gen.cancel_token, session, outbound_tx);
                             TurnAction::Continue
                         }
-                        WsAction::Close(reason) => {
-                            log_ws_close_reason(&session.session_id, &reason, "active_generation_turn");
-                            if let CloseReason::TransportError(err) = &reason {
-                                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                                    code: "ws_transport_error".into(),
-                                    message: format!("WebSocket transport error during generation: {err}"),
-                                    recoverable: false,
-                                    support_id: None,
-                                }));
-                            }
-                            gen.cancel_token.cancel();
-                            TurnAction::Close
-                        }
-                        WsAction::Continue => TurnAction::Continue,
+                        None => TurnAction::Close,
                     }
                 }
                 join_result = &mut gen.join_handle => {
-                    match join_result {
-                        Ok(()) => {
-                            info!(
-                                session_id = %session.session_id,
-                                "Generation turn task finished"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                session_id = %session.session_id,
-                                error = %e,
-                                "Generation turn task failed"
-                            );
-                        }
-                    }
+                    log_generation_join(join_result, session);
                     TurnAction::TurnFinished
                 }
             }
@@ -289,18 +196,48 @@ async fn run_active_turn_select(
     }
 }
 
+/// Await the agent turn's stream-forward task and finalize the turn
+/// (emit `AssistantMessageEnd`, persist usage / messages).
+async fn complete_agent_turn(
+    join_result: Result<anyhow::Result<AgentLoopResult>, tokio::task::JoinError>,
+    agent: &mut AgentTurn,
+    session: &mut Session,
+    outbound_tx: &mpsc::Sender<OutboundMessage>,
+) {
+    let message_id = agent.message_id.clone();
+    if let Err(e) = (&mut agent.stream_forward_handle).await {
+        error!(
+            session_id = %session.session_id,
+            error = %e,
+            "Stream forward task failed"
+        );
+    }
+    helpers::finalize_turn(session, join_result, &message_id, outbound_tx).await;
+}
+
+fn log_generation_join(join_result: Result<(), tokio::task::JoinError>, session: &Session) {
+    match join_result {
+        Ok(()) => info!(session_id = %session.session_id, "Generation turn task finished"),
+        Err(e) => error!(
+            session_id = %session.session_id,
+            error = %e,
+            "Generation turn task failed"
+        ),
+    }
+}
+
 fn handle_msg_during_turn(
-    raw: &str,
+    msg: InboundMessage,
     cancel_token: &CancellationToken,
     session: &Session,
     outbound_tx: &mpsc::Sender<OutboundMessage>,
 ) {
-    match serde_json::from_str::<InboundMessage>(raw) {
-        Ok(InboundMessage::Cancel) => {
+    match msg {
+        InboundMessage::Cancel => {
             info!(session_id = %session.session_id, "Cancelling active turn");
             cancel_token.cancel();
         }
-        Ok(InboundMessage::ToolApprovalResponse(resp)) => {
+        InboundMessage::ToolApprovalResponse(resp) => {
             if let Some(ref broker) = session.tool_approval_broker {
                 if let Err(e) = broker.respond(resp) {
                     crate::inbound_console::ws_rejection_line(
@@ -317,7 +254,7 @@ fn handle_msg_during_turn(
                 }
             }
         }
-        Ok(_) => {
+        _ => {
             crate::inbound_console::ws_rejection_line(
                 "framing",
                 "turn_in_progress",
@@ -326,19 +263,6 @@ fn handle_msg_during_turn(
             let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
                 code: "turn_in_progress".into(),
                 message: "A turn is currently in progress; send cancel first".into(),
-                recoverable: true,
-                support_id: None,
-            }));
-        }
-        Err(e) => {
-            crate::inbound_console::ws_rejection_line(
-                "framing",
-                "parse_error",
-                Some(&format!("session={} {e}", session.session_id)),
-            );
-            let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                code: "parse_error".into(),
-                message: format!("Invalid message: {e}"),
                 recoverable: true,
                 support_id: None,
             }));
@@ -352,44 +276,63 @@ enum IdleAction {
     Continue,
 }
 
-async fn run_idle_select(
-    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+/// Wait (idle) for the next inbound command, an explicit shutdown, or
+/// the idle-retention deadline.
+///
+/// When the run sits idle with no command for [`CHAT_RUN_IDLE_RETENTION`],
+/// it is reaped only if no client is currently attached (`attach_count
+/// == 0`); otherwise the wait re-arms so an attached-but-quiet client
+/// keeps the run alive (plan Part C decision ii).
+async fn drive_idle(
+    commands_rx: &mut mpsc::Receiver<InboundMessage>,
     session: &mut Session,
     outbound_tx: &mpsc::Sender<OutboundMessage>,
     ctx: &WsContext,
+    attach_count: &Arc<AtomicUsize>,
+    shutdown: &CancellationToken,
 ) -> IdleAction {
-    match classify_ws_frame(ws_rx.next().await) {
-        WsAction::Message(raw) => dispatch_idle_message(&raw, session, outbound_tx, ctx).await,
-        WsAction::Close(reason) => {
-            log_ws_close_reason(&session.session_id, &reason, "idle");
-            if let CloseReason::TransportError(err) = &reason {
-                let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                    code: "ws_transport_error".into(),
-                    message: format!("WebSocket transport error during idle: {err}"),
-                    recoverable: false,
-                    support_id: None,
-                }));
-            }
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {
+            info!(session_id = %session.session_id, "Chat run stopped while idle");
             IdleAction::Close
         }
-        WsAction::Continue => IdleAction::Continue,
+        result = tokio::time::timeout(CHAT_RUN_IDLE_RETENTION, commands_rx.recv()) => {
+            match result {
+                Ok(Some(msg)) => dispatch_idle_message(msg, session, outbound_tx, ctx).await,
+                // Command channel closed (registry entry removed and all
+                // attaches gone): nothing can drive this run further.
+                Ok(None) => IdleAction::Close,
+                Err(_elapsed) => {
+                    if attach_count.load(Ordering::Acquire) == 0 {
+                        info!(
+                            session_id = %session.session_id,
+                            "Chat run idle with no attached clients past retention; reaping"
+                        );
+                        IdleAction::Close
+                    } else {
+                        IdleAction::Continue
+                    }
+                }
+            }
+        }
     }
 }
 
 async fn dispatch_idle_message(
-    raw: &str,
+    msg: InboundMessage,
     session: &mut Session,
     outbound_tx: &mpsc::Sender<OutboundMessage>,
     ctx: &WsContext,
 ) -> IdleAction {
-    match serde_json::from_str::<InboundMessage>(raw) {
-        Ok(InboundMessage::UserMessage(msg)) => {
+    match msg {
+        InboundMessage::UserMessage(msg) => {
             match start_turn(session, msg, outbound_tx, ctx).await {
                 Some(turn) => IdleAction::StartTurn(ActiveTurn::Agent(turn)),
                 None => IdleAction::Continue,
             }
         }
-        Ok(InboundMessage::GenerationRequest(req)) => {
+        InboundMessage::GenerationRequest(req) => {
             info!(
                 session_id = %session.session_id,
                 mode = %req.mode,
@@ -423,11 +366,11 @@ async fn dispatch_idle_message(
                 }
             }
         }
-        Ok(InboundMessage::Cancel) => {
+        InboundMessage::Cancel => {
             debug!(session_id = %session.session_id, "Cancel received but no turn is active");
             IdleAction::Continue
         }
-        Ok(InboundMessage::ApprovalResponse(resp)) => {
+        InboundMessage::ApprovalResponse(resp) => {
             debug!(
                 session_id = %session.session_id,
                 tool_use_id = %resp.tool_use_id,
@@ -436,7 +379,7 @@ async fn dispatch_idle_message(
             );
             IdleAction::Continue
         }
-        Ok(InboundMessage::ToolApprovalResponse(resp)) => {
+        InboundMessage::ToolApprovalResponse(resp) => {
             if let Some(ref broker) = session.tool_approval_broker {
                 if let Err(e) = broker.respond(resp) {
                     crate::inbound_console::ws_rejection_line(
@@ -452,20 +395,6 @@ async fn dispatch_idle_message(
                     }));
                 }
             }
-            IdleAction::Continue
-        }
-        Err(e) => {
-            crate::inbound_console::ws_rejection_line(
-                "framing",
-                "parse_error",
-                Some(&format!("session={} {e}", session.session_id)),
-            );
-            let _ = outbound_tx.try_send(OutboundMessage::Error(ErrorMsg {
-                code: "parse_error".into(),
-                message: format!("Invalid message: {e}"),
-                recoverable: true,
-                support_id: None,
-            }));
             IdleAction::Continue
         }
     }

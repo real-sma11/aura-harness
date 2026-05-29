@@ -29,7 +29,7 @@
 #[allow(unused_imports)]
 use crate::config::NodeConfig;
 #[allow(unused_imports)]
-use crate::gateway::session::{handle_chat_ws_connection, WsContext};
+use crate::gateway::session::WsContext;
 #[allow(unused_imports)]
 use crate::terminal;
 #[allow(unused_imports)]

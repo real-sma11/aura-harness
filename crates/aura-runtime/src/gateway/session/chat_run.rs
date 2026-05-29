@@ -33,7 +33,8 @@ use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::OutboundMessage;
+use super::{Session, WsContext};
+use crate::protocol::{InboundMessage, OutboundMessage};
 
 /// Live broadcast ring capacity. A slow attached client that lags past
 /// this many buffered messages observes `RecvError::Lagged`; the WS
@@ -188,6 +189,173 @@ impl Drop for AttachGuard {
     }
 }
 
+/// Spawn a [`super::chat::run_chat_driver`] task that owns `session`
+/// and its turn execution, register it under `run_id`, and return the
+/// shared [`ChatRunHandle`]. The driver runs independently of any
+/// WebSocket; it removes itself from the registry when it stops.
+pub(crate) fn spawn_chat_run(
+    session: Session,
+    ctx: WsContext,
+    run_id: String,
+    registry: ChatRunRegistry,
+) -> Arc<ChatRunHandle> {
+    let events = ChatEventChannel::new();
+    let outbound_tx = spawn_event_forwarder(events.clone());
+    let (commands_tx, commands_rx) = mpsc::channel::<InboundMessage>(256);
+    let attach_count = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+
+    let handle = Arc::new(ChatRunHandle {
+        commands: commands_tx,
+        events: events.clone(),
+        attach_count: attach_count.clone(),
+        shutdown: shutdown.clone(),
+    });
+    registry.insert(run_id.clone(), handle.clone());
+
+    let registry_for_task = registry.clone();
+    tokio::spawn(async move {
+        super::chat::run_chat_driver(
+            session,
+            ctx,
+            events,
+            outbound_tx,
+            commands_rx,
+            attach_count,
+            shutdown,
+        )
+        .await;
+        // Driver stopped: drop the registry entry so no new attach finds
+        // a dead run. Clients that already subscribed keep their (now
+        // `done`) channel until they drop.
+        registry_for_task.remove(&run_id);
+    });
+
+    handle
+}
+
+/// Thin WS adapter for a chat run: replay the run's history, then
+/// stream live events, while forwarding inbound frames to the driver's
+/// command channel. Multiple concurrent attaches to the same run are
+/// allowed. A WS close ends only this attach — it never cancels the
+/// turn (plan Part C).
+pub(crate) async fn handle_chat_ws_attach(
+    socket: axum::extract::ws::WebSocket,
+    handle: Arc<ChatRunHandle>,
+    run_id: String,
+) {
+    use futures_util::StreamExt;
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    // Track this attach for the driver's idle-reaper.
+    let _attach = AttachGuard::new(handle.attach_count.clone());
+    let ChatEventSubscription {
+        history,
+        mut live,
+        already_done,
+    } = handle.events.subscribe();
+
+    tracing::info!(
+        run_id = %run_id,
+        history_len = history.len(),
+        already_done,
+        "Chat run WS attached"
+    );
+
+    // Reader task: forward inbound frames to the driver. On WS close it
+    // signals `attach_closed` (so the writer stops) but does NOT cancel
+    // the turn.
+    let attach_closed = CancellationToken::new();
+    let attach_closed_reader = attach_closed.clone();
+    let commands = handle.commands.clone();
+    let read_run_id = run_id.clone();
+    let reader = tokio::spawn(async move {
+        use axum::extract::ws::Message as WsMessage;
+        while let Some(frame) = ws_rx.next().await {
+            match frame {
+                Ok(WsMessage::Text(text)) => {
+                    match serde_json::from_str::<InboundMessage>(&text) {
+                        Ok(inbound) => {
+                            if commands.send(inbound).await.is_err() {
+                                // Driver gone; nothing left to forward.
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            crate::inbound_console::ws_rejection_line(
+                                "framing",
+                                "parse_error",
+                                Some(&format!("run_id={read_run_id} {e}")),
+                            );
+                        }
+                    }
+                }
+                Ok(WsMessage::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        attach_closed_reader.cancel();
+    });
+
+    // Writer: replay history first (exactly the messages an early
+    // attach would have seen), then live until the WS closes or the run
+    // terminates.
+    let mut closed = false;
+    for msg in history {
+        if send_outbound_frame(&mut ws_tx, &msg).await.is_err() {
+            closed = true;
+            break;
+        }
+    }
+
+    if !closed && !already_done {
+        loop {
+            tokio::select! {
+                biased;
+                () = attach_closed.cancelled() => break,
+                recv = live.recv() => match recv {
+                    Ok(msg) => {
+                        if send_outbound_frame(&mut ws_tx, &msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warn = OutboundMessage::Progress(crate::protocol::ProgressMsg {
+                            stage: "lagged".into(),
+                            tool_name: None,
+                            elapsed_ms: None,
+                            message: Some(format!("dropped {n} messages (client too slow)")),
+                        });
+                        let _ = send_outbound_frame(&mut ws_tx, &warn).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            }
+        }
+    }
+
+    reader.abort();
+    tracing::info!(run_id = %run_id, "Chat run WS attach ended");
+}
+
+/// Serialize and send one outbound message over the WS sink. Returns
+/// `Err(())` only when the socket itself failed (so the writer should
+/// stop); a serialization failure is logged and skipped.
+async fn send_outbound_frame<S>(sink: &mut S, msg: &OutboundMessage) -> Result<(), ()>
+where
+    S: futures_util::Sink<axum::extract::ws::Message> + Unpin,
+{
+    use axum::extract::ws::Message as WsMessage;
+    use futures_util::SinkExt;
+    match serde_json::to_string(msg) {
+        Ok(json) => sink.send(WsMessage::Text(json)).await.map_err(|_| ()),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to serialize outbound chat message");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +468,208 @@ mod tests {
             assert_eq!(count.load(Ordering::Acquire), 1);
         }
         assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    /// Two concurrent subscribers (i.e. a live attach plus a reattach)
+    /// both replay the full history and both then receive live events —
+    /// the channel-level guarantee behind multi-attach (no 409) and
+    /// reattach (history replay + live).
+    #[tokio::test]
+    async fn two_subscribers_both_replay_and_receive_live() {
+        let ch = ChatEventChannel::new();
+        ch.push(text("session_ready"));
+
+        let mut first = ch.subscribe();
+        // A second attach to the same run is non-destructive: it also
+        // replays the existing history.
+        let mut second = ch.subscribe();
+        assert_eq!(first.history.len(), 1);
+        assert_eq!(second.history.len(), 1);
+
+        ch.push(text("live"));
+        for sub in [&mut first, &mut second] {
+            match sub.live.recv().await.expect("live event delivered") {
+                OutboundMessage::TextDelta(d) => assert_eq!(d.text, "live"),
+                other => panic!("unexpected live event: {other:?}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod driver_tests {
+    use super::*;
+    use crate::gateway::session::{prepare_chat_session, WsContext};
+    use crate::protocol::{InboundMessage, OutboundMessage, UserMessage};
+    use aura_engine::scheduler::Scheduler;
+    use aura_protocol::{
+        AgentCapabilities, AgentIdentity, AgentPermissionsWire, ModelSelection, RuntimeRequest,
+        RuntimeRequestType, WorkspaceLocation,
+    };
+    use aura_reasoner::{MockProvider, ModelProvider};
+    use aura_store::RocksStore;
+    use aura_tools::{ToolCatalog, ToolConfig};
+
+    fn driver_ctx() -> WsContext {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let db_dir = tempfile::tempdir().expect("temp db");
+        let store = Arc::new(RocksStore::open(db_dir.path(), false).expect("open rocks store"));
+        let provider: Arc<dyn ModelProvider + Send + Sync> =
+            Arc::new(MockProvider::simple_response("ok"));
+        let workspace_base = workspace.path().to_path_buf();
+        let catalog = Arc::new(ToolCatalog::default());
+        let scheduler = Arc::new(Scheduler::new(
+            store.clone(),
+            provider.clone(),
+            Vec::new(),
+            catalog.executor_builtin_tools(),
+            workspace_base.clone(),
+            None,
+        ));
+        std::mem::forget(workspace);
+        std::mem::forget(db_dir);
+
+        WsContext {
+            workspace_base,
+            provider,
+            store,
+            scheduler,
+            tool_config: ToolConfig::default(),
+            auth_token: None,
+            catalog,
+            domain_api: None,
+            automaton_controller: None,
+            project_base: None,
+            memory_manager: None,
+            skill_manager: None,
+            router_url: None,
+            aura_os_server_url: None,
+        }
+    }
+
+    fn chat_request(workspace: String) -> RuntimeRequest {
+        RuntimeRequest {
+            r#type: RuntimeRequestType::Chat {
+                conversation_messages: Vec::new(),
+            },
+            agent_identity: AgentIdentity::default(),
+            model: ModelSelection::default(),
+            workspace: WorkspaceLocation {
+                workspace: Some(workspace),
+                project_path: None,
+                git_repo_url: None,
+                git_branch: None,
+            },
+            project: None,
+            agent_permissions: AgentPermissionsWire::default(),
+            tool_permissions: None,
+            agent_capabilities: AgentCapabilities::default(),
+            auth_jwt: None,
+            user_id: "user-test".to_string(),
+        }
+    }
+
+    /// Poll the channel's replay history until `pred` matches one of its
+    /// messages or the deadline elapses.
+    async fn wait_for_history(
+        events: &Arc<ChatEventChannel>,
+        pred: impl Fn(&OutboundMessage) -> bool,
+        label: &str,
+    ) {
+        for _ in 0..600 {
+            if events.subscribe().history.iter().any(&pred) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {label}");
+    }
+
+    /// End-to-end (no model network): a run spawned via `spawn_chat_run`
+    /// executes a turn, emits frames into its replay channel, survives
+    /// across turns, and a fresh attach (reattach) replays the full
+    /// history including the completed turn's `AssistantMessageEnd`.
+    #[tokio::test]
+    async fn driver_runs_turn_and_completed_history_is_reattachable() {
+        let ctx = driver_ctx();
+        let ws_path = ctx.workspace_base.join("drv");
+        std::fs::create_dir_all(&ws_path).expect("workspace dir");
+        let session = prepare_chat_session(chat_request(ws_path.display().to_string()), &ctx)
+            .await
+            .expect("prepare chat session");
+
+        let registry: ChatRunRegistry = Arc::new(DashMap::new());
+        let handle = spawn_chat_run(session, ctx, "run-1".to_string(), registry.clone());
+
+        // Simulate one live WS attach so the idle-reaper never fires
+        // mid-test (and to exercise attach-count keeping the run alive).
+        let _attach = AttachGuard::new(handle.attach_count.clone());
+
+        // First attach observes SessionReady.
+        wait_for_history(
+            &handle.events,
+            |m| matches!(m, OutboundMessage::SessionReady(_)),
+            "SessionReady",
+        )
+        .await;
+
+        // Drive a turn.
+        handle
+            .commands
+            .send(InboundMessage::UserMessage(UserMessage {
+                content: "hi".into(),
+                tool_hints: None,
+                attachments: None,
+            }))
+            .await
+            .expect("send user message");
+
+        wait_for_history(
+            &handle.events,
+            |m| matches!(m, OutboundMessage::AssistantMessageEnd(_)),
+            "AssistantMessageEnd",
+        )
+        .await;
+
+        // Reattach: a brand-new subscribe replays the whole session,
+        // including the now-completed turn. This is the core
+        // reattachability guarantee — a dropped+reconnected socket
+        // backfills the turn it missed.
+        let reattach = handle.events.subscribe();
+        assert!(
+            reattach
+                .history
+                .iter()
+                .any(|m| matches!(m, OutboundMessage::SessionReady(_))),
+            "reattach replays SessionReady"
+        );
+        assert!(
+            reattach
+                .history
+                .iter()
+                .any(|m| matches!(m, OutboundMessage::AssistantMessageEnd(_))),
+            "reattach replays the completed turn's AssistantMessageEnd"
+        );
+
+        // The run persists across turns (one run_id per session
+        // lifetime): it is still registered and can run another turn.
+        assert!(registry.contains_key("run-1"), "run stays registered");
+
+        // Explicit stop tears the run down and deregisters it.
+        handle.shutdown.cancel();
+        for _ in 0..200 {
+            if !registry.contains_key("run-1") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !registry.contains_key("run-1"),
+            "explicit stop deregisters the run"
+        );
+        assert!(
+            handle.events.subscribe().already_done,
+            "stopped run marks its channel done"
+        );
     }
 }

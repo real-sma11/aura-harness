@@ -6,10 +6,11 @@
 //! `AutomatonStartRequest` shape with a single handler that consumes
 //! [`aura_protocol::RuntimeRequest`] and dispatches to the right
 //! engine surface based on the run kind. Chat runs are prepared
-//! synchronously and stashed in [`super::RouterState::pending_chat_runs`]
-//! so the follow-up `WS /stream/:run_id` finds an already-applied
-//! [`crate::gateway::session::Session`]. DevLoop / TaskRun runs are handed to
-//! the automaton bridge and exposed via the same `/stream/:run_id`
+//! synchronously and handed to a driver task registered in
+//! [`super::RouterState::chat_runs`] (Part C), so the follow-up
+//! `WS /stream/:run_id` attaches non-destructively (history replay +
+//! live) and survives socket drops. DevLoop / TaskRun runs are handed
+//! to the automaton bridge and exposed via the same `/stream/:run_id`
 //! route in event-only mode.
 
 use super::super::*;
@@ -71,9 +72,11 @@ async fn start_chat_run(
             })?;
 
     let run_id = Uuid::new_v4().to_string();
-    state
-        .pending_chat_runs
-        .insert(run_id.clone(), std::sync::Mutex::new(Some(session)));
+    // Part C: spawn a driver task that owns the session and turn
+    // execution, registered under `run_id`. The follow-up
+    // `WS /stream/:run_id` attaches non-destructively (history replay +
+    // live) and a dropped socket can reattach without killing the turn.
+    crate::gateway::session::spawn_chat_run(session, ctx, run_id.clone(), state.chat_runs.clone());
 
     let event_stream_url = format!("/stream/{run_id}");
     Ok((
@@ -288,17 +291,16 @@ fn run_start_error_response(e: String) -> (StatusCode, Json<serde_json::Value>) 
 
 /// `GET /v1/run/:run_id/status` — fetch the status of a running run.
 ///
-/// Chat runs that have been prepared but not yet attached return
-/// `{"status": "pending_attach"}`. Active chat runs return
+/// Live chat runs (a registered driver task) return
 /// `{"status": "chat_active"}`. Automaton runs delegate to the
 /// existing bridge status.
 pub(in crate::gateway) async fn run_status_handler(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if state.pending_chat_runs.contains_key(&run_id) {
+    if state.chat_runs.contains_key(&run_id) {
         return Ok(Json(
-            serde_json::json!({"run_id": run_id, "status": "pending_attach", "kind": "chat"}),
+            serde_json::json!({"run_id": run_id, "status": "chat_active", "kind": "chat"}),
         ));
     }
     let bridge = automaton_bridge(&state)?;
@@ -342,14 +344,17 @@ pub(in crate::gateway) async fn run_pause_handler(
 
 /// `POST /v1/run/:run_id/stop` — stop a run.
 ///
-/// For chat runs awaiting attachment, removes the pending entry so the
-/// matching `WS /stream/:run_id` 404s instead of attaching to a zombie
-/// session. Automaton runs delegate to the bridge.
+/// For chat runs, removes the registry entry and signals the driver's
+/// `shutdown` token so the run tears down (cancelling any active turn).
+/// Automaton runs delegate to the bridge.
 pub(in crate::gateway) async fn run_stop_handler(
     State(state): State<RouterState>,
     Path(run_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    if state.pending_chat_runs.remove(&run_id).is_some() {
+    if let Some((_, handle)) = state.chat_runs.remove(&run_id) {
+        // Signal the driver to tear down (cancelling any active turn);
+        // the entry is already removed so no late attach finds it.
+        handle.shutdown.cancel();
         return Ok(Json(
             serde_json::json!({"ok": true, "run_id": run_id, "status": "stopped"}),
         ));
