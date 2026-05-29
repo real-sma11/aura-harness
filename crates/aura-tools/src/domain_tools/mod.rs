@@ -190,9 +190,7 @@ impl DomainToolExecutor {
             "update_spec_section" => {
                 specs::update_spec_section(self.api.as_ref(), project_id, &input).await
             }
-            "append_to_spec" => {
-                specs::append_to_spec(self.api.as_ref(), project_id, &input).await
-            }
+            "append_to_spec" => specs::append_to_spec(self.api.as_ref(), project_id, &input).await,
             "delete_spec" => specs::delete_spec(self.api.as_ref(), project_id, &input).await,
 
             // Tasks

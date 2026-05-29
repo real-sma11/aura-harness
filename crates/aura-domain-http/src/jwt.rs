@@ -79,7 +79,13 @@ impl DomainApi for JwtDomainApi {
         jwt: Option<&str>,
     ) -> anyhow::Result<SpecDescriptor> {
         self.inner
-            .update_spec_section(spec_id, section_heading, new_body, if_match, self.jwt_or(jwt))
+            .update_spec_section(
+                spec_id,
+                section_heading,
+                new_body,
+                if_match,
+                self.jwt_or(jwt),
+            )
             .await
     }
     async fn append_to_spec(

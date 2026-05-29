@@ -16,8 +16,6 @@ test-support = []
 
 [dependencies]
 aura-core = { path = "../aura-core" }
-aura-core-modes = { path = "../aura-core-modes" }
-aura-core-permissions = { path = "../aura-core-permissions" }
 aura-protocol = { path = "../aura-protocol" }
 aura-store = { path = "../aura-store" }
 aura-tools = { path = "../aura-tools" }

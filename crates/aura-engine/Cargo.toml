@@ -8,8 +8,6 @@ license.workspace = true
 
 [dependencies]
 aura-core = { path = "../aura-core" }
-aura-core-modes = { path = "../aura-core-modes" }
-aura-core-permissions = { path = "../aura-core-permissions" }
 aura-protocol = { path = "../aura-protocol" }
 aura-store = { path = "../aura-store" }
 aura-tools = { path = "../aura-tools" }
@@ -26,10 +24,8 @@ aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 # into `aura-domain-http` alongside the HTTP impl. The automaton
 # bridge imports `JwtDomainApi` from there.
 aura-domain-http = { path = "../aura-domain-http" }
-chrono = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
@@ -37,8 +33,6 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
-uuid = { workspace = true }
-futures-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

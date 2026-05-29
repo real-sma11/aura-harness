@@ -74,7 +74,11 @@ pub(in crate::gateway) async fn run_ws_handler(
     // one-shot path, attaching is non-destructive: multiple concurrent
     // attaches to the same run are allowed, and a dropped socket can
     // reattach (history replay + live) without killing the turn.
-    if let Some(handle) = state.chat_runs.get(&run_id).map(|entry| entry.value().clone()) {
+    if let Some(handle) = state
+        .chat_runs
+        .get(&run_id)
+        .map(|entry| entry.value().clone())
+    {
         return ws
             .on_upgrade(move |socket| async move {
                 crate::gateway::session::handle_chat_ws_attach(socket, handle, run_id).await;

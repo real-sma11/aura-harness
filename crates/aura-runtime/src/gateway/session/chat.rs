@@ -84,9 +84,14 @@ pub(super) async fn run_chat_driver(
 
     loop {
         if let Some(ref mut turn) = active_turn {
-            let action =
-                drive_active_turn(&mut commands_rx, turn, &mut session, &outbound_tx, &shutdown)
-                    .await;
+            let action = drive_active_turn(
+                &mut commands_rx,
+                turn,
+                &mut session,
+                &outbound_tx,
+                &shutdown,
+            )
+            .await;
             match action {
                 TurnAction::TurnFinished => active_turn = None,
                 TurnAction::Close => break,

@@ -226,26 +226,29 @@ async fn pump_keepalive_resets_liveness_timeout() {
     // 5 gaps of 3s = 15s of "thinking" — 3x the 5s boundary — but no
     // single inter-frame gap exceeds it, so the pump must complete.
     let gap = Duration::from_secs(3);
-    let stream: ResponseEventStream = Box::pin(futures_util::stream::unfold(0usize, move |i| async move {
-        if i < 4 {
-            tokio::time::sleep(gap).await;
-            Some((
-                Ok::<_, aura_reasoner::StreamError>(ResponseEvent::Keepalive(StreamPhase::Thinking)),
-                i + 1,
-            ))
-        } else if i == 4 {
-            tokio::time::sleep(gap).await;
-            Some((
-                Ok(ResponseEvent::Completed {
-                    end_turn: Some(true),
-                    usage: Usage::new(1, 1),
-                }),
-                i + 1,
-            ))
-        } else {
-            None
-        }
-    }));
+    let stream: ResponseEventStream =
+        Box::pin(futures_util::stream::unfold(0usize, move |i| async move {
+            if i < 4 {
+                tokio::time::sleep(gap).await;
+                Some((
+                    Ok::<_, aura_reasoner::StreamError>(ResponseEvent::Keepalive(
+                        StreamPhase::Thinking,
+                    )),
+                    i + 1,
+                ))
+            } else if i == 4 {
+                tokio::time::sleep(gap).await;
+                Some((
+                    Ok(ResponseEvent::Completed {
+                        end_turn: Some(true),
+                        usage: Usage::new(1, 1),
+                    }),
+                    i + 1,
+                ))
+            } else {
+                None
+            }
+        }));
 
     let mut state = super::super::LoopState::new_for_tests(&config, Vec::new());
     let notify = Arc::new(Notify::new());

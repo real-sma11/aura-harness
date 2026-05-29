@@ -270,7 +270,10 @@ impl DomainApi for HttpDomainApi {
         jwt: Option<&str>,
     ) -> anyhow::Result<SpecDescriptor> {
         let jwt = Self::require_jwt(jwt)?;
-        let url = format!("{}/api/specs/{spec_id}/section", self.specs_tasks_base_url());
+        let url = format!(
+            "{}/api/specs/{spec_id}/section",
+            self.specs_tasks_base_url()
+        );
         let body = serde_json::json!({
             "sectionHeading": section_heading,
             "newBody": new_body,

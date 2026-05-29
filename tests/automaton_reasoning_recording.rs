@@ -58,6 +58,7 @@ impl DomainApi for DummyDomain {
             content: content.into(),
             order,
             parent_id: None,
+            content_hash: None,
         })
     }
     async fn update_spec(
@@ -65,6 +66,7 @@ impl DomainApi for DummyDomain {
         _spec_id: &str,
         _title: Option<&str>,
         _content: Option<&str>,
+        _if_match: Option<&str>,
         _jwt: Option<&str>,
     ) -> anyhow::Result<SpecDescriptor> {
         anyhow::bail!("not used")

@@ -70,7 +70,8 @@ impl DomainApi for KernelDomainGateway {
                 "content_bytes": content.map(str::len),
                 "if_match_set": if_match.is_some(),
             }),
-            self.inner.update_spec(spec_id, title, content, if_match, jwt)
+            self.inner
+                .update_spec(spec_id, title, content, if_match, jwt)
         )
     }
 
