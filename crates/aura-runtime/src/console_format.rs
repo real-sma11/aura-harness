@@ -183,10 +183,13 @@ impl tracing::field::Visit for MessageVisitor {
             // alternate form so multi-line messages keep their layout.
             let formatted = format!("{value:?}");
             // strip leading/trailing quote if the debug wrapped a string
-            let trimmed = formatted
+            let trimmed = match formatted
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
-                .map_or(formatted, |s| s.replace("\\n", "\n").replace("\\\"", "\""));
+            {
+                Some(s) => s.replace("\\n", "\n").replace("\\\"", "\""),
+                None => formatted,
+            };
             self.message = trimmed;
         }
     }
