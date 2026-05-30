@@ -70,6 +70,11 @@ pub struct Session {
     pub(crate) max_tokens: u32,
     /// Sampling temperature.
     pub(crate) temperature: Option<f32>,
+    /// User-selected reasoning-effort tier forwarded from the chat
+    /// model picker via `ModelSelection::reasoning_effort`. When set it
+    /// hard-pins the agent loop's thinking effort (see
+    /// `AgentLoopConfig::user_thinking_effort`).
+    pub(crate) user_thinking_effort: Option<aura_reasoner::ThinkingEffort>,
     /// Maximum agentic steps per turn.
     pub(crate) max_turns: u32,
     /// Installed tools registered for this session.
@@ -153,6 +158,7 @@ impl Session {
             provider_override: None,
             max_tokens: 16384,
             temperature: None,
+            user_thinking_effort: None,
             max_turns: aura_core::MAX_TURNS,
             installed_tools: Vec::new(),
             installed_integrations: Vec::new(),
@@ -249,6 +255,11 @@ impl Session {
         }
         if let Some(temperature) = model.temperature {
             self.temperature = Some(temperature);
+        }
+        if let Some(ref effort) = model.reasoning_effort {
+            // Unknown / empty strings leave the field `None` so the
+            // agent loop falls back to its internal effort heuristic.
+            self.user_thinking_effort = aura_reasoner::ThinkingEffort::from_wire(effort);
         }
         if let Some(max_turns) = model.max_turns {
             self.max_turns = max_turns;
@@ -450,6 +461,9 @@ impl Session {
             stream_timeout: agent_loop_stream_timeout(),
             auth_token: self.auth_token.clone(),
             upstream_provider_family: None,
+            // Chat picker's thinking-level selection hard-pins effort
+            // for the whole turn; `None` keeps the internal taper.
+            user_thinking_effort: self.user_thinking_effort,
             aura_project_id: self.project_id.clone(),
             aura_agent_id: self.aura_agent_id.clone(),
             aura_session_id: self.aura_session_id.clone(),

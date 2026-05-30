@@ -89,6 +89,24 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
                     }
                 },
             }),
+            ThinkingEffort::XHigh => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => {
+                        Some((request.max_tokens.get() * 3 / 4).clamp(16000, 24000))
+                    }
+                },
+            }),
+            ThinkingEffort::Max => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => {
+                        Some(request.max_tokens.get().clamp(24000, 32000))
+                    }
+                },
+            }),
         };
     }
 
@@ -131,14 +149,20 @@ pub(super) fn resolve_output_config(
         return None;
     }
     // Phase 2: only force `output_config.effort = "high"` when the
-    // caller explicitly opted into [`ThinkingEffort::High`], or when the
-    // legacy auto-enable path fired (`thinking_effort: None`). Low /
-    // Medium / Off opt-in callers must NOT inherit the forced-high
-    // effort — that's exactly the override that amplifies the doom
-    // loop's read iterations.
+    // caller explicitly opted into [`ThinkingEffort::High`] (or the
+    // higher user tiers XHigh / Max), or when the legacy auto-enable
+    // path fired (`thinking_effort: None`). Low / Medium / Off opt-in
+    // callers must NOT inherit the forced-high effort — that's exactly
+    // the override that amplifies the doom loop's read iterations.
+    // Adaptive mode currently exposes only `"high"` as a discrete
+    // effort, so XHigh / Max fold into it until the API offers finer
+    // tiers.
     match request.thinking_effort {
         Some(ThinkingEffort::Off | ThinkingEffort::Low | ThinkingEffort::Medium) => None,
-        Some(ThinkingEffort::High) | None => Some(ApiOutputConfig {
+        Some(
+            ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max,
+        )
+        | None => Some(ApiOutputConfig {
             effort: "high".to_string(),
         }),
     }

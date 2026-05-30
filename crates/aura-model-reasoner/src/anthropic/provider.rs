@@ -1024,6 +1024,8 @@ fn format_thinking_label(
         Some(ThinkingEffort::Low) => parts.push("low".to_string()),
         Some(ThinkingEffort::Medium) => parts.push("medium".to_string()),
         Some(ThinkingEffort::High) => parts.push("high".to_string()),
+        Some(ThinkingEffort::XHigh) => parts.push("xhigh".to_string()),
+        Some(ThinkingEffort::Max) => parts.push("max".to_string()),
         // `Off` cannot reach this branch (would produce no thinking
         // config); `None` means the legacy max_tokens-coupled path
         // fired and there's no caller-level label to surface.

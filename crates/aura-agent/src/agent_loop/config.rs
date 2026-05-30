@@ -172,6 +172,14 @@ pub struct AgentLoopConfig {
     /// mode) or starves Adaptive thinking of meaningful budget. The
     /// flag now only feeds `LoopState::compute_thinking_effort`.
     pub disable_thinking_iteration_0: bool,
+    /// User-selected reasoning-effort tier from the chat model picker's
+    /// thinking-level flyout, forwarded by aura-os via
+    /// `ModelSelection::reasoning_effort`. When `Some(_)`,
+    /// [`LoopState::build_request`] hard-pins this effort on every
+    /// iteration, overriding the internal `compute_thinking_effort`
+    /// taper so the user's explicit choice always wins. `None` (chat
+    /// with no selection, dev-loop, subagents) keeps the heuristic.
+    pub user_thinking_effort: Option<aura_reasoner::ThinkingEffort>,
     /// Layer E.1: hard cap on the number of *turns* one task may run.
     /// A turn is the unit of work between "model starts talking" and
     /// "model goes quiet without follow-up signal"; codex's
@@ -305,6 +313,7 @@ impl AgentLoopConfig {
             subagents_chars: 0,
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
+            user_thinking_effort: None,
             max_turns_per_task: aura_core::MAX_TURNS,
             max_iterations_per_task: aura_core::MAX_TURNS,
             stream_event_timeout: Duration::from_secs(90),

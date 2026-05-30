@@ -45,6 +45,35 @@ pub enum ThinkingEffort {
     /// (clamped to `8192..=16000`). Use sparingly — this is the
     /// "burn a lot of thinking" knob.
     High,
+    /// Maximum-leaning tier exposed to users via the chat model
+    /// picker. In `enabled` mode it requests an even larger budget than
+    /// [`Self::High`] (clamped to `16000..=24000`); in `adaptive` mode
+    /// it folds to the highest `output_config.effort` the API exposes
+    /// today (`"high"`).
+    XHigh,
+    /// Top user-selectable tier. In `enabled` mode it requests the
+    /// largest budget (clamped to `24000..=32000`); in `adaptive` mode
+    /// it folds to `output_config.effort = "high"`.
+    Max,
+}
+
+impl ThinkingEffort {
+    /// Parse the wire string sent by the chat model picker
+    /// (`low`/`medium`/`high`/`xhigh`/`max`). Case-insensitive.
+    /// Returns `None` for unknown / empty input so callers fall back to
+    /// their own heuristic.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================

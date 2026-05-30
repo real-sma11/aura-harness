@@ -380,7 +380,17 @@ impl LoopState {
         // request. The reasoner's `max_tokens > 2048` auto-enable
         // path stays as a fallback for providers that ignore the
         // explicit field.
-        let thinking_effort = Some(self.compute_thinking_effort(config, iteration));
+        //
+        // A user-selected thinking level (forwarded from the chat model
+        // picker via `AgentLoopConfig::user_thinking_effort`) hard-pins
+        // the effort across every iteration, overriding the internal
+        // `compute_thinking_effort` taper so the operator's explicit
+        // choice always wins. When unset, fall back to the heuristic.
+        let thinking_effort = Some(
+            config
+                .user_thinking_effort
+                .unwrap_or_else(|| self.compute_thinking_effort(config, iteration)),
+        );
 
         ModelRequest::builder(&config.model, &config.system_prompt)
             .messages(self.messages.clone())

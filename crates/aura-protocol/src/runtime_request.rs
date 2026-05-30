@@ -185,6 +185,13 @@ pub struct ModelSelection {
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// User-selected reasoning-effort tier
+    /// (`low`/`medium`/`high`/`xhigh`/`max`) from the chat model
+    /// picker's thinking-level flyout. Parsed into
+    /// `aura_reasoner::ThinkingEffort` and hard-pinned across the turn.
+    /// Absent for models without effort tiers and for older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Optional per-session model overrides applied on top of the
     /// harness's env-default router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
