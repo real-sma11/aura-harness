@@ -36,6 +36,11 @@ pub struct ThinkingConfig {
 pub enum ThinkingEffort {
     /// Extended thinking disabled for this request.
     Off,
+    /// Lowest user-selectable tier. Maps to OpenAI's `minimal`
+    /// `reasoning_effort`; for Anthropic it requests the smallest
+    /// thinking budget (folding to `Low`-equivalent behaviour because
+    /// Anthropic has no sub-`Low` tier).
+    Minimal,
     /// Standard mode, ~1024-token budget. Fast tool calls without
     /// burning a multi-minute deliberation pass.
     Low,
@@ -59,19 +64,38 @@ pub enum ThinkingEffort {
 
 impl ThinkingEffort {
     /// Parse the wire string sent by the chat model picker
-    /// (`low`/`medium`/`high`/`xhigh`/`max`). Case-insensitive.
+    /// (`minimal`/`low`/`medium`/`high`/`max`). Case-insensitive.
     /// Returns `None` for unknown / empty input so callers fall back to
-    /// their own heuristic.
+    /// their own heuristic. `xhigh` is accepted for backward
+    /// compatibility and folds into [`Self::XHigh`].
     #[must_use]
     pub fn from_wire(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "off" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
             _ => None,
+        }
+    }
+
+    /// Provider-neutral `reasoning_effort` wire string the harness puts
+    /// on the outgoing request body for the router to translate into
+    /// each provider's native control. `Off` carries no field
+    /// (returns `None`).
+    #[must_use]
+    pub const fn reasoning_effort_wire(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
         }
     }
 }
@@ -546,6 +570,39 @@ impl ModelRequestBuilder {
             prompt_cache_retention: self.prompt_cache_retention,
             metadata: self.metadata,
         })
+    }
+}
+
+#[cfg(test)]
+mod thinking_effort_tests {
+    use super::ThinkingEffort;
+
+    #[test]
+    fn from_wire_handles_minimal_and_legacy_xhigh() {
+        assert_eq!(
+            ThinkingEffort::from_wire("minimal"),
+            Some(ThinkingEffort::Minimal)
+        );
+        assert_eq!(ThinkingEffort::from_wire("MAX"), Some(ThinkingEffort::Max));
+        assert_eq!(
+            ThinkingEffort::from_wire("xhigh"),
+            Some(ThinkingEffort::XHigh)
+        );
+        assert_eq!(ThinkingEffort::from_wire("nope"), None);
+    }
+
+    #[test]
+    fn reasoning_effort_wire_preserves_tier() {
+        assert_eq!(ThinkingEffort::Off.reasoning_effort_wire(), None);
+        assert_eq!(
+            ThinkingEffort::Minimal.reasoning_effort_wire(),
+            Some("minimal")
+        );
+        assert_eq!(
+            ThinkingEffort::Medium.reasoning_effort_wire(),
+            Some("medium")
+        );
+        assert_eq!(ThinkingEffort::Max.reasoning_effort_wire(), Some("max"));
     }
 }
 

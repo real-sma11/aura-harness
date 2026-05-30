@@ -61,6 +61,19 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
     if let Some(effort) = request.thinking_effort {
         return match effort {
             ThinkingEffort::Off => None,
+            // Anthropic has no sub-`Low` thinking tier, so `Minimal`
+            // requests the smallest budget the API accepts (in
+            // `enabled` mode); in `adaptive` mode the model still picks
+            // its own budget. The distinct `minimal` value is preserved
+            // end-to-end for OpenAI via the neutral `reasoning_effort`
+            // field on the outgoing body.
+            ThinkingEffort::Minimal => Some(ApiThinkingConfig {
+                thinking_type: thinking_mode_label(thinking_mode).to_string(),
+                budget_tokens: match thinking_mode {
+                    ThinkingMode::Adaptive => None,
+                    ThinkingMode::Enabled => Some(1024),
+                },
+            }),
             ThinkingEffort::Low => Some(ApiThinkingConfig {
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
                 // Anthropic's `adaptive` thinking mode rejects
@@ -102,9 +115,7 @@ pub(super) fn resolve_thinking(request: &ModelRequest, model: &str) -> Option<Ap
                 thinking_type: thinking_mode_label(thinking_mode).to_string(),
                 budget_tokens: match thinking_mode {
                     ThinkingMode::Adaptive => None,
-                    ThinkingMode::Enabled => {
-                        Some(request.max_tokens.get().clamp(24000, 32000))
-                    }
+                    ThinkingMode::Enabled => Some(request.max_tokens.get().clamp(24000, 32000)),
                 },
             }),
         };
@@ -158,13 +169,17 @@ pub(super) fn resolve_output_config(
     // effort, so XHigh / Max fold into it until the API offers finer
     // tiers.
     match request.thinking_effort {
-        Some(ThinkingEffort::Off | ThinkingEffort::Low | ThinkingEffort::Medium) => None,
         Some(
-            ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max,
-        )
-        | None => Some(ApiOutputConfig {
-            effort: "high".to_string(),
-        }),
+            ThinkingEffort::Off
+            | ThinkingEffort::Minimal
+            | ThinkingEffort::Low
+            | ThinkingEffort::Medium,
+        ) => None,
+        Some(ThinkingEffort::High | ThinkingEffort::XHigh | ThinkingEffort::Max) | None => {
+            Some(ApiOutputConfig {
+                effort: "high".to_string(),
+            })
+        }
     }
 }
 

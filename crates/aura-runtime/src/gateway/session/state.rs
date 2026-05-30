@@ -24,10 +24,10 @@ use aura_prompts::{
 };
 use aura_protocol::{
     AgentPermissionsWire, AgentPersona, CapabilityWire, ChatProjectInfoWire, IntentClassifierSpec,
-    RuntimeRequest, RuntimeRequestType, SessionModelOverrides,
+    ReasoningEffort, RuntimeRequest, RuntimeRequestType, SessionModelOverrides,
 };
 use aura_reasoner::{
-    Message, ModelProvider, ModelRequestKind, PromptCacheRetention, ToolDefinition,
+    Message, ModelProvider, ModelRequestKind, PromptCacheRetention, ThinkingEffort, ToolDefinition,
 };
 use aura_tools::IntentClassifier;
 use std::path::PathBuf;
@@ -256,10 +256,11 @@ impl Session {
         if let Some(temperature) = model.temperature {
             self.temperature = Some(temperature);
         }
-        if let Some(ref effort) = model.reasoning_effort {
-            // Unknown / empty strings leave the field `None` so the
-            // agent loop falls back to its internal effort heuristic.
-            self.user_thinking_effort = aura_reasoner::ThinkingEffort::from_wire(effort);
+        if let Some(effort) = model.reasoning_effort {
+            // Map the typed wire tier onto the reasoner's internal
+            // effort enum. `None` (field absent) leaves the agent loop
+            // on its internal effort heuristic.
+            self.user_thinking_effort = Some(thinking_effort_from_wire(effort));
         }
         if let Some(max_turns) = model.max_turns {
             self.max_turns = max_turns;
@@ -576,6 +577,19 @@ fn build_intent_classifier(
     let mut manifest: Vec<(String, String)> = tool_domains.into_iter().collect();
     manifest.sort_by(|a, b| a.0.cmp(&b.0));
     (IntentClassifier::from_rules(tier1_domains, rules), manifest)
+}
+
+/// Map the wire [`ReasoningEffort`] tier onto the reasoner's internal
+/// [`ThinkingEffort`]. `Minimal`/`Max` are preserved 1:1; the Anthropic
+/// budget mapping happens later in the reasoner's request conversion.
+fn thinking_effort_from_wire(effort: ReasoningEffort) -> ThinkingEffort {
+    match effort {
+        ReasoningEffort::Minimal => ThinkingEffort::Minimal,
+        ReasoningEffort::Low => ThinkingEffort::Low,
+        ReasoningEffort::Medium => ThinkingEffort::Medium,
+        ReasoningEffort::High => ThinkingEffort::High,
+        ReasoningEffort::Max => ThinkingEffort::Max,
+    }
 }
 
 /// Translate the wire `AgentPermissionsWire` into the harness-core

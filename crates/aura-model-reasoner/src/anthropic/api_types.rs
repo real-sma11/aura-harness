@@ -24,6 +24,12 @@ pub(super) struct ApiRequest {
     pub thinking: Option<ApiThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<ApiOutputConfig>,
+    /// Provider-neutral reasoning-effort hint. The router translates it
+    /// into each provider's native control (OpenAI `reasoning_effort`,
+    /// etc.) and strips it before forwarding. Anthropic ignores it
+    /// because effort is already encoded in `output_config`/`thinking`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,6 +171,9 @@ pub(super) struct StreamingApiRequest {
     pub thinking: Option<ApiThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<ApiOutputConfig>,
+    /// See [`ApiRequest::reasoning_effort`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

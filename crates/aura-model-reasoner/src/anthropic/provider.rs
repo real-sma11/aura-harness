@@ -2060,6 +2060,13 @@ fn build_api_request(
         },
         thinking,
         output_config,
+        // Provider-neutral effort hint for the router. Independent of
+        // Anthropic feature gating: non-Anthropic upstreams (OpenAI,
+        // Fireworks) carry no `thinking`/`output_config`, so this is the
+        // only channel that conveys the user's selected effort to them.
+        reasoning_effort: request
+            .thinking_effort
+            .and_then(|effort| effort.reasoning_effort_wire()),
         prompt_cache_key: openai_cache_key,
         prompt_cache_retention: openai_cache_retention,
     }
@@ -2714,6 +2721,9 @@ impl ModelProvider for AnthropicProvider {
                     stream: true,
                     thinking,
                     output_config,
+                    reasoning_effort: request_ref
+                        .thinking_effort
+                        .and_then(|effort| effort.reasoning_effort_wire()),
                     prompt_cache_key: openai_cache_key,
                     prompt_cache_retention: openai_cache_retention,
                 };

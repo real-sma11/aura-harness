@@ -169,6 +169,57 @@ pub struct AgentIdentity {
     pub system_prompt: Option<String>,
 }
 
+/// User-selected reasoning-effort tier carried end-to-end from the chat
+/// model picker to the router.
+///
+/// Provider-accurate **superset** — each model only exposes the subset
+/// it supports (gated in the aura-os model catalog). `Minimal` is
+/// OpenAI's lowest `reasoning_effort` tier; `Max` is Anthropic's largest
+/// thinking budget (OpenAI has no `max`, so the router clamps it to
+/// `high`). Mirror of `aura_os::aura_protocol::ReasoningEffort` — both
+/// copies of the wire contract must match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl ReasoningEffort {
+    /// Parse a wire string (snake_case, case-insensitive) into a tier.
+    ///
+    /// Returns `None` for unknown / empty input so callers fall back to
+    /// the harness's internal effort heuristic. `xhigh` is accepted for
+    /// backward compatibility and folds into [`Self::High`].
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" | "xhigh" => Some(Self::High),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    /// The canonical snake_case wire string for this tier.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// "What model to drive the agent with."
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
@@ -185,13 +236,12 @@ pub struct ModelSelection {
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// User-selected reasoning-effort tier
-    /// (`low`/`medium`/`high`/`xhigh`/`max`) from the chat model
-    /// picker's thinking-level flyout. Parsed into
-    /// `aura_reasoner::ThinkingEffort` and hard-pinned across the turn.
-    /// Absent for models without effort tiers and for older clients.
+    /// User-selected reasoning-effort tier from the chat model picker's
+    /// thinking-level flyout. Mapped into `aura_reasoner::ThinkingEffort`
+    /// and hard-pinned across the turn. Absent for models without effort
+    /// tiers and for older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Optional per-session model overrides applied on top of the
     /// harness's env-default router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,4 +337,39 @@ pub struct RuntimeRunResponse {
     /// open. Always `/stream/:run_id`; surfaced explicitly so older
     /// clients don't have to know the path scheme.
     pub event_stream_url: String,
+}
+
+#[cfg(test)]
+mod reasoning_effort_tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_effort_round_trips_snake_case() {
+        for (tier, wire) in [
+            (ReasoningEffort::Minimal, "\"minimal\""),
+            (ReasoningEffort::Low, "\"low\""),
+            (ReasoningEffort::Medium, "\"medium\""),
+            (ReasoningEffort::High, "\"high\""),
+            (ReasoningEffort::Max, "\"max\""),
+        ] {
+            let json = serde_json::to_string(&tier).expect("serialize tier");
+            assert_eq!(json, wire);
+            let back: ReasoningEffort = serde_json::from_str(&json).expect("deserialize tier");
+            assert_eq!(back, tier);
+            assert_eq!(tier.as_wire(), &wire[1..wire.len() - 1]);
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_from_wire_folds_legacy_xhigh() {
+        assert_eq!(
+            ReasoningEffort::from_wire("xhigh"),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(ReasoningEffort::from_wire("MIN"), None);
+        assert_eq!(
+            ReasoningEffort::from_wire("minimal"),
+            Some(ReasoningEffort::Minimal)
+        );
+    }
 }
