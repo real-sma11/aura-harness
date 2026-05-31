@@ -109,6 +109,36 @@ pub struct SessionModelOverrides {
     pub prompt_cache_retention: Option<String>,
 }
 
+/// OpenAI rejects `prompt_cache_key` strings longer than 64 chars
+/// (`Invalid 'prompt_cache_key': string too long`). This is the single
+/// canonical limit shared by every layer that produces a cache key.
+pub const MAX_PROMPT_CACHE_KEY_LEN: usize = 64;
+
+/// Clamp a `prompt_cache_key` to OpenAI's 64-char limit.
+///
+/// Short keys pass through untouched. Long keys keep their namespace
+/// prefix (the segment before the first `:`) and gain a stable blake3
+/// digest, so caching stays deterministic per identity while never
+/// exceeding the provider limit. Hashing (rather than truncating) avoids
+/// collisions between distinct long identities that share a prefix.
+///
+/// This is the unified implementation used on both the harness side
+/// (final outbound chokepoint in the model provider) and the aura-os
+/// side (`SessionModelOverrides` construction); keep the two repos'
+/// copies byte-identical.
+#[must_use]
+pub fn clamp_prompt_cache_key(key: String) -> String {
+    if key.len() <= MAX_PROMPT_CACHE_KEY_LEN {
+        return key;
+    }
+    let hash = blake3::hash(key.as_bytes()).to_hex();
+    let digest = &hash[..32];
+    let prefix = key.split(':').next().unwrap_or("");
+    let max_prefix = MAX_PROMPT_CACHE_KEY_LEN - digest.len() - 1;
+    let prefix: String = prefix.chars().take(max_prefix).collect();
+    format!("{prefix}:{digest}")
+}
+
 /// Payload for `user_message`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
@@ -204,4 +234,39 @@ pub struct GenerationRequest {
     /// Video generation: whether to generate audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
+}
+
+#[cfg(test)]
+mod prompt_cache_key_tests {
+    use super::{clamp_prompt_cache_key, MAX_PROMPT_CACHE_KEY_LEN};
+
+    #[test]
+    fn passes_short_keys_through_untouched() {
+        let key = "instance:9f8c-123".to_string();
+        assert_eq!(clamp_prompt_cache_key(key.clone()), key);
+    }
+
+    #[test]
+    fn shortens_long_keys_to_the_limit() {
+        let long = format!("agent:{}", "a".repeat(150));
+        let clamped = clamp_prompt_cache_key(long);
+        assert!(clamped.len() <= MAX_PROMPT_CACHE_KEY_LEN);
+        assert!(clamped.starts_with("agent:"));
+    }
+
+    #[test]
+    fn is_deterministic_for_the_same_input() {
+        let long = format!("devloop:{}", "b".repeat(200));
+        assert_eq!(
+            clamp_prompt_cache_key(long.clone()),
+            clamp_prompt_cache_key(long)
+        );
+    }
+
+    #[test]
+    fn distinguishes_distinct_long_keys() {
+        let a = clamp_prompt_cache_key(format!("agent:{}", "a".repeat(150)));
+        let b = clamp_prompt_cache_key(format!("agent:{}", "b".repeat(150)));
+        assert_ne!(a, b);
+    }
 }

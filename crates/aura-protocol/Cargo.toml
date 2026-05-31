@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true }
 ts-rs = { version = "10", optional = true, features = ["serde-json-impl"] }
 # Phase A: aura-protocol owns the wire↔core seam, so the conversion
 # helpers (`installed_tool_to_core`, `agent_tool_permissions_from_wire`,

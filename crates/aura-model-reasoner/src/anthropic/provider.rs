@@ -731,6 +731,9 @@ impl AnthropicProvider {
 
         if Self::supports_openai_proxy_features(request_ctx, model) {
             if let Some(ref key) = request_ctx.prompt_cache_key {
+                // Already clamped to OpenAI's 64-char limit when the
+                // `ModelRequest` was built; the router maps this header
+                // onto OpenAI's `prompt_cache_key`.
                 req_builder = req_builder.header("X-Aura-Prompt-Cache-Key", key);
             }
             if let Some(retention) = request_ctx.prompt_cache_retention {
@@ -2545,6 +2548,8 @@ impl ModelProvider for AnthropicProvider {
                 let system = build_system_block(&request_ref.system, prompt_caching_enabled);
                 let (openai_cache_key, openai_cache_retention) = if openai_features_enabled {
                     (
+                        // Already clamped to OpenAI's 64-char limit when the
+                        // `ModelRequest` was built (see `ModelRequestBuilder::try_build`).
                         request_ref.prompt_cache_key.clone(),
                         request_ref
                             .prompt_cache_retention
@@ -2685,6 +2690,8 @@ impl ModelProvider for AnthropicProvider {
                     .flatten();
                 let (openai_cache_key, openai_cache_retention) = if openai_features_enabled {
                     (
+                        // Already clamped to OpenAI's 64-char limit when the
+                        // `ModelRequest` was built (see `ModelRequestBuilder::try_build`).
                         request_ref.prompt_cache_key.clone(),
                         request_ref
                             .prompt_cache_retention

@@ -1673,6 +1673,93 @@ async fn test_proxy_openai_models_carry_prompt_cache_key_when_set() {
 }
 
 #[tokio::test]
+async fn test_proxy_openai_models_clamp_oversized_prompt_cache_key() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 16384];
+        let n = socket.read(&mut buf).await.unwrap();
+        let request_text = String::from_utf8_lossy(&buf[..n]).to_string();
+
+        let body = r#"{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"aura-gpt-4.1","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+
+        request_text
+    });
+
+    let config = AnthropicConfig {
+        default_model: "aura-gpt-4.1".to_string(),
+        timeout_ms: 5000,
+        max_retries: 0,
+        backoff_initial_ms: 250,
+        backoff_cap_ms: 30_000,
+        min_request_interval_ms: 0,
+        base_url: format!("http://127.0.0.1:{}", addr.port()),
+        fallback_model: None,
+        prompt_caching_enabled: true,
+        emergency_body_cap_bytes: 0,
+        cloudflare_max_retries: 3,
+    };
+
+    // A composite identity well over OpenAI's 64-char limit, like the
+    // `agent:{template}::{instance}` / `tool:{project}:{name}` keys the
+    // upstream layers can produce.
+    let oversized = format!("agent:{}", "z".repeat(200));
+
+    let provider = AnthropicProvider::new(config).unwrap();
+    let request = ModelRequest::builder("aura-gpt-4.1", "system")
+        .message(Message::user("test"))
+        .auth_token(Some("test-jwt-token".to_string()))
+        .prompt_cache_key(Some(oversized.clone()))
+        .try_build()
+        .unwrap();
+
+    let _ = provider.complete(request).await.unwrap();
+
+    let captured = server.await.unwrap();
+    assert!(
+        !captured.contains(&oversized),
+        "Oversized prompt_cache_key must never reach the wire verbatim.\nCaptured request:\n{captured}"
+    );
+
+    // Body field stays within the 64-char limit and keeps its namespace.
+    let body_key = captured
+        .split(r#""prompt_cache_key":""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("body should carry a clamped prompt_cache_key");
+    assert!(
+        body_key.len() <= aura_protocol::MAX_PROMPT_CACHE_KEY_LEN,
+        "Clamped body key must fit OpenAI's limit, got {}: {body_key}",
+        body_key.len()
+    );
+    assert!(body_key.starts_with("agent:"));
+
+    // Header value mirrors the clamped body value.
+    let header_key = captured
+        .to_ascii_lowercase()
+        .split("x-aura-prompt-cache-key: ")
+        .nth(1)
+        .and_then(|rest| rest.split("\r\n").next())
+        .map(str::to_string)
+        .expect("header should carry a clamped prompt_cache_key");
+    assert!(
+        header_key.len() <= aura_protocol::MAX_PROMPT_CACHE_KEY_LEN,
+        "Clamped header key must fit OpenAI's limit, got {}: {header_key}",
+        header_key.len()
+    );
+}
+
+#[tokio::test]
 async fn test_proxy_openai_response_cached_tokens_alias_maps_to_cache_read() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -53,9 +53,9 @@ pub mod server;
 pub use agent_identity::AgentPersona;
 pub use chat_project_info::ChatProjectInfoWire;
 pub use client::{
-    ApprovalResponse, ConversationMessage, GenerationRequest, InboundMessage, IntentClassifierRule,
-    IntentClassifierSpec, MessageAttachment, SessionModelOverrides, ToolApprovalResponse,
-    UserMessage,
+    clamp_prompt_cache_key, ApprovalResponse, ConversationMessage, GenerationRequest,
+    InboundMessage, IntentClassifierRule, IntentClassifierSpec, MessageAttachment,
+    SessionModelOverrides, ToolApprovalResponse, UserMessage, MAX_PROMPT_CACHE_KEY_LEN,
 };
 pub use common::{ToolApprovalDecision, ToolApprovalRemember, ToolStateWire};
 pub use conversions::{

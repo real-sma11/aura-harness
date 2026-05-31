@@ -705,6 +705,7 @@ dependencies = [
  "async-trait",
  "aura-config",
  "aura-core",
+ "aura-protocol",
  "bytes",
  "colored",
  "futures-util",
@@ -788,6 +789,7 @@ name = "aura-protocol"
 version = "0.1.0"
 dependencies = [
  "aura-core",
+ "blake3",
  "serde",
  "serde_json",
  "ts-rs",
