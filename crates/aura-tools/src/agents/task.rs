@@ -59,6 +59,11 @@ pub struct TaskInput {
     /// Optional caller-stamped dedupe key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Optional spawn mode. Defaults to `Wait` (blocking, result
+    /// returned inline). `detached` opts into background spawning so
+    /// the child runs as an independently observable thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_mode: Option<aura_core_types::SpawnMode>,
 }
 
 pub struct TaskTool;
@@ -117,6 +122,11 @@ impl TaskTool {
                     "tool_call_id": {
                         "type": "string",
                         "description": "Optional caller-stamped dedupe key. Idempotent re-dispatch returns the same SubagentResult."
+                    },
+                    "spawn_mode": {
+                        "type": "string",
+                        "enum": ["wait", "detached"],
+                        "description": "Optional spawn mode. 'wait' (default) blocks until the subagent finishes and returns its summary inline. 'detached' runs it in the background as an observable thread."
                     }
                 },
                 "required": ["subagent_type", "prompt"]
@@ -194,6 +204,7 @@ impl TaskTool {
             override_tool_subset: input.tool_subset.clone(),
             override_isolation_id: input.isolation.clone(),
             override_budget: input.budget.clone(),
+            spawn_mode: input.spawn_mode,
         })
     }
 }
@@ -286,6 +297,7 @@ mod tests {
             isolation: None,
             tool_subset: None,
             tool_call_id: None,
+            spawn_mode: None,
         }
     }
 

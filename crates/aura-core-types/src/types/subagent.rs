@@ -134,6 +134,13 @@ pub struct SubagentDispatchRequest {
     /// Phase 7b: caller-specified budget override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_budget: Option<SubagentBudget>,
+    /// Spawn mode for this dispatch. `None` (the legacy shape) means
+    /// the dispatcher uses its default (`SpawnMode::Wait`): the parent
+    /// turn blocks until the child completes and reads the result
+    /// inline. `Some(Detached)` opts into background spawning so the
+    /// parent can continue and observe the child's live thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_mode: Option<crate::SpawnMode>,
 }
 
 /// Terminal state of a foreground subagent task.

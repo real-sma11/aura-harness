@@ -78,8 +78,8 @@ pub use server::{
     AssistantMessageEnd, AssistantMessageStart, ContextBreakdown, ErrorMsg, FileDiff, FileOp,
     FilesChanged, GenerationCompleted, GenerationErrorMsg, GenerationPartialImage,
     GenerationProgressMsg, GenerationStart, OutboundMessage, ProgressMsg, SessionReady,
-    SessionUsage, SkillInfo, TextDelta, ThinkingDelta, ToolApprovalPrompt, ToolCallSnapshot,
-    ToolInfo, ToolResultMsg, ToolUseStart,
+    SessionUsage, SkillInfo, SubagentSpawned, SubagentStatus, TextDelta, ThinkingDelta,
+    ToolApprovalPrompt, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
 };
 
 #[cfg(all(test, feature = "typescript"))]

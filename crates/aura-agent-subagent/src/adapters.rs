@@ -124,7 +124,7 @@ pub fn overrides_from_request(
             .clone()
             .or_else(|| kind.default_model.clone()),
         kind: Some(kind.name.clone()),
-        spawn_mode: None,
+        spawn_mode: request.spawn_mode,
         join_policy: None,
         replay_mode: None,
         budget,

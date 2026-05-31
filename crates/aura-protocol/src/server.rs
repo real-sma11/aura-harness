@@ -66,6 +66,15 @@ pub enum OutboundMessage {
     GenerationCompleted(GenerationCompleted),
     /// Generation failed.
     GenerationError(GenerationErrorMsg),
+    /// A subagent (`task` tool) child run has been spawned and is now
+    /// observable as its own live thread. Emitted on the PARENT stream
+    /// before the blocking `task` tool returns, so a client can render
+    /// a clickable thread card and lazily attach to `child_run_id`.
+    SubagentSpawned(SubagentSpawned),
+    /// Terminal (or transitional) status update for a previously
+    /// announced subagent child run. Emitted on the parent stream so
+    /// the thread card reflects running/completed/failed/etc.
+    SubagentStatus(SubagentStatus),
 }
 
 /// Payload for `session_ready`.
@@ -148,6 +157,37 @@ pub struct ToolResultMsg {
     pub is_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+}
+
+/// Payload for `subagent_spawned`.
+///
+/// Announces a child subagent run on the parent stream. `child_run_id`
+/// is a freshly minted run id the client can attach to via
+/// `WS /stream/:child_run_id`. `parent_tool_use_id` ties the thread
+/// back to the originating `task` tool-use block so the UI can render
+/// the live thread under that tool card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct SubagentSpawned {
+    pub child_run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tool_use_id: Option<String>,
+    pub subagent_type: String,
+    pub prompt: String,
+}
+
+/// Payload for `subagent_status`.
+///
+/// `state` is one of `running | completed | failed | cancelled |
+/// timeout | rejected`. `reason` carries the failure/rejection detail
+/// when applicable (depth/quota rejections surface here).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct SubagentStatus {
+    pub child_run_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Payload for `tool_approval_prompt`.
