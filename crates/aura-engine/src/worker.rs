@@ -1,12 +1,13 @@
 //! Worker for processing agent transactions via kernel-mediated `AgentLoop`.
 
 use aura_agent::{KernelModelGateway, KernelToolGateway};
-use aura_agent_loop::{AgentLoop, AgentLoopResult};
-use aura_core_types::AgentId;
 use aura_agent_kernel::Kernel;
+use aura_agent_loop::{AgentLoop, AgentLoopEvent, AgentLoopResult};
+use aura_core_types::AgentId;
 use aura_model_reasoner::{Message, ToolDefinition};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tracing::{debug, info, instrument, warn};
 
 const AGENT_LOOP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -27,12 +28,18 @@ pub struct ProcessedAgent {
 /// [`crate::scheduler::Scheduler::schedule_agent_with_overrides`])
 /// already carries the agent id, so this span adds only the structural
 /// hop without re-emitting the id field.
+/// `event_tx`, when `Some`, is forwarded into
+/// [`AgentLoop::run_with_events`] so a live observer (e.g. a WS client
+/// attached to a subagent child run) receives streaming
+/// [`AgentLoopEvent`]s. When `None`, the worker uses the non-streaming
+/// [`AgentLoop::run`] path, preserving the existing behavior exactly.
 #[instrument(name = "worker", skip_all)]
 pub async fn process_agent_detailed(
     agent_id: AgentId,
     kernel: Arc<Kernel>,
     agent_loop: &AgentLoop,
     tools: &[ToolDefinition],
+    event_tx: Option<mpsc::Sender<AgentLoopEvent>>,
 ) -> anyhow::Result<ProcessedAgent> {
     let mut processed = 0u64;
     let mut last_result = None;
@@ -64,7 +71,14 @@ pub async fn process_agent_detailed(
 
         let result = tokio::time::timeout(
             AGENT_LOOP_TIMEOUT,
-            agent_loop.run(&model_gateway, &tool_gateway, messages, tools.to_vec()),
+            agent_loop.run_with_events(
+                &model_gateway,
+                &tool_gateway,
+                messages,
+                tools.to_vec(),
+                event_tx.clone(),
+                None,
+            ),
         )
         .await
         .map_err(|_| anyhow::anyhow!("Agent loop timed out after {AGENT_LOOP_TIMEOUT:?}"))??;
@@ -102,8 +116,8 @@ pub async fn process_agent_detailed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aura_core_types::{Transaction, TransactionType};
     use aura_agent_kernel::{ExecutorRouter, KernelConfig};
+    use aura_core_types::{Transaction, TransactionType};
     use aura_model_reasoner::MockProvider;
     use aura_store_db::{RocksStore, Store};
     use bytes::Bytes;
@@ -129,7 +143,7 @@ mod tests {
         let kernel = create_test_kernel(dir.path(), agent_id);
         let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::for_agent("claude-opus-4-7"));
 
-        let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[])
+        let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[], None)
             .await
             .unwrap()
             .processed;
@@ -165,7 +179,7 @@ mod tests {
             Arc::new(Kernel::new(store.clone(), provider, executor, config, agent_id).unwrap());
         let agent_loop = AgentLoop::new(aura_agent::AgentLoopConfig::for_agent("claude-opus-4-7"));
 
-        let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[])
+        let count = process_agent_detailed(agent_id, kernel, &agent_loop, &[], None)
             .await
             .unwrap()
             .processed;

@@ -25,6 +25,6 @@
 #![warn(clippy::all)]
 
 pub use aura_agent::{
-    AgentError as AgentLoopError, AgentLoop, AgentLoopConfig, AgentLoopResult, RunOptions,
-    TurnEvent, TurnEventSink,
+    AgentError as AgentLoopError, AgentLoop, AgentLoopConfig, AgentLoopEvent, AgentLoopResult,
+    RunOptions, TurnEvent, TurnEventSink,
 };

@@ -22,6 +22,7 @@ mod generation;
 mod helpers;
 mod partial_json;
 mod state;
+mod subagent_stream;
 #[cfg(test)]
 mod tests;
 mod tool_approval;
@@ -32,9 +33,9 @@ pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;
 pub(crate) use tool_approval::ToolApprovalBroker;
 
+use aura_context_skills::SkillManager;
 use aura_engine::scheduler::Scheduler;
 use aura_model_reasoner::ModelProvider;
-use aura_context_skills::SkillManager;
 use aura_store_db::Store;
 use aura_tools::automaton_tools::AutomatonController;
 use aura_tools::domain_tools::DomainApi;
@@ -85,6 +86,13 @@ pub(crate) struct WsContext {
     pub(crate) router_url: Option<String>,
     /// aura-os-server base URL used by cross-agent callbacks.
     pub(crate) aura_os_server_url: Option<String>,
+    /// Live chat-run registry, shared with [`crate::gateway::RouterState`].
+    ///
+    /// Threaded into the session so the subagent observability hook can
+    /// register an event-only child run keyed by a minted `child_run_id`
+    /// that `WS /stream/:child_run_id` can attach to (see
+    /// [`chat_run::ChatRunRegistry`]).
+    pub(crate) chat_runs: chat_run::ChatRunRegistry,
 }
 
 impl WsContext {
@@ -110,6 +118,7 @@ impl WsContext {
             skill_manager: state.skill_manager.clone(),
             router_url: state.router_url.clone(),
             aura_os_server_url: state.config.aura_os_server_url.clone(),
+            chat_runs: state.chat_runs.clone(),
         }
     }
 }

@@ -62,6 +62,18 @@ pub struct ChildRunContext {
     /// runners that previously called into `KernelSpawnHook` MUST
     /// thread this id back into `ChildAgentSpec::preassigned_agent_id`.
     pub preassigned_agent_id: AgentId,
+    /// Optional streaming sink for the child agent loop's
+    /// [`AgentLoopEvent`](aura_agent_loop::AgentLoopEvent)s. When
+    /// `Some`, the runner is expected to drive the child loop via
+    /// `run_with_events` so an external observer (e.g. a WS client
+    /// attached to the child's minted run id) sees live text / tool
+    /// frames. When `None`, the runner uses the non-streaming path —
+    /// preserving the existing blocking-Wait behavior byte-for-byte.
+    ///
+    /// The fleet layer only forwards this sender; it never constructs
+    /// wire-protocol messages from it (that mapping stays in
+    /// `aura-runtime`).
+    pub event_tx: Option<tokio::sync::mpsc::Sender<aura_agent_loop::AgentLoopEvent>>,
 }
 
 /// Run a derived [`SubagentSpec`] to completion and return a

@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use aura_agent::{
     map_agent_loop_event, AgentLoopEvent, AgentLoopResult, DebugEvent, TurnEventSink,
 };
+use aura_agent_kernel::{Kernel, KernelConfig, PolicyConfig};
 use aura_agent_subagent::SubagentRegistry;
 use aura_core_types::{
     is_effectively_full_access, resolve_effective_permission, AgentToolPermissions, ToolState,
@@ -23,10 +24,10 @@ use aura_fleet_quota::QuotaPool;
 use aura_fleet_registry::FleetRegistry;
 use aura_fleet_spawn::{OrphanStore, ParentLeaseRegistry};
 use aura_fleet_subagent::FleetSubagentDispatcher;
-use aura_agent_kernel::{Kernel, KernelConfig, PolicyConfig};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 const OUTBOUND_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -292,10 +293,12 @@ pub(super) async fn emit_session_ready(
 /// prevent us from sending `SessionReady` (the UI would otherwise spin
 /// forever waiting on a session that already loaded).
 async fn bootstrap_session(session: &Session, ctx: &WsContext) {
-    match build_kernel_with_config(session, ctx, &ctx.tool_config).await {
+    match build_kernel_with_config(session, ctx, &ctx.tool_config, None, None).await {
         Ok(kernel) => {
             if let Err(e) = kernel
-                .process_direct(aura_core_types::Transaction::session_start(session.agent_id))
+                .process_direct(aura_core_types::Transaction::session_start(
+                    session.agent_id,
+                ))
                 .await
             {
                 error!(
@@ -331,10 +334,19 @@ async fn bootstrap_session(session: &Session, ctx: &WsContext) {
     }
 }
 
+/// `parent_outbound` + `parent_cancellation` are `Some` only on the
+/// per-turn build path. When supplied, the subagent dispatch hook is
+/// wrapped in a [`super::subagent_stream::RuntimeSubagentObservabilityHook`]
+/// so each `task` child run is announced + streamed on the parent
+/// stream and registered as its own WS-attachable thread. The session
+/// bootstrap path passes `None` (no active turn to stream onto) and
+/// gets the plain blocking dispatcher.
 pub(super) async fn build_kernel_with_config(
     session: &Session,
     ctx: &WsContext,
     tool_config: &aura_tools::ToolConfig,
+    parent_outbound: Option<&mpsc::Sender<OutboundMessage>>,
+    parent_cancellation: Option<&CancellationToken>,
 ) -> Result<Arc<Kernel>, aura_agent_kernel::KernelError> {
     let domain_exec = ctx.domain_api.as_ref().map(|api| {
         use aura_tools::domain_tools::DomainToolExecutor;
@@ -404,16 +416,30 @@ pub(super) async fn build_kernel_with_config(
         ctx.scheduler.clone(),
         subagent_registry.clone(),
     ));
-    resolver =
-        resolver.with_subagent_dispatch_hook(Arc::new(FleetSubagentDispatcher::with_components(
-            ctx.store.clone(),
-            subagent_registry,
-            Arc::new(FleetRegistry::new()),
-            Arc::new(QuotaPool::new()),
-            Arc::new(ParentLeaseRegistry::new()),
-            Arc::new(OrphanStore::new(orphan_dir)),
-            child_runner,
-        )));
+    let fleet_dispatcher = Arc::new(FleetSubagentDispatcher::with_components(
+        ctx.store.clone(),
+        subagent_registry,
+        Arc::new(FleetRegistry::new()),
+        Arc::new(QuotaPool::new()),
+        Arc::new(ParentLeaseRegistry::new()),
+        Arc::new(OrphanStore::new(orphan_dir)),
+        child_runner,
+    ));
+    // On the per-turn path, wrap the blocking dispatcher so each child
+    // run is observable as its own live WS thread without regressing the
+    // inline `SubagentResult` the parent still receives.
+    let dispatch_hook: Arc<dyn aura_tools::SubagentDispatchHook> = match parent_outbound {
+        Some(outbound) => Arc::new(
+            super::subagent_stream::RuntimeSubagentObservabilityHook::new(
+                fleet_dispatcher,
+                outbound.clone(),
+                ctx.chat_runs.clone(),
+                parent_cancellation.cloned(),
+            ),
+        ),
+        None => fleet_dispatcher,
+    };
+    resolver = resolver.with_subagent_dispatch_hook(dispatch_hook);
     if let Some(base_url) = ctx
         .aura_os_server_url
         .as_deref()
@@ -919,11 +945,11 @@ mod tests {
     use aura_agent::{AgentLoopEvent, AgentLoopResult, FileChange, FileChangeKind};
     use aura_core_types::{AgentToolPermissions, ToolState, UserToolDefaults};
     use aura_engine::scheduler::Scheduler;
+    use aura_model_reasoner::MockProvider;
     use aura_protocol::{
         AgentCapabilities, AgentIdentity, AgentPermissionsWire, ModelSelection, RuntimeRequest,
         RuntimeRequestType, SessionModelOverrides, WorkspaceLocation,
     };
-    use aura_model_reasoner::MockProvider;
     use aura_store_db::RocksStore;
     use aura_tools::{ToolCatalog, ToolConfig};
     use std::path::PathBuf;
@@ -964,6 +990,7 @@ mod tests {
             skill_manager: None,
             router_url: None,
             aura_os_server_url: None,
+            chat_runs: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -1420,8 +1447,8 @@ mod tests {
     /// append a `UserPrompt` entry with the user message as payload.
     #[tokio::test]
     async fn session_bootstrap_emits_session_start_and_user_prompt_are_recorded() {
-        use aura_core_types::{Transaction, TransactionType};
         use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
+        use aura_core_types::{Transaction, TransactionType};
 
         let ctx = test_context();
 

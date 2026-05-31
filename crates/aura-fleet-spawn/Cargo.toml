@@ -12,6 +12,11 @@ aura-core-modes = { path = "../aura-core-modes" }
 aura-core-permissions = { path = "../aura-core-permissions" }
 aura-agent-subagent = { path = "../aura-agent-subagent" }
 aura-agent-kernel = { path = "../aura-agent-kernel" }
+# Phase 6a anticipated this edge: the fleet layer binds to the
+# layered `aura-agent-loop` crate name purely for the `AgentLoopEvent`
+# type threaded onto the optional child event stream (no agent-loop
+# logic is invoked here).
+aura-agent-loop = { path = "../aura-agent-loop" }
 aura-store-db = { path = "../aura-store-db" }
 aura-store-record = { path = "../aura-store-record" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }

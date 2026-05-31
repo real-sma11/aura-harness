@@ -459,7 +459,14 @@ async fn start_turn(
         },
     ));
 
-    let prepared = match prepare_turn_context(session, msg, ctx).await {
+    // Mint the per-turn cancellation token up front so it can be both
+    // threaded into the subagent dispatch hook (built during kernel
+    // construction) and used to drive the agent loop below. This makes
+    // `SpawnRequest.cancellation` carry the parent token so cancelling
+    // the parent turn propagates into a `Wait` child.
+    let cancel_token = CancellationToken::new();
+
+    let prepared = match prepare_turn_context(session, msg, ctx, outbound_tx, &cancel_token).await {
         Ok(p) => p,
         Err(err) => {
             crate::inbound_console::ws_rejection_line(
@@ -472,7 +479,12 @@ async fn start_turn(
         }
     };
 
-    Some(dispatch_turn_to_agent(prepared, outbound_tx, message_id))
+    Some(dispatch_turn_to_agent(
+        prepared,
+        outbound_tx,
+        message_id,
+        cancel_token,
+    ))
 }
 
 /// Build everything the agent loop needs for a single turn:
@@ -497,6 +509,8 @@ async fn prepare_turn_context(
     session: &mut Session,
     msg: UserMessage,
     ctx: &WsContext,
+    outbound_tx: &mpsc::Sender<OutboundMessage>,
+    cancel_token: &CancellationToken,
 ) -> Result<PreparedTurn, ErrorMsg> {
     let user_msg = if let Some(ref attachments) = msg.attachments {
         // Image AND text attachments both reach the model. The previous
@@ -612,7 +626,15 @@ async fn prepare_turn_context(
         }
     }
 
-    let kernel = match helpers::build_kernel_with_config(session, ctx, &tool_config).await {
+    let kernel = match helpers::build_kernel_with_config(
+        session,
+        ctx,
+        &tool_config,
+        Some(outbound_tx),
+        Some(cancel_token),
+    )
+    .await
+    {
         Ok(k) => k,
         Err(e) => {
             error!(session_id = %session.session_id, error = %e, "Failed to build kernel");
@@ -722,6 +744,7 @@ fn dispatch_turn_to_agent(
     prepared: PreparedTurn,
     outbound_tx: &mpsc::Sender<OutboundMessage>,
     message_id: String,
+    cancel_token: CancellationToken,
 ) -> AgentTurn {
     let PreparedTurn {
         model_gateway,
@@ -732,7 +755,6 @@ fn dispatch_turn_to_agent(
     } = prepared;
     let agent_loop = AgentLoop::new(config);
 
-    let cancel_token = CancellationToken::new();
     let cancel_for_loop = cancel_token.clone();
     let cancel_for_check = cancel_token.clone();
 
@@ -834,6 +856,7 @@ mod tests {
             skill_manager: None,
             router_url: None,
             aura_os_server_url: None,
+            chat_runs: Arc::new(dashmap::DashMap::new()),
         }
     }
 

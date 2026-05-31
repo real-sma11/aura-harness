@@ -630,6 +630,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aura-agent-kernel",
+ "aura-agent-loop",
  "aura-agent-subagent",
  "aura-core-modes",
  "aura-core-permissions",
@@ -658,6 +659,7 @@ name = "aura-fleet-subagent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aura-agent-loop",
  "aura-agent-subagent",
  "aura-core-modes",
  "aura-core-permissions",
@@ -673,6 +675,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -32,16 +32,36 @@
 //!   a hard crash. A future lease timestamp/owner can recover abandoned claims.
 
 use crate::worker::{process_agent_detailed, ProcessedAgent};
-use aura_agent_loop::{AgentLoop, AgentLoopConfig};
-use aura_core_types::{AgentId, AgentStatus};
 use aura_agent_kernel::{Executor, ExecutorRouter, Kernel, KernelConfig, PolicyConfig};
+use aura_agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopEvent};
+use aura_core_types::{AgentId, AgentStatus};
 use aura_model_reasoner::{ModelProvider, ModelRequestKind, PromptCacheRetention, ToolDefinition};
 use aura_store_db::Store;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, instrument};
+
+/// Per-call overrides for [`Scheduler::schedule_agent_with_options`].
+///
+/// Bundled into a struct so the scheduling entry point stays within
+/// the parameter budget as the override surface grows. The legacy
+/// [`Scheduler::schedule_agent_with_overrides`] shim maps its two
+/// positional overrides onto this struct with `event_tx: None`.
+#[derive(Default)]
+pub struct ScheduleOverrides {
+    /// Explicit per-turn loop config. `None` resolves the config from
+    /// the [`AgentIdentityRegistry`].
+    pub loop_config: Option<AgentLoopConfig>,
+    /// Explicit kernel policy override (subagent dispatch narrows it).
+    pub policy: Option<PolicyConfig>,
+    /// Optional streaming sink threaded into the worker so the agent
+    /// loop runs via `run_with_events`. `None` keeps the non-streaming
+    /// path. Used by subagent child runs to make the child observable.
+    pub event_tx: Option<mpsc::Sender<AgentLoopEvent>>,
+}
 
 /// Per-agent identity recorded by the chat WS / automaton bridge / `/tx`
 /// and consulted by [`Scheduler::schedule_agent_with_overrides`] when no
@@ -356,13 +376,40 @@ impl Scheduler {
     /// the visible prefix in the structured console transcript reads
     /// `agent{id}:worker:task{id}:turn{T}:sampling{I}:complete{model}`
     /// — every level adds new information.
-    #[instrument(name = "agent", skip(self, agent_loop_config, policy), fields(id = %agent_id))]
     pub async fn schedule_agent_with_overrides(
         &self,
         agent_id: AgentId,
         agent_loop_config: Option<AgentLoopConfig>,
         policy: Option<PolicyConfig>,
     ) -> anyhow::Result<ProcessedAgent> {
+        self.schedule_agent_with_options(
+            agent_id,
+            ScheduleOverrides {
+                loop_config: agent_loop_config,
+                policy,
+                event_tx: None,
+            },
+        )
+        .await
+    }
+
+    /// Schedule processing with a bundled [`ScheduleOverrides`].
+    ///
+    /// Superset of [`Self::schedule_agent_with_overrides`] that also
+    /// carries an optional [`AgentLoopEvent`] streaming sink. Subagent
+    /// dispatch uses this to make a child run observable as its own
+    /// live thread while still returning the terminal result inline.
+    #[instrument(name = "agent", skip(self, overrides), fields(id = %agent_id))]
+    pub async fn schedule_agent_with_options(
+        &self,
+        agent_id: AgentId,
+        overrides: ScheduleOverrides,
+    ) -> anyhow::Result<ProcessedAgent> {
+        let ScheduleOverrides {
+            loop_config: agent_loop_config,
+            policy,
+            event_tx,
+        } = overrides;
         let status = self.store.get_agent_status(agent_id)?;
         if status != AgentStatus::Active {
             debug!(?status, "Agent not active, skipping");
@@ -437,7 +484,8 @@ impl Scheduler {
         }
         let agent_loop = AgentLoop::new(config);
 
-        let result = process_agent_detailed(agent_id, kernel, &agent_loop, &self.tools).await;
+        let result =
+            process_agent_detailed(agent_id, kernel, &agent_loop, &self.tools, event_tx).await;
         let release_result = claim.release();
 
         match (result, release_result) {

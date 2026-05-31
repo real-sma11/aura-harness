@@ -10,8 +10,8 @@ use aura_agent_subagent::{
     DefaultDerivation, DerivationError, OverrideManifest, ParentContext, SubagentDerivation,
     SubagentOverrides,
 };
-use aura_core_types::{AgentId, SubagentExit, SubagentResult, Transaction, TransactionType};
 use aura_core_modes::{ModeViolation, SpawnMode};
+use aura_core_types::{AgentId, SubagentExit, SubagentResult, Transaction, TransactionType};
 use aura_fleet_quota::{BudgetTicket, QuotaError, QuotaPool, QuotaRequest};
 use aura_fleet_registry::{AgentSlot, FleetRegistry, RegistryError};
 use aura_plugin_hooks::{HookEngine, SharedHookEngine, SubagentStartHookCtx, SubagentStopHookCtx};
@@ -231,17 +231,42 @@ impl FleetSpawner {
     /// or [`SpawnMode::Detached`]; batch dispatch goes through
     /// [`Self::spawn_batch`].
     ///
+    /// Backward-compatible entry point: delegates to
+    /// [`Self::spawn_with_events`] with no child event stream, so the
+    /// child runs through the non-streaming path exactly as before.
+    ///
     /// # Errors
     ///
     /// See [`SpawnError`].
-    #[instrument(
-        skip(self, request),
-        fields(parent_agent_id = %request.parent.agent_id, mode = ?mode)
-    )]
     pub async fn spawn(
         &self,
         request: SpawnRequest,
         mode: SpawnMode,
+    ) -> Result<SpawnHandle, SpawnError> {
+        self.spawn_with_events(request, mode, None).await
+    }
+
+    /// Spawn a single subagent, optionally threading a streaming
+    /// [`AgentLoopEvent`](aura_agent_loop::AgentLoopEvent) sink into
+    /// the child runner so the child's live thread is observable.
+    ///
+    /// `event_tx` is forwarded into the [`ChildRunContext`] for the
+    /// `Wait` / `Detached` paths. Batch dispatch ignores it (use
+    /// [`Self::spawn_batch`] for multi-child fan-out). When `None`,
+    /// behaviour is identical to the legacy [`Self::spawn`].
+    ///
+    /// # Errors
+    ///
+    /// See [`SpawnError`].
+    #[instrument(
+        skip(self, request, event_tx),
+        fields(parent_agent_id = %request.parent.agent_id, mode = ?mode)
+    )]
+    pub async fn spawn_with_events(
+        &self,
+        request: SpawnRequest,
+        mode: SpawnMode,
+        event_tx: Option<tokio::sync::mpsc::Sender<aura_agent_loop::AgentLoopEvent>>,
     ) -> Result<SpawnHandle, SpawnError> {
         // (1) Parent-mode gate. Plan/Ask/Debug short-circuit before
         //     any lease / quota / audit work.
@@ -388,6 +413,7 @@ impl FleetSpawner {
                         parent_chain,
                         cancellation,
                         preassigned_agent_id: child_agent_id,
+                        event_tx,
                     })
                     .await?;
                 drop(ticket);
@@ -457,6 +483,7 @@ impl FleetSpawner {
                             parent_chain,
                             cancellation: cancellation_clone,
                             preassigned_agent_id: child_agent_id,
+                            event_tx,
                         })
                         .await;
                     let result = match outcome {
@@ -654,6 +681,7 @@ impl FleetSpawner {
                                 parent_chain,
                                 cancellation,
                                 preassigned_agent_id: child_agent_id,
+                                event_tx: None,
                             })
                             .await;
                         let _ = match outcome {
@@ -682,6 +710,7 @@ impl FleetSpawner {
                                 parent_chain,
                                 cancellation: cancellation_for_task,
                                 preassigned_agent_id: child_agent_id,
+                                event_tx: None,
                             })
                             .await;
                         let result = match outcome {
@@ -745,6 +774,7 @@ impl FleetSpawner {
                     parent_chain,
                     cancellation,
                     preassigned_agent_id: child_agent_id,
+                    event_tx: None,
                 })
                 .await;
             let result = match outcome {

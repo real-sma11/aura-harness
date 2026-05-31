@@ -535,11 +535,11 @@ mod driver_tests {
     use crate::gateway::session::{prepare_chat_session, WsContext};
     use crate::protocol::{InboundMessage, OutboundMessage, UserMessage};
     use aura_engine::scheduler::Scheduler;
+    use aura_model_reasoner::{MockProvider, ModelProvider};
     use aura_protocol::{
         AgentCapabilities, AgentIdentity, AgentPermissionsWire, ModelSelection, RuntimeRequest,
         RuntimeRequestType, WorkspaceLocation,
     };
-    use aura_model_reasoner::{MockProvider, ModelProvider};
     use aura_store_db::RocksStore;
     use aura_tools::{ToolCatalog, ToolConfig};
 
@@ -577,6 +577,7 @@ mod driver_tests {
             skill_manager: None,
             router_url: None,
             aura_os_server_url: None,
+            chat_runs: Arc::new(DashMap::new()),
         }
     }
 

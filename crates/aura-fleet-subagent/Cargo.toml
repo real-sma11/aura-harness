@@ -14,7 +14,12 @@ aura-agent-subagent = { path = "../aura-agent-subagent" }
 aura-fleet-spawn = { path = "../aura-fleet-spawn" }
 aura-fleet-registry = { path = "../aura-fleet-registry" }
 aura-fleet-quota = { path = "../aura-fleet-quota" }
+# `AgentLoopEvent` type for the optional child streaming sink threaded
+# through `spawn_with_events` (no agent-loop logic runs in this crate).
+aura-agent-loop = { path = "../aura-agent-loop" }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 aura-engine = { path = "../aura-engine" }

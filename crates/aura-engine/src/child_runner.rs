@@ -13,6 +13,7 @@
 //! without touching this crate.
 
 use async_trait::async_trait;
+use aura_agent_kernel::PolicyConfig;
 use aura_agent_loop::AgentLoopConfig;
 use aura_agent_subagent::{narrow_permissions, registry::SubagentRegistry};
 use aura_core_types::{
@@ -21,7 +22,6 @@ use aura_core_types::{
     UserToolDefaults,
 };
 use aura_fleet_spawn::{ChildRunContext, ChildRunError, ChildRunner};
-use aura_agent_kernel::PolicyConfig;
 use aura_store_db::Store;
 use bytes::Bytes;
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
-use crate::scheduler::Scheduler;
+use crate::scheduler::{ScheduleOverrides, Scheduler};
 
 /// [`ChildRunner`] implementation backed by the [`Scheduler`] +
 /// [`Store`] pair.
@@ -167,6 +167,11 @@ impl ChildRunner for RuntimeChildRunner {
         }
         let loop_config = loop_config_for(&kind, &child_model);
         let policy = policy_for(child_permissions, child_tool_permissions, &user_defaults);
+        // Hand the optional streaming sink to the scheduler so the
+        // child loop runs via `run_with_events` and its
+        // `AgentLoopEvent`s reach the observer attached to the minted
+        // child run id. `None` preserves the non-streaming Wait path.
+        let child_event_tx = ctx.event_tx;
         if kind.budget.timeout_ms == 0 {
             return Ok(SubagentResult {
                 child_agent_id: Some(child_agent_id),
@@ -191,10 +196,13 @@ impl ChildRunner for RuntimeChildRunner {
             }
             outcome = tokio::time::timeout(
                 Duration::from_millis(kind.budget.timeout_ms),
-                self.scheduler.schedule_agent_with_overrides(
+                self.scheduler.schedule_agent_with_options(
                     child_agent_id,
-                    Some(loop_config),
-                    Some(policy),
+                    ScheduleOverrides {
+                        loop_config: Some(loop_config),
+                        policy: Some(policy),
+                        event_tx: child_event_tx,
+                    },
                 ),
             ) => match outcome {
                 Ok(result) => result.map_err(|e| ChildRunError::Internal(format!("schedule: {e}")))?,

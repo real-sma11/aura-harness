@@ -19,6 +19,7 @@
 //! `SubagentResult` so the existing task tool surface remains stable.
 
 use async_trait::async_trait;
+use aura_agent_loop::AgentLoopEvent;
 use aura_agent_subagent::{overrides_from_request, parent_context_from_request, SubagentRegistry};
 use aura_core_types::{SubagentDispatchRequest, SubagentResult};
 use aura_fleet_quota::QuotaPool;
@@ -29,6 +30,8 @@ use aura_fleet_spawn::{
 };
 use aura_tools::SubagentDispatchHook;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Foreground `task` dispatcher backed by the fleet layer.
 ///
@@ -82,11 +85,39 @@ impl FleetSubagentDispatcher {
         self.registry = registry;
         self
     }
-}
 
-#[async_trait]
-impl SubagentDispatchHook for FleetSubagentDispatcher {
-    async fn dispatch(&self, request: SubagentDispatchRequest) -> Result<SubagentResult, String> {
+    /// Dispatch a subagent run, optionally threading a streaming
+    /// [`AgentLoopEvent`] sink and a caller [`CancellationToken`].
+    ///
+    /// This is the observability-aware superset of the
+    /// [`SubagentDispatchHook::dispatch`] entry point. It honors
+    /// `request.spawn_mode` (defaulting to [`SpawnMode::Wait`]):
+    ///
+    /// - `Wait` (default): block until the child completes and return
+    ///   its [`SubagentResult`] inline — byte-identical to the legacy
+    ///   blocking behavior.
+    /// - `Detached`: spawn the child in the background and return an
+    ///   immediate ack `SubagentResult` carrying the child agent id so
+    ///   the parent can keep working while observing the child's live
+    ///   thread.
+    ///
+    /// `event_tx` is forwarded to the child runner so the child loop
+    /// streams events to an external observer (the WS client attached
+    /// to the minted child run id). `cancellation` is forked into the
+    /// child token so cancelling the parent turn propagates into a
+    /// `Wait` child.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` only on infrastructure failures that
+    /// cannot be represented as a `SubagentResult`. Rejections and
+    /// child failures are returned inside an `Ok(SubagentResult)`.
+    pub async fn spawn_with_events(
+        &self,
+        request: SubagentDispatchRequest,
+        event_tx: Option<mpsc::Sender<AgentLoopEvent>>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<SubagentResult, String> {
         let Some(kind) = self.registry.get(&request.subagent_type).cloned() else {
             return Ok(SubagentResult::rejected(format!(
                 "unknown subagent type '{}'",
@@ -96,6 +127,7 @@ impl SubagentDispatchHook for FleetSubagentDispatcher {
 
         let parent_ctx = parent_context_from_request(&request);
         let overrides = overrides_from_request(&request, &kind);
+        let mode = request.spawn_mode.unwrap_or(SpawnMode::Wait);
 
         let spawn_request = SpawnRequest {
             parent: parent_ctx,
@@ -103,17 +135,37 @@ impl SubagentDispatchHook for FleetSubagentDispatcher {
             prompt: request.prompt.clone(),
             originating_user_id: request.originating_user_id.clone(),
             tool_call_id: request.tool_call_id.clone(),
-            cancellation: None,
+            cancellation,
         };
 
-        match self.spawner.spawn(spawn_request, SpawnMode::Wait).await {
+        match self
+            .spawner
+            .spawn_with_events(spawn_request, mode, event_tx)
+            .await
+        {
             Ok(SpawnHandle::Completed(result)) => Ok(result),
+            Ok(SpawnHandle::Detached(detached)) => Ok(SubagentResult::completed(
+                detached.agent_id,
+                format!(
+                    "subagent dispatched (detached); child agent {} running in background",
+                    detached.agent_id
+                ),
+            )),
             Ok(other) => Ok(SubagentResult::rejected(format!(
-                "task dispatch: unexpected handle variant {:?} for SpawnMode::Wait",
+                "task dispatch: unexpected handle variant {:?} for SpawnMode::{mode:?}",
                 other.mode()
             ))),
             Err(err) => Ok(spawn_error_to_subagent_result(&err)),
         }
+    }
+}
+
+#[async_trait]
+impl SubagentDispatchHook for FleetSubagentDispatcher {
+    async fn dispatch(&self, request: SubagentDispatchRequest) -> Result<SubagentResult, String> {
+        // Default trait path: no streaming sink, no caller cancellation
+        // — preserves the original blocking `Wait` dispatch exactly.
+        self.spawn_with_events(request, None, None).await
     }
 }
 
