@@ -382,19 +382,7 @@ dependencies = [
 name = "aura-core"
 version = "0.1.0"
 dependencies = [
- "aura-core-modes",
- "aura-core-permissions",
  "aura-core-types",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "hex",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "uuid",
 ]
 
 [[package]]
@@ -443,10 +431,14 @@ version = "0.1.0"
 dependencies = [
  "aura-core-modes",
  "aura-core-permissions",
+ "base64 0.22.1",
  "blake3",
+ "bytes",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "uuid",
 ]
 

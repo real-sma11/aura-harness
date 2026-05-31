@@ -7,21 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aura-core-modes = { path = "../aura-core-modes" }
-aura-core-permissions = { path = "../aura-core-permissions" }
 aura-core-types = { path = "../aura-core-types" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-blake3 = { workspace = true }
-thiserror = { workspace = true }
-bytes = { workspace = true }
-uuid = { workspace = true }
-hex = "0.4"
-base64 = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-proptest = { workspace = true }
 
 # Phase 9: `aura-core-types` is re-exported through this shell
 # crate; cargo machete misses the use because it lives behind a

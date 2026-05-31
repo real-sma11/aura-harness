@@ -35,9 +35,35 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all)]
 
+mod error;
+pub mod hash;
 mod ids;
+mod registry;
+mod serde_helpers;
+mod time;
+mod types;
 
 pub use ids::{RunId, SessionId, ToolCallId, TransactionId, TurnId, UserId};
+
+pub use error::{AuraError, Result};
+#[allow(deprecated)]
+pub use ids::{ActionId, AgentEventId, AgentId, FactId, Hash, ProcedureId, ProcessId, TxId};
+pub use registry::{Registry, RegistryError};
+#[allow(deprecated)]
+pub use types::ToolDecision;
+pub use types::{
+    installed_integrations_satisfy, integration_match, Action, ActionKind, ActionResultPayload,
+    AgentStatus, CacheControl, ContextHash, Decision, Effect, EffectKind, EffectStatus, Identity,
+    InstalledIntegrationDefinition, InstalledToolCapability, InstalledToolDefinition,
+    InstalledToolIntegrationRequirement, InstalledToolRuntimeAuth, InstalledToolRuntimeExecution,
+    InstalledToolRuntimeIntegration, InstalledToolRuntimeProviderExecution, LineDiff,
+    ProcessPending, Proposal, ProposalSet, RecordEntry, RecordEntryBuilder, RejectedProposal,
+    RuntimeCapabilityInstall, SubagentBudget, SubagentDispatchRequest, SubagentExit,
+    SubagentKindSpec, SubagentResult, SystemKind, ToolAuth, ToolCall, ToolCallContext,
+    ToolDefinition, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultContent,
+    ToolResultKind, Trace, Transaction, TransactionType, DEFAULT_SUBAGENT_TIMEOUT_MS,
+    KERNEL_VERSION, MAX_TURNS,
+};
 
 // Convenience re-exports of mode/permission primitives so downstream
 // crates can pull from one place once they're migrated. These do not
@@ -47,7 +73,8 @@ pub use aura_core_modes::{
     ModeGate, ModeProfile, ModeViolation, ReplayMode, SandboxMode, SpawnMode,
 };
 pub use aura_core_permissions::{
-    allows, allows_tool, effective, intersect, narrow, AgentPermissions, AgentScope,
-    AgentToolPermissions, Capability, EffectivePermissions, GrantSource, PermissionDecision,
-    PermissionError, Permissions, PrivilegeGrant, ToolState, UserDefaultMode, UserToolDefaults,
+    allows, allows_tool, effective, intersect, is_effectively_full_access, narrow,
+    resolve_effective_permission, AgentPermissions, AgentScope, AgentToolPermissions, Capability,
+    EffectivePermissions, GrantSource, PermissionDecision, PermissionError, Permissions,
+    PrivilegeGrant, ToolState, UserDefaultMode, UserToolDefaults,
 };

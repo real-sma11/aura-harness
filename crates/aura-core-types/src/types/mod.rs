@@ -13,7 +13,6 @@ mod record;
 mod status;
 mod subagent;
 mod tool;
-mod tool_permissions;
 mod transaction;
 
 pub use action::{Action, ActionKind};
@@ -37,10 +36,6 @@ pub use tool::{
     InstalledToolRuntimeAuth, InstalledToolRuntimeExecution, InstalledToolRuntimeIntegration,
     InstalledToolRuntimeProviderExecution, LineDiff, RuntimeCapabilityInstall, ToolAuth, ToolCall,
     ToolCallContext, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultKind,
-};
-pub use tool_permissions::{
-    is_effectively_full_access, resolve_effective_permission, AgentToolPermissions, ToolState,
-    UserDefaultMode, UserToolDefaults,
 };
 pub use transaction::{SystemKind, Transaction, TransactionType};
 
