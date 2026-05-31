@@ -21,7 +21,7 @@
 //!    [`super::shared::record_entry_for_tool_outcome`].
 
 use super::shared::{record_entry_for_tool_outcome, ToolOutcomeInputs};
-use crate::executor::ExecuteContext;
+use aura_exec_traits::ExecuteContext;
 use crate::kernel::{Kernel, ProcessResult};
 use aura_core::{
     Action, ActionId, ActionKind, ContextHash, Effect, EffectKind, ToolProposal, Transaction,

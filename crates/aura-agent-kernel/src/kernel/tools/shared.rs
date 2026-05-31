@@ -7,7 +7,7 @@
 //! `(verdict, optional execution outcome)` pair into the final
 //! `ProcessResult` shape.
 
-use crate::executor::{decode_tool_effect, ExecuteContext};
+use aura_exec_traits::{decode_tool_effect, ExecuteContext};
 use crate::kernel::{
     ApprovalRequiredInfo, Kernel, PendingToolPrompt, ProcessResult, ToolApprovalRemember,
     ToolApprovalResponse, ToolDecision, ToolOutput,

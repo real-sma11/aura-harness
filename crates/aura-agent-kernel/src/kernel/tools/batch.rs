@@ -8,7 +8,7 @@
 
 use super::shared::{record_entry_for_tool_outcome, ToolOutcomeInputs};
 use crate::context::hash_tx_with_window;
-use crate::executor::ExecuteContext;
+use aura_exec_traits::ExecuteContext;
 use crate::kernel::{Kernel, ProcessResult};
 use crate::policy::PolicyVerdict;
 use aura_core::{

@@ -12,7 +12,7 @@ use aura_core::{
     AgentId, AgentMode, AgentPermissions, AgentToolPermissions, Capability, KernelMode,
     SubagentDispatchRequest, SubagentResult, ToolDefinition, ToolResult, UserToolDefaults,
 };
-use aura_kernel::SpawnHook;
+use aura_exec_traits::SpawnHook;
 use std::sync::Arc;
 
 /// Context provided to tools during execution.

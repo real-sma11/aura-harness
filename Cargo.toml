@@ -57,6 +57,9 @@ members = [
     "crates/aura-exec-sandbox",
     "crates/aura-exec-tools",
     "crates/aura-exec-runner",
+    # Phase 1 refactor: exec-layer executor/spawn traits relocated out
+    # of aura-agent-kernel so aura-tools no longer depends upward.
+    "crates/aura-exec-traits",
     # Phase 3 model layer crate + shell
     "crates/aura-reasoner",
     "crates/aura-model-reasoner",

@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 aura-core = { path = "../aura-core" }
 aura-core-modes = { path = "../aura-core-modes" }
+aura-exec-traits = { path = "../aura-exec-traits" }
 aura-store = { path = "../aura-store" }
 aura-store-record = { path = "../aura-store-record" }
 aura-store-snapshot = { path = "../aura-store-snapshot" }

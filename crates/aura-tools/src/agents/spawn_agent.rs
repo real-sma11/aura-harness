@@ -9,7 +9,7 @@
 //!   [`crate::ToolContext::parent_chain`], the call is rejected (cycle
 //!   prevention). There is **no depth cap** — strict-subset plus the
 //!   caller's budget are the natural bounds.
-//! - On success the tool invokes [`aura_kernel::SpawnHook`] when one is
+//! - On success the tool invokes [`aura_exec_traits::SpawnHook`] when one is
 //!   attached to the [`ToolContext`] so a production kernel writer can
 //!   create the new `Identity`, seed the child's record log, and append
 //!   the `Delegate` transaction on the caller's log. The tool's stdout
@@ -25,7 +25,7 @@ use aura_core::{
     resolve_effective_permission, AgentId, AgentPermissions, AgentToolPermissions, ToolDefinition,
     ToolResult,
 };
-use aura_kernel::{ChildAgentSpec, NoopSpawnHook};
+use aura_exec_traits::{ChildAgentSpec, NoopSpawnHook};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
@@ -253,14 +253,14 @@ pub(crate) mod tests {
     use crate::ToolConfig;
     use async_trait::async_trait;
     use aura_core::{AgentScope, Capability, Hash};
-    use aura_kernel::{SpawnError, SpawnHook, SpawnOutcome};
+    use aura_exec_traits::{SpawnError, SpawnHook, SpawnOutcome};
     use std::sync::{Arc, Mutex};
 
     /// Test-only spawn hook that records each invocation so assertions can
     /// inspect the parent id + originating user id that the tool forwarded.
     #[derive(Default)]
     pub(crate) struct MockSpawnHook {
-        pub calls: Mutex<Vec<(AgentId, Option<String>, aura_kernel::ChildAgentSpec)>>,
+        pub calls: Mutex<Vec<(AgentId, Option<String>, aura_exec_traits::ChildAgentSpec)>>,
     }
 
     #[async_trait]
@@ -269,7 +269,7 @@ pub(crate) mod tests {
             &self,
             parent_agent_id: &AgentId,
             originating_user_id: Option<&str>,
-            child: aura_kernel::ChildAgentSpec,
+            child: aura_exec_traits::ChildAgentSpec,
         ) -> Result<SpawnOutcome, SpawnError> {
             let child_agent_id = child.preassigned_agent_id.unwrap_or_else(AgentId::generate);
             self.calls.lock().unwrap().push((

@@ -10,7 +10,7 @@ use crate::error::ToolError;
 use aura_core::{
     InstalledToolDefinition, InstalledToolRuntimeExecution, ToolAuth, ToolCall, ToolResult,
 };
-use aura_kernel::ExecuteContext;
+use aura_exec_traits::ExecuteContext;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 

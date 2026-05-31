@@ -71,15 +71,7 @@ const LAYER_ORDER: &[&str] = &[
 /// follow-up is tracked as **Phase 10** and is intentionally NOT
 /// inlined into Phase 9 to keep this commit focused on the
 /// surface-layer split and CI-strict promotion.
-const WARN_ONLY_UPWARD_EDGES: &[(&str, &str)] = &[
-    // TODO(phase-10-executor-trait-relocation): break the last
-    // remaining exec→agent edge by moving the Executor /
-    // ExecuteContext / SpawnHook traits out of aura-agent-kernel
-    // and into the exec layer. Re-evaluate at the start of Phase
-    // 10; until then, this entry stays warn-only so the surface
-    // promotion in Phase 9 is not blocked.
-    ("aura-tools", "aura-kernel"),
-];
+const WARN_ONLY_UPWARD_EDGES: &[(&str, &str)] = &[];
 
 const KNOWN_CRATES: &[(&str, &str)] = &[
     // Root binary + dev/CI stuff — not a crate-layer thing.
@@ -114,6 +106,9 @@ const KNOWN_CRATES: &[(&str, &str)] = &[
     ("aura-exec-sandbox", "exec"),
     ("aura-exec-tools", "exec"),
     ("aura-exec-runner", "exec"),
+    // Phase 1 refactor: low-level executor/spawn traits relocated out
+    // of aura-agent-kernel so aura-tools no longer depends upward.
+    ("aura-exec-traits", "exec"),
     // Phase 3 model + context layer renames. The original
     // `aura-<name>` crates are kept as compatibility shells that
     // re-export through the layered `aura-<layer>-<name>` crate.

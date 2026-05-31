@@ -37,7 +37,7 @@ use aura_core::{
     ToolResult,
 };
 use aura_core::{AgentPermissions, AgentToolPermissions, ToolDefinition, UserToolDefaults};
-use aura_kernel::{ExecuteContext, Executor, ExecutorError, SpawnHook};
+use aura_exec_traits::{ExecuteContext, Executor, ExecutorError, SpawnHook};
 use bytes::Bytes;
 use reqwest::Client;
 use std::collections::HashMap;

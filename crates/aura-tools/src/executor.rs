@@ -11,7 +11,7 @@ use aura_core::{
     Action, ActionKind, AgentId, AgentPermissions, AgentToolPermissions, Effect, EffectKind,
     EffectStatus, ToolCall, ToolResult, UserToolDefaults,
 };
-use aura_kernel::{ExecuteContext, Executor, ExecutorError, SpawnHook};
+use aura_exec_traits::{ExecuteContext, Executor, ExecutorError, SpawnHook};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -329,7 +329,7 @@ impl Executor for ToolExecutor {
 mod tests {
     use super::*;
     use aura_core::{ActionId, AgentId};
-    use aura_kernel::ExecuteContext;
+    use aura_exec_traits::ExecuteContext;
     use tempfile::TempDir;
 
     fn create_test_context() -> (ExecuteContext, TempDir) {

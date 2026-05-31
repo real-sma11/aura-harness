@@ -1,0 +1,22 @@
+[package]
+name = "aura-exec-traits"
+description = "Executor / spawn-hook traits for the exec layer (relocated from aura-agent-kernel)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aura-core = { path = "../aura-core" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

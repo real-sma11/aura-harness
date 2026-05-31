@@ -6,7 +6,7 @@
 //! being split per-file.
 
 use super::*;
-use crate::executor::ExecuteContext;
+use aura_exec_traits::ExecuteContext;
 use crate::ExecutorRouter;
 use aura_core::{
     ActionKind, AgentId, InstalledIntegrationDefinition, InstalledToolCapability,

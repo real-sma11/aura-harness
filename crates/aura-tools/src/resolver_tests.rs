@@ -4,7 +4,7 @@ use aura_core::{
     InstalledToolRuntimeExecution, InstalledToolRuntimeIntegration,
     InstalledToolRuntimeProviderExecution, ToolAuth,
 };
-use aura_kernel::ExecuteContext;
+use aura_exec_traits::ExecuteContext;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpListener;
