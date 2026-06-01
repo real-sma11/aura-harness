@@ -40,6 +40,10 @@ pub(in crate::gateway) async fn run_start_handler(
         RuntimeRequestType::Chat { .. } => start_chat_run(state, req, auth_token).await,
         RuntimeRequestType::DevLoop {} => start_dev_loop_run(state, req, auth_token).await,
         RuntimeRequestType::TaskRun { .. } => start_task_run(state, req, auth_token).await,
+        RuntimeRequestType::Council { .. } => Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "council run not yet implemented"})),
+        )),
     }
 }
 

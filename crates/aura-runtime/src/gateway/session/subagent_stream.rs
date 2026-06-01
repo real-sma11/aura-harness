@@ -237,6 +237,8 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
                 parent_tool_use_id,
                 subagent_type,
                 prompt,
+                model: None,
+                council_index: None,
             }));
 
         let result = self

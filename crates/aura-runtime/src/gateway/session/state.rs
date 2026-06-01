@@ -217,10 +217,12 @@ impl Session {
             RuntimeRequestType::Chat {
                 conversation_messages,
             } => conversation_messages,
-            RuntimeRequestType::DevLoop {} | RuntimeRequestType::TaskRun { .. } => {
+            RuntimeRequestType::DevLoop {}
+            | RuntimeRequestType::TaskRun { .. }
+            | RuntimeRequestType::Council { .. } => {
                 return Err(
-                    "session apply only accepts RuntimeRequestType::Chat — DevLoop / TaskRun runs \
-                     do not open a chat session"
+                    "session apply only accepts RuntimeRequestType::Chat — DevLoop / TaskRun / \
+                     Council runs do not open a chat session"
                         .to_string(),
                 );
             }

@@ -9,4 +9,14 @@
  * back to the originating `task` tool-use block so the UI can render
  * the live thread under that tool card.
  */
-export type SubagentSpawned = { child_run_id: string, parent_tool_use_id: string | null, subagent_type: string, prompt: string, };
+export type SubagentSpawned = { child_run_id: string, parent_tool_use_id: string | null, subagent_type: string, prompt: string, 
+/**
+ * Model id driving this child run. Set for AURA Council members so
+ * the UI can label each column; `None` for ordinary `task` spawns.
+ */
+model: string | null, 
+/**
+ * Zero-based council slot index for AURA Council members (ordering
+ * the columns); `None` for ordinary `task` spawns.
+ */
+council_index: number | null, };

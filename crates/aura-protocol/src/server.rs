@@ -174,6 +174,14 @@ pub struct SubagentSpawned {
     pub parent_tool_use_id: Option<String>,
     pub subagent_type: String,
     pub prompt: String,
+    /// Model id driving this child run. Set for AURA Council members so
+    /// the UI can label each column; `None` for ordinary `task` spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Zero-based council slot index for AURA Council members (ordering
+    /// the columns); `None` for ordinary `task` spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_index: Option<u32>,
 }
 
 /// Payload for `subagent_status`.

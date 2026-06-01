@@ -133,6 +133,29 @@ pub enum RuntimeRequestType {
         #[serde(default)]
         work_log: Vec<String>,
     },
+    /// AURA Council: fan the same query across `members` in parallel
+    /// (one subagent child run each), then synthesize one combined
+    /// answer with `members[0]` (the first model). `members[0]` is the
+    /// synthesizer.
+    Council {
+        /// Council member models in order; `members[0]` synthesizes.
+        members: Vec<CouncilMember>,
+        /// Prior conversation messages to hydrate into session history.
+        #[serde(default)]
+        conversation_messages: Vec<ConversationMessage>,
+    },
+}
+
+/// One member of an AURA Council run: a model to fan the shared query
+/// out to. `id` is a stable per-member slot id the runtime echoes back
+/// on the member's `SubagentSpawned` so the UI can correlate columns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct CouncilMember {
+    /// Stable member id (the council slot index as a string, e.g. "0").
+    pub id: String,
+    /// Model driving this member.
+    pub model: ModelSelection,
 }
 
 /// "Who is this agent" bundle.
