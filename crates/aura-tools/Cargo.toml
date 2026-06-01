@@ -25,7 +25,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 similar = "2"
 toml = { workspace = true }
 walkdir = { workspace = true }

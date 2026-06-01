@@ -91,7 +91,8 @@ pub(super) async fn process_many(
         }
 
         per_slot_action[i] = Some(action.clone());
-        let ctx = ExecuteContext::new(kernel.agent_id, action_id, workspace.clone());
+        let ctx = ExecuteContext::new(kernel.agent_id, action_id, workspace.clone())
+            .with_tool_use_id(proposal.tool_use_id.clone());
         dispatch_indices.push(i);
         dispatch_contexts.push(ctx);
         dispatch_actions.push(action);

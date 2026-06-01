@@ -82,6 +82,14 @@ pub struct ToolContext {
     pub caller_kernel_mode: Option<KernelMode>,
     /// Phase 7b: caller's resolved model identifier snapshot.
     pub caller_model_id: Option<String>,
+    /// Model-supplied `tool_use` id of the tool call currently being
+    /// executed, when known. Threaded from
+    /// [`ExecuteContext::tool_use_id`](aura_exec_traits::ExecuteContext)
+    /// so the `task` tool can use the real tool-use block id as the
+    /// subagent dispatch `tool_call_id` — this is what the UI binds the
+    /// spawned subagent card to (`parent_tool_use_id`). `None` falls
+    /// back to any caller-stamped dedupe key on the tool input.
+    pub current_tool_use_id: Option<String>,
 }
 
 /// Hook invoked by the `send_to_agent` / `agent_lifecycle` / `delegate_task`
@@ -177,6 +185,7 @@ impl ToolContext {
             caller_mode: None,
             caller_kernel_mode: None,
             caller_model_id: None,
+            current_tool_use_id: None,
         }
     }
 }

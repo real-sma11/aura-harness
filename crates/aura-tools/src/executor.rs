@@ -258,6 +258,7 @@ impl ToolExecutor {
         tool_ctx.agent_control_hook = self.agent_control_hook.clone();
         tool_ctx.agent_read_hook = self.agent_read_hook.clone();
         tool_ctx.subagent_dispatch = self.subagent_dispatch.clone();
+        tool_ctx.current_tool_use_id = ctx.tool_use_id.clone();
 
         match self.tools.get(tool_name.as_str()) {
             Some(tool) => tool.execute(&tool_ctx, tool_call.args.clone()).await,

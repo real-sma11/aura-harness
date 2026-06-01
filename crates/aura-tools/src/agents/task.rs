@@ -184,6 +184,16 @@ impl TaskTool {
 
         let model_override = input.model_override.clone().or_else(|| input.model.clone());
 
+        // Prefer the real model-supplied tool-use id stamped onto the
+        // context by the executor; fall back to any caller-stamped
+        // dedupe key. This id flows through as `parent_tool_use_id` on
+        // the emitted `SubagentSpawned` event, which is what the UI
+        // binds the spawned subagent card (and its "Open" action) to.
+        let tool_call_id = ctx
+            .current_tool_use_id
+            .clone()
+            .or_else(|| input.tool_call_id.clone());
+
         Ok(SubagentDispatchRequest {
             parent_agent_id,
             subagent_type: input.subagent_type.clone(),
@@ -195,7 +205,7 @@ impl TaskTool {
             parent_permissions: caller_permissions,
             parent_tool_permissions: ctx.caller_tool_permissions.clone(),
             user_tool_defaults: ctx.user_tool_defaults.clone(),
-            tool_call_id: input.tool_call_id.clone(),
+            tool_call_id,
             parent_mode: ctx.caller_mode,
             parent_kernel_mode: ctx.caller_kernel_mode,
             parent_model_id: ctx.caller_model_id.clone(),
@@ -328,6 +338,35 @@ mod tests {
         assert!(
             err.to_string().contains("maximum subagent depth"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn task_uses_context_tool_use_id_as_dispatch_key() {
+        let mut ctx = ctx(AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::SpawnAgent],
+        });
+        ctx.current_tool_use_id = Some("toolu_real_123".into());
+        let mut input = minimal_input();
+        input.tool_call_id = Some("model_supplied_dedupe".into());
+        let request = TaskTool::build_request(&ctx, &input).unwrap();
+        assert_eq!(request.tool_call_id.as_deref(), Some("toolu_real_123"));
+    }
+
+    #[test]
+    fn task_falls_back_to_input_tool_call_id() {
+        let mut ctx = ctx(AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::SpawnAgent],
+        });
+        ctx.current_tool_use_id = None;
+        let mut input = minimal_input();
+        input.tool_call_id = Some("model_supplied_dedupe".into());
+        let request = TaskTool::build_request(&ctx, &input).unwrap();
+        assert_eq!(
+            request.tool_call_id.as_deref(),
+            Some("model_supplied_dedupe")
         );
     }
 

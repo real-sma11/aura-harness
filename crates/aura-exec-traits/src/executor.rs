@@ -68,6 +68,14 @@ pub struct ExecuteContext {
     pub workspace_root: PathBuf,
     /// Configuration limits
     pub limits: ExecuteLimits,
+    /// Model-supplied `tool_use` id for the proposal that produced this
+    /// action, when known. Threaded from the kernel's
+    /// [`ToolProposal::tool_use_id`](aura_core_types::ToolProposal) so
+    /// tools (notably `task`) can stamp the real id onto downstream
+    /// records. The kernel's `action_id` is a distinct internal id and
+    /// is **not** the model tool-use id, so this is the only faithful
+    /// source of the originating tool-use block id at execution time.
+    pub tool_use_id: Option<String>,
 }
 
 /// Execution limits enforced by the executor.
@@ -106,6 +114,7 @@ impl ExecuteContext {
             action_id,
             workspace_root,
             limits: ExecuteLimits::default(),
+            tool_use_id: None,
         }
     }
 
@@ -113,6 +122,17 @@ impl ExecuteContext {
     #[must_use]
     pub const fn with_limits(mut self, limits: ExecuteLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Attach the model-supplied `tool_use` id for the originating
+    /// proposal. Blank/whitespace ids are treated as unset.
+    #[must_use]
+    pub fn with_tool_use_id(mut self, tool_use_id: impl Into<String>) -> Self {
+        let value = tool_use_id.into();
+        if !value.trim().is_empty() {
+            self.tool_use_id = Some(value);
+        }
         self
     }
 }
