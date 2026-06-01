@@ -112,7 +112,11 @@ impl RuntimeSubagentObservabilityHook {
     fn register_child_run(
         &self,
         child_run_id: &str,
-    ) -> (mpsc::Sender<AgentLoopEvent>, Arc<ChatEventChannel>) {
+    ) -> (
+        mpsc::Sender<AgentLoopEvent>,
+        Arc<ChatEventChannel>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let channel = ChatEventChannel::new();
         let child_outbound = spawn_event_forwarder(channel.clone());
 
@@ -131,12 +135,16 @@ impl RuntimeSubagentObservabilityHook {
         self.chat_runs.insert(child_run_id.to_string(), handle);
 
         let (event_tx, event_rx) = mpsc::channel::<AgentLoopEvent>(CHILD_EVENT_CHANNEL_CAPACITY);
-        tokio::spawn(super::helpers::forward_events_to_ws(
+        // The forwarder ends when the child loop drops its event sender,
+        // i.e. when the child run finishes — the detached path awaits this
+        // handle to emit a terminal status without holding the child's
+        // `result_rx` (owned by the spawner).
+        let forwarder = tokio::spawn(super::helpers::forward_events_to_ws(
             event_rx,
             child_outbound,
         ));
 
-        (event_tx, channel)
+        (event_tx, channel, forwarder)
     }
 }
 
@@ -147,8 +155,12 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
         let parent_tool_use_id = request.tool_call_id.clone();
         let subagent_type = request.subagent_type.clone();
         let prompt = request.prompt.clone();
+        let is_detached = matches!(
+            request.spawn_mode,
+            Some(aura_core_types::SpawnMode::Detached)
+        );
 
-        let (event_tx, child_channel) = self.register_child_run(&child_run_id);
+        let (event_tx, child_channel, forwarder) = self.register_child_run(&child_run_id);
 
         // Emit `SubagentSpawned` on the parent stream BEFORE the (Wait)
         // dispatch blocks so the client can render a clickable thread
@@ -167,6 +179,30 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
             .dispatch_with_events(request, Some(event_tx), self.parent_cancellation.clone())
             .await;
 
+        // Detached dispatch returns an immediate ack while the child is
+        // still running in the background. Reflect `running` now and emit
+        // the terminal status when the child's event stream closes — NOT
+        // a premature `completed` derived from the ack.
+        if is_detached && result.is_ok() {
+            let running = SubagentStatus {
+                child_run_id: child_run_id.clone(),
+                state: "running".to_string(),
+                reason: None,
+            };
+            let _ = self
+                .parent_outbound
+                .try_send(OutboundMessage::SubagentStatus(running.clone()));
+            child_channel.push(OutboundMessage::SubagentStatus(running));
+            spawn_detached_completion_watch(
+                forwarder,
+                self.parent_outbound.clone(),
+                child_channel,
+                self.chat_runs.clone(),
+                child_run_id,
+            );
+            return result;
+        }
+
         let status = status_payload(&child_run_id, &result);
         let _ = self
             .parent_outbound
@@ -177,10 +213,40 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
         // replays the full thread without blocking on a live receiver.
         child_channel.push(OutboundMessage::SubagentStatus(status));
         child_channel.mark_done();
+        // Wait path: the forwarder is already draining to completion as
+        // the child loop dropped its sender; detaching the handle is
+        // equivalent to the prior fire-and-forget spawn.
+        drop(forwarder);
         schedule_child_run_cleanup(self.chat_runs.clone(), child_run_id);
 
         result
     }
+}
+
+/// Watch a detached child's event forwarder to completion, then publish
+/// the terminal status on both the parent and child streams and reap the
+/// run. The typed exit is not available here (the spawner owns the
+/// detached `result_rx`), so a generic `completed` terminal is emitted;
+/// any failure detail still streams through the child's live events.
+fn spawn_detached_completion_watch(
+    forwarder: tokio::task::JoinHandle<()>,
+    parent_outbound: mpsc::Sender<OutboundMessage>,
+    child_channel: Arc<ChatEventChannel>,
+    chat_runs: ChatRunRegistry,
+    child_run_id: String,
+) {
+    tokio::spawn(async move {
+        let _ = forwarder.await;
+        let status = SubagentStatus {
+            child_run_id: child_run_id.clone(),
+            state: "completed".to_string(),
+            reason: None,
+        };
+        let _ = parent_outbound.try_send(OutboundMessage::SubagentStatus(status.clone()));
+        child_channel.push(OutboundMessage::SubagentStatus(status));
+        child_channel.mark_done();
+        schedule_child_run_cleanup(chat_runs, child_run_id);
+    });
 }
 
 /// Map a dispatch outcome onto the wire `SubagentStatus` payload. The
@@ -387,6 +453,41 @@ mod tests {
                 assert_eq!(status.reason.as_deref(), Some("depth exceeded"));
             }
             other => panic!("expected SubagentStatus, got {other:?}"),
+        }
+    }
+
+    /// A detached dispatch must reflect `running` immediately (not a
+    /// premature `completed` from the ack), then emit a terminal
+    /// `completed` once the child's event stream closes.
+    #[tokio::test]
+    async fn detached_dispatch_reports_running_then_completed() {
+        let (hook, mut parent_rx, _registry) = hook_with(StubDispatch {
+            exit: SubagentExit::Completed,
+            streamed_text: Some("working".into()),
+        });
+
+        let mut detached = request();
+        detached.spawn_mode = Some(aura_core_types::SpawnMode::Detached);
+        let _ = hook.dispatch(detached).await.expect("dispatch ok");
+
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(OutboundMessage::SubagentSpawned(_))
+        ));
+        match parent_rx.recv().await.expect("running status frame") {
+            OutboundMessage::SubagentStatus(status) => {
+                assert_eq!(status.state, "running");
+                assert!(status.reason.is_none());
+            }
+            other => panic!("expected running SubagentStatus, got {other:?}"),
+        }
+        // The completion watch fires once the forwarder drains (the stub
+        // dropped its event sender after returning the ack).
+        match parent_rx.recv().await.expect("terminal status frame") {
+            OutboundMessage::SubagentStatus(status) => {
+                assert_eq!(status.state, "completed");
+            }
+            other => panic!("expected completed SubagentStatus, got {other:?}"),
         }
     }
 }
