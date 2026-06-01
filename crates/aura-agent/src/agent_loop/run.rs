@@ -178,6 +178,7 @@ impl AgentLoop {
                                 total_cache_read_input_tokens: 0,
                                 estimated_context_tokens: 0,
                                 context_breakdown: Default::default(),
+                                context_contents: Default::default(),
                                 file_changes: Vec::new(),
                                 iterations: 0,
                                 messages,

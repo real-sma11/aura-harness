@@ -20,6 +20,8 @@
 //!   inside [`runtime_request::AgentIdentity`].
 //! - [`client`]: inbound (client → server) WS envelope and payloads.
 //! - [`server`]: outbound (server → client) WS envelope and payloads.
+//! - [`context`]: rendered per-bucket context contents emitted
+//!   alongside the [`server::ContextBreakdown`] token counts.
 //! - [`common`]: small enums shared across both directions.
 //! - [`permissions`]: wire-compatible mirrors of the harness
 //!   agent-permission model.
@@ -44,6 +46,7 @@ pub mod agent_identity;
 pub mod chat_project_info;
 pub mod client;
 pub mod common;
+pub mod context;
 pub mod conversions;
 pub mod installed;
 pub mod permissions;
@@ -58,6 +61,7 @@ pub use client::{
     SessionModelOverrides, ToolApprovalResponse, UserMessage, MAX_PROMPT_CACHE_KEY_LEN,
 };
 pub use common::{ToolApprovalDecision, ToolApprovalRemember, ToolStateWire};
+pub use context::{ContextContents, ContextSegment};
 pub use conversions::{
     agent_tool_permissions_from_wire, installed_integration_to_core, installed_tool_to_core,
     tool_state_from_wire, tool_state_to_wire,

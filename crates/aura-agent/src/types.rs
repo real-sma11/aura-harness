@@ -41,6 +41,57 @@ pub struct AgentContextBreakdown {
     pub cache_creation_tokens: u64,
 }
 
+/// Rendered text plus token estimate for a single context entry — one
+/// tool, one skill, or one subagent kind. Converted at the wire
+/// boundary into `aura_protocol::ContextSegment` (see the
+/// `aura-runtime` gateway), mirroring how [`AgentContextBreakdown`]
+/// becomes `aura_protocol::ContextBreakdown`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentContextSegment {
+    /// Short human-readable label (tool name, skill name, subagent kind).
+    pub label: String,
+    /// Full rendered text the model receives for this entry.
+    pub text: String,
+    /// Estimated token cost of [`Self::text`], using the same
+    /// `chars / CHARS_PER_TOKEN` heuristic as [`AgentContextBreakdown`].
+    pub tokens: u64,
+}
+
+/// Actual rendered text for each static context bucket, parallel to the
+/// token counts in [`AgentContextBreakdown`]. Built each turn in
+/// [`crate::agent_loop::context`] from the same sources as the
+/// breakdown so the two stay in sync.
+///
+/// `mcp` is reserved for MCP integration and stays empty today, mirroring
+/// the zeroed `mcp_tokens` bucket on [`AgentContextBreakdown`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentContextContents {
+    /// Full rendered system prompt; `None` when the prompt is empty.
+    pub system_prompt: Option<String>,
+    /// One segment per tool the request would carry.
+    pub tools: Vec<AgentContextSegment>,
+    /// One segment per installed skill (name + summary).
+    pub skills: Vec<AgentContextSegment>,
+    /// One segment per registered subagent kind.
+    pub subagents: Vec<AgentContextSegment>,
+    /// Reserved for MCP server context; empty today.
+    pub mcp: Vec<AgentContextSegment>,
+}
+
+impl AgentContextContents {
+    /// True when no bucket carries any content. The wire boundary uses
+    /// this to leave `aura_protocol::SessionUsage::context_contents`
+    /// `None` for empty turns.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.system_prompt.is_none()
+            && self.tools.is_empty()
+            && self.skills.is_empty()
+            && self.subagents.is_empty()
+            && self.mcp.is_empty()
+    }
+}
+
 /// Result of an automatic build check.
 #[derive(Debug, Clone, Default)]
 pub struct AutoBuildResult {
@@ -204,6 +255,13 @@ pub struct AgentLoopResult {
     /// turn that reaches the compaction step (which is every turn that
     /// actually calls the model).
     pub context_breakdown: AgentContextBreakdown,
+    /// Actual rendered text for each static context bucket, parallel to
+    /// [`Self::context_breakdown`]'s token counts. Built each turn
+    /// alongside the breakdown in [`crate::agent_loop::context`] and
+    /// converted to `aura_protocol::ContextContents` at the wire
+    /// boundary. Empty (`AgentContextContents::default()`) on turns
+    /// that never reach the compaction step.
+    pub context_contents: AgentContextContents,
     /// Net file mutations observed across the turn.
     pub file_changes: Vec<FileChange>,
     /// Number of iterations completed.

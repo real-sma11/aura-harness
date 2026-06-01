@@ -5,9 +5,9 @@ use super::chat::populate_tool_definitions;
 use super::{Session, WsContext};
 use crate::gateway::session::cross_agent_hook::{AuraServerAgentHook, AuraServerSpawnHook};
 use crate::protocol::{
-    tool_info_from_definition_with_state, AssistantMessageEnd, ContextBreakdown, ErrorMsg,
-    FileDiff, FilesChanged, OutboundMessage, SessionReady, SessionUsage, SkillInfo, TextDelta,
-    ThinkingDelta, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
+    tool_info_from_definition_with_state, AssistantMessageEnd, ContextBreakdown, ContextContents,
+    ContextSegment, ErrorMsg, FileDiff, FilesChanged, OutboundMessage, SessionReady, SessionUsage,
+    SkillInfo, TextDelta, ThinkingDelta, ToolCallSnapshot, ToolInfo, ToolResultMsg, ToolUseStart,
 };
 use async_trait::async_trait;
 use aura_agent::{
@@ -32,6 +32,40 @@ use tracing::{error, info, warn};
 
 const OUTBOUND_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_DELTA_COALESCE_BYTES: usize = 512;
+
+/// Convert agent-side context segments into their wire equivalents.
+fn convert_context_segments(
+    segments: &[aura_agent::types::AgentContextSegment],
+) -> Vec<ContextSegment> {
+    segments
+        .iter()
+        .map(|seg| ContextSegment {
+            label: seg.label.clone(),
+            text: seg.text.clone(),
+            tokens: seg.tokens,
+        })
+        .collect()
+}
+
+/// Convert the loop's per-turn rendered context contents into the wire
+/// [`ContextContents`]. Returns `None` when every bucket is empty so
+/// the emitted `SessionUsage` omits the field (matching older-style
+/// empty turns) rather than carrying an all-empty payload.
+fn build_wire_context_contents(loop_result: &AgentLoopResult) -> Option<ContextContents> {
+    let src = &loop_result.context_contents;
+    let contents = ContextContents {
+        system_prompt: src.system_prompt.clone(),
+        tools: convert_context_segments(&src.tools),
+        skills: convert_context_segments(&src.skills),
+        subagents: convert_context_segments(&src.subagents),
+        mcp: convert_context_segments(&src.mcp),
+    };
+    if contents.is_empty() {
+        None
+    } else {
+        Some(contents)
+    }
+}
 
 fn summarize_files_changed(loop_result: &AgentLoopResult) -> FilesChanged {
     let mut files_changed = FilesChanged::default();
@@ -978,6 +1012,7 @@ pub(super) async fn apply_turn_result(
         cache_read_tokens: breakdown.cache_read_tokens,
         cache_creation_tokens: breakdown.cache_creation_tokens,
     };
+    let context_contents = build_wire_context_contents(loop_result);
 
     send_outbound_with_backpressure(
         outbound_tx,
@@ -999,6 +1034,7 @@ pub(super) async fn apply_turn_result(
                 model: session.model.clone(),
                 provider: session.provider_name.clone(),
                 context_breakdown,
+                context_contents,
             },
             files_changed,
             originating_user_id: None,

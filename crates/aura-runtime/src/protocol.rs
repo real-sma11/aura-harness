@@ -230,6 +230,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
                 },
+                context_contents: None,
             },
             files_changed: FilesChanged {
                 created: vec!["new.txt".to_string()],

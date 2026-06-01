@@ -358,6 +358,17 @@ fn aura_os_contract_includes_current_additive_wire_fields() {
                     cache_read_tokens: 7,
                     cache_creation_tokens: 3,
                 },
+                context_contents: Some(aura_protocol::ContextContents {
+                    system_prompt: Some("you are a helpful agent".into()),
+                    tools: vec![aura_protocol::ContextSegment {
+                        label: "read_file".into(),
+                        text: "read_file\n\nRead a file.\n\n{}".into(),
+                        tokens: 7,
+                    }],
+                    skills: vec![],
+                    subagents: vec![],
+                    mcp: vec![],
+                }),
             },
             files_changed: aura_protocol::FilesChanged {
                 created: vec!["new.txt".into()],
@@ -381,6 +392,23 @@ fn aura_os_contract_includes_current_additive_wire_fields() {
     );
     assert_eq!(end_json["files_changed"]["diffs"][0]["lines_added"], 2);
     assert_eq!(end_json["originating_user_id"], "origin-user-1");
+    assert_eq!(
+        end_json["usage"]["context_contents"]["system_prompt"],
+        "you are a helpful agent"
+    );
+    assert_eq!(
+        end_json["usage"]["context_contents"]["tools"][0]["label"],
+        "read_file"
+    );
+    let end_decoded: aura_protocol::OutboundMessage = serde_json::from_value(end_json).unwrap();
+    match end_decoded {
+        aura_protocol::OutboundMessage::AssistantMessageEnd(end) => {
+            let contents = end.usage.context_contents.expect("context_contents present");
+            assert_eq!(contents.tools.len(), 1);
+            assert_eq!(contents.tools[0].tokens, 7);
+        }
+        other => panic!("unexpected variant: {other:?}"),
+    }
 
     let err = aura_protocol::OutboundMessage::Error(aura_protocol::ErrorMsg {
         code: "agent_stalled".into(),

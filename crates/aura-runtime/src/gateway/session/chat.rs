@@ -678,9 +678,12 @@ async fn prepare_turn_context(
     // entry on every turn, so the per-turn breakdown attributes those
     // chars to the "Subagents" bucket. Custom registries (e.g. tests)
     // would override this once they're plumbed through `WsContext`.
-    config.subagents_chars = aura_agent_subagent::registry::registry_chars(
-        &aura_agent_subagent::registry::SubagentRegistry::bundled(),
-    );
+    let subagent_registry = aura_agent_subagent::registry::SubagentRegistry::bundled();
+    config.subagents_chars = aura_agent_subagent::registry::registry_chars(&subagent_registry);
+    // Parallel per-subagent text for the context-contents viewer: same
+    // registry surface `registry_chars` counts tokens for.
+    config.subagents_segments =
+        aura_agent_subagent::registry::registry_segments(&subagent_registry);
 
     // Resolve active skill names before creating the memory observer so we can
     // forward them for procedure extraction.
@@ -696,6 +699,14 @@ async fn prepare_turn_context(
             let injected = mgr.inject_agent_skills(agent_id, &mut config.system_prompt);
             let post_inject_chars = config.system_prompt.len();
             config.skills_chars = post_inject_chars.saturating_sub(pre_inject_chars);
+            // Parallel per-skill text for the context-contents viewer.
+            // The skill body is already embedded in the system prompt;
+            // the "Skills" bucket carries only each skill's name +
+            // summary so the text is not double-counted across buckets.
+            config.skills_segments = injected
+                .iter()
+                .map(|s| (s.name.clone(), s.description.clone()))
+                .collect();
             if !injected.is_empty() {
                 active_skill_names = injected.iter().map(|s| s.name.clone()).collect();
                 debug!(

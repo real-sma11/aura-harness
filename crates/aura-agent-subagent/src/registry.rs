@@ -76,6 +76,28 @@ pub fn registry_chars(registry: &SubagentRegistry) -> usize {
         .sum()
 }
 
+/// Render each subagent kind into a `(name, text)` pair for the
+/// per-turn context *contents* viewer (parallel to [`registry_chars`],
+/// which produces the token count for the same surface). `text` joins
+/// the same fields [`registry_chars`] accounts for — description,
+/// system prompt, and the `allowed_tools` list — so the rendered text
+/// and its token estimate describe the same bytes.
+#[must_use]
+pub fn registry_segments(registry: &SubagentRegistry) -> Vec<(String, String)> {
+    registry
+        .all()
+        .iter()
+        .map(|kind| {
+            let tools = kind.allowed_tools.join(", ");
+            let text = format!(
+                "{}\n\n{}\n\nTools: {}",
+                kind.description, kind.system_prompt, tools
+            );
+            (kind.name.clone(), text)
+        })
+        .collect()
+}
+
 fn general_purpose() -> SubagentKindSpec {
     SubagentKindSpec {
         name: "general_purpose".into(),
@@ -177,6 +199,29 @@ mod tests {
     fn registry_chars_is_zero_for_empty_registry() {
         let registry = SubagentRegistry::from_specs(Vec::new());
         assert_eq!(registry_chars(&registry), 0);
+    }
+
+    /// `registry_segments` must yield one labeled, non-empty segment per
+    /// bundled kind so the context-contents viewer shows the same
+    /// surface `registry_chars` counts tokens for.
+    #[test]
+    fn registry_segments_cover_every_bundled_kind() {
+        let registry = SubagentRegistry::bundled();
+        let segments = registry_segments(&registry);
+        assert_eq!(segments.len(), registry.all().len());
+        for name in ["general_purpose", "explore", "shell", "code_reviewer"] {
+            let seg = segments
+                .iter()
+                .find(|(label, _)| label == name)
+                .unwrap_or_else(|| panic!("missing segment for {name}"));
+            assert!(!seg.1.is_empty(), "{name} segment text should be non-empty");
+        }
+    }
+
+    #[test]
+    fn registry_segments_is_empty_for_empty_registry() {
+        let registry = SubagentRegistry::from_specs(Vec::new());
+        assert!(registry_segments(&registry).is_empty());
     }
 
     #[test]

@@ -148,6 +148,21 @@ pub struct AgentLoopConfig {
     /// runtime crate from the active [`aura_runtime::SubagentRegistry`].
     /// Defaults to `0` for the same reasons as [`Self::skills_chars`].
     pub subagents_chars: usize,
+    /// Per-skill `(name, text)` pairs for the "Skills" bucket of the
+    /// per-turn context *contents* (parallel to [`Self::skills_chars`]
+    /// for the token breakdown). `text` is each skill's summary /
+    /// description; the full skill body is embedded in
+    /// [`Self::system_prompt`] and reported there, so this list carries
+    /// only the per-skill label text the contents viewer needs.
+    /// Populated once at session start by the runtime crate; empty for
+    /// callers run without skills (unit tests, dev loop).
+    pub skills_segments: Vec<(String, String)>,
+    /// Per-subagent `(name, text)` pairs for the "Subagents" bucket of
+    /// the per-turn context contents (parallel to
+    /// [`Self::subagents_chars`]). `text` is the registry's rendered
+    /// spec for each kind. Populated once at session start by the
+    /// runtime crate; empty for callers without a subagent registry.
+    pub subagents_segments: Vec<(String, String)>,
     /// Optional handshake from a wrapping
     /// [`crate::task_executor::TaskToolExecutor`]: when the inner
     /// `Arc<AtomicBool>` flips to `true`, `LoopState::begin_iteration`
@@ -311,6 +326,8 @@ impl AgentLoopConfig {
             intent_classifier_manifest: Vec::new(),
             skills_chars: 0,
             subagents_chars: 0,
+            skills_segments: Vec::new(),
+            subagents_segments: Vec::new(),
             phase_reset_signal: None,
             disable_thinking_iteration_0: false,
             user_thinking_effort: None,

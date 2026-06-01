@@ -15,6 +15,7 @@ use crate::sanitize;
 use crate::types::AgentContextBreakdown;
 use aura_config::CHARS_PER_TOKEN;
 
+use super::context_contents;
 use super::streaming;
 use super::{AgentLoopConfig, LoopState};
 
@@ -149,6 +150,8 @@ fn recompute_breakdown(
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
     };
+    state.result.context_contents =
+        context_contents::build_context_contents(config, effective_tools);
 }
 
 /// Sanitize messages and apply compaction if context utilization is high.
@@ -514,6 +517,27 @@ mod tests {
             breakdown.conversation_tokens > 0,
             "conversation bucket should reflect the live transcript"
         );
+
+        // The parallel `context_contents` must be populated from the
+        // same turn: full system prompt present and one segment per
+        // tool, so the contents viewer stays in sync with the bucket
+        // token counts above.
+        let contents = &state.result.context_contents;
+        assert_eq!(
+            contents.system_prompt.as_deref(),
+            Some(config.system_prompt.as_str()),
+            "system prompt text should be carried verbatim"
+        );
+        assert_eq!(
+            contents.tools.len(),
+            2,
+            "one tool segment per effective tool def"
+        );
+        assert!(
+            contents.tools.iter().all(|seg| !seg.text.is_empty()),
+            "every tool segment should carry rendered text"
+        );
+        assert!(contents.mcp.is_empty(), "mcp bucket is reserved (empty)");
     }
 
     /// Empty inputs everywhere should yield a near-zero breakdown.

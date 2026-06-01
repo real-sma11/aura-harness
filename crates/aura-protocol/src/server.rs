@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::{ToolApprovalRemember, ToolStateWire};
+use crate::context::ContextContents;
 
 /// Top-level outbound message envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +255,13 @@ pub struct SessionUsage {
     /// falls back to the legacy used/total view.
     #[serde(default)]
     pub context_breakdown: ContextBreakdown,
+    /// Actual rendered text for each static context bucket, parallel to
+    /// [`Self::context_breakdown`]'s token counts. Strictly additive:
+    /// older harness builds omit this field (`None`), and the wire
+    /// boundary only sets it `Some(_)` when at least one bucket carries
+    /// content, so empty turns stay omitted on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_contents: Option<ContextContents>,
 }
 
 /// Per-bucket token estimates for the current session context, computed
