@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
-use crate::scheduler::{ScheduleOverrides, Scheduler};
+use crate::scheduler::{AgentIdentity, ScheduleOverrides, Scheduler};
 
 /// [`ChildRunner`] implementation backed by the [`Scheduler`] +
 /// [`Store`] pair.
@@ -197,16 +197,25 @@ impl ChildRunner for RuntimeChildRunner {
         } else {
             child_model
         };
-        if let Some(parent) = self.scheduler.identity_registry().get(ctx.parent_agent_id) {
-            let mut child_identity = parent.clone();
-            child_identity.model = child_model.clone();
-            child_identity.system_prompt =
-                system_prompt_for(&kind, ctx.spec.system_prompt_addendum.as_deref());
-            self.scheduler
-                .identity_registry()
-                .register(child_agent_id, child_identity);
-        }
-        let loop_config = loop_config_for(&kind, &child_model);
+        // Clone the parent's full identity (org / session / agent /
+        // project / auth) onto the child, overriding only the child's
+        // model + system prompt, and keep the merged identity so the
+        // child loop config below inherits the `X-Aura-*` envelope.
+        let child_identity = self
+            .scheduler
+            .identity_registry()
+            .get(ctx.parent_agent_id)
+            .map(|parent| {
+                let mut child_identity = parent;
+                child_identity.model = child_model.clone();
+                child_identity.system_prompt =
+                    system_prompt_for(&kind, ctx.spec.system_prompt_addendum.as_deref());
+                self.scheduler
+                    .identity_registry()
+                    .register(child_agent_id, child_identity.clone());
+                child_identity
+            });
+        let loop_config = loop_config_for(&kind, &child_model, child_identity);
         // Build the child's session-equivalent executor router via the
         // injected factory (when present). This is the production seam
         // that gives the child the same subagent dispatch + spawn hooks
@@ -351,12 +360,29 @@ fn policy_for(
         .with_agent_override(Some(tool_permissions))
 }
 
-fn loop_config_for(kind: &SubagentKindSpec, model: &str) -> AgentLoopConfig {
-    let mut config = AgentLoopConfig {
-        system_prompt: kind.system_prompt.clone(),
-        max_iterations: kind.budget.max_iterations as usize,
-        ..AgentLoopConfig::for_agent(model)
+fn loop_config_for(
+    kind: &SubagentKindSpec,
+    model: &str,
+    identity: Option<AgentIdentity>,
+) -> AgentLoopConfig {
+    // Prefer the child's merged identity (the parent clone with model +
+    // system prompt overridden). `into_loop_config` round-trips the
+    // `aura_org_id` / `aura_session_id` / `aura_agent_id` /
+    // `aura_project_id` / `auth_token` envelope so the child's outbound
+    // `/v1/messages` requests are bucketed per-org/session exactly like
+    // the parent turn. The previous bare config left those `None`, so
+    // `aura-router` treated the child as anonymous public traffic and
+    // returned `429 RATE_LIMITED`. The `None` arm preserves the legacy
+    // bare-config behavior for non-gateway / test callers with no
+    // registered parent identity.
+    let mut config = match identity {
+        Some(identity) => identity.into_loop_config(),
+        None => AgentLoopConfig {
+            system_prompt: kind.system_prompt.clone(),
+            ..AgentLoopConfig::for_agent(model)
+        },
     };
+    config.max_iterations = kind.budget.max_iterations as usize;
     if let Some(max_tokens) = kind.budget.max_tokens {
         config.max_tokens = max_tokens;
     }
@@ -400,6 +426,59 @@ mod tests {
             ),
             ToolState::Allow
         );
+    }
+
+    fn parent_identity(model: &str) -> AgentIdentity {
+        AgentIdentity {
+            model: model.to_string(),
+            aura_org_id: Some("org-parent".to_string()),
+            aura_session_id: Some("session-parent".to_string()),
+            aura_agent_id: Some("agent-parent".to_string()),
+            aura_project_id: Some("project-parent".to_string()),
+            system_prompt: "parent prompt".to_string(),
+            prompt_cache_key: None,
+            prompt_cache_retention: None,
+            request_kind: aura_model_reasoner::ModelRequestKind::Chat,
+            max_tokens: 1024,
+            max_context_tokens: 200_000,
+            auth_token: Some("parent-jwt".to_string()),
+        }
+    }
+
+    #[test]
+    fn loop_config_inherits_parent_identity_envelope() {
+        let registry = SubagentRegistry::bundled();
+        let kind = registry.get("explore").unwrap();
+        let identity = parent_identity("claude-opus-4-7");
+
+        let config = loop_config_for(kind, "claude-opus-4-7", Some(identity));
+
+        // The child's outbound `/v1/messages` requests must carry the
+        // parent's `X-Aura-*` / auth envelope so `aura-router` buckets
+        // them per-org/session instead of returning a public 429.
+        assert_eq!(config.aura_org_id.as_deref(), Some("org-parent"));
+        assert_eq!(config.aura_session_id.as_deref(), Some("session-parent"));
+        assert_eq!(config.aura_agent_id.as_deref(), Some("agent-parent"));
+        assert_eq!(config.aura_project_id.as_deref(), Some("project-parent"));
+        assert_eq!(config.auth_token.as_deref(), Some("parent-jwt"));
+        // Subagent budget still wins over the inherited identity.
+        assert_eq!(config.max_iterations, kind.budget.max_iterations as usize);
+        if let Some(max_tokens) = kind.budget.max_tokens {
+            assert_eq!(config.max_tokens, max_tokens);
+        }
+    }
+
+    #[test]
+    fn loop_config_without_identity_falls_back_to_bare_config() {
+        let registry = SubagentRegistry::bundled();
+        let kind = registry.get("explore").unwrap();
+
+        let config = loop_config_for(kind, "claude-opus-4-7", None);
+
+        assert!(config.aura_org_id.is_none());
+        assert!(config.aura_session_id.is_none());
+        assert!(config.auth_token.is_none());
+        assert_eq!(config.max_iterations, kind.budget.max_iterations as usize);
     }
 
     #[test]
