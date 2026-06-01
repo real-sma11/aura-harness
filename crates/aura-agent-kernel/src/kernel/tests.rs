@@ -646,3 +646,51 @@ async fn tool_proposal_denied_when_delegate_action_kind_not_allowed() {
         output.content
     );
 }
+
+#[test]
+fn write_system_record_resolves_concurrent_appends_without_loss() {
+    use bytes::Bytes;
+
+    let db_dir = TempDir::new().unwrap();
+    let agent_id = AgentId::generate();
+    let store: Arc<dyn Store> = Arc::new(RocksStore::open(db_dir.path(), false).unwrap());
+
+    // Many OS threads racing system-record appends against the same
+    // agent stream is exactly the SubagentSpawn-vs-parent-turn race
+    // that surfaced as "spawn rejected by audit kernel: sequence
+    // mismatch". With the store's append serialization + the
+    // write_system_record retry loop, every writer must succeed with a
+    // unique, contiguous seq and no lost updates.
+    const WRITERS: u64 = 12;
+    let handles: Vec<_> = (0..WRITERS)
+        .map(|i| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let tx = Transaction::new_chained(
+                    agent_id,
+                    TransactionType::System,
+                    Bytes::from(format!("payload-{i}").into_bytes()),
+                    None,
+                );
+                crate::write_system_record(&store, agent_id, tx)
+            })
+        })
+        .collect();
+
+    let mut seqs: Vec<u64> = handles
+        .into_iter()
+        .map(|h| {
+            h.join()
+                .expect("writer thread panicked")
+                .expect("write_system_record must not fail under contention")
+        })
+        .collect();
+    seqs.sort_unstable();
+
+    assert_eq!(
+        seqs,
+        (1..=WRITERS).collect::<Vec<_>>(),
+        "expected unique contiguous seqs with no lost updates"
+    );
+    assert_eq!(store.get_head_seq(agent_id).unwrap(), WRITERS);
+}

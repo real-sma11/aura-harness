@@ -54,6 +54,21 @@ pub struct RocksStore {
     db: Arc<DBWithThreadMode<MultiThreaded>>,
     sync_writes: bool,
     processing_claim_lock: Mutex<()>,
+    /// Serializes the record-append read-modify-write so the
+    /// `get_head_seq` / `assert_next_seq` pre-flight and the paired
+    /// `WriteBatch` commit are atomic with respect to each other.
+    ///
+    /// Without this, two concurrent appenders for the same agent can
+    /// both read head `N`, both pass the `next_seq == N + 1` check, and
+    /// both commit `seq = N + 1` — the second silently overwrites the
+    /// first (a lost update) and leaves `head = N + 1`. The scheduler's
+    /// per-agent processing claim prevents most contention, but
+    /// out-of-band system appends (e.g. the fleet's `SubagentSpawn`
+    /// audit record written while the parent's turn is in flight) are
+    /// not covered by that claim. Holding this lock across the
+    /// check+commit turns the only observable concurrency failure into
+    /// a clean [`StoreError::SequenceMismatch`] the caller can retry.
+    append_lock: Mutex<()>,
 }
 
 impl RocksStore {
@@ -100,6 +115,7 @@ impl RocksStore {
             db: Arc::new(db),
             sync_writes,
             processing_claim_lock: Mutex::new(()),
+            append_lock: Mutex::new(()),
         })
     }
 
@@ -262,6 +278,10 @@ impl RocksStore {
         runtime_capabilities: Option<&RuntimeCapabilityInstall>,
         clear_runtime_capabilities: bool,
     ) -> Result<(), StoreError> {
+        let _append_guard = self
+            .append_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.assert_next_seq(agent_id, next_seq)?;
 
         let mut batch = WriteBatch::default();
@@ -290,6 +310,10 @@ impl RocksStore {
         let cf_meta = self.cf(cf::AGENT_META)?;
         let cf_inbox = self.cf(cf::INBOX)?;
 
+        let _append_guard = self
+            .append_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.assert_next_seq(agent_id, next_seq)?;
 
         let inbox_key = InboxKey::new(agent_id, dequeued_inbox_seq);
@@ -718,6 +742,10 @@ impl crate::store::WriteStore for RocksStore {
         let cf_record = self.cf(cf::RECORD)?;
         let cf_meta = self.cf(cf::AGENT_META)?;
 
+        let _append_guard = self
+            .append_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let current_head = self.get_head_seq(agent_id)?;
         if base_seq != current_head + 1 {
             return Err(StoreError::SequenceMismatch {
