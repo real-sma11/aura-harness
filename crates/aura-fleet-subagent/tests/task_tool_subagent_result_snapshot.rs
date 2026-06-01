@@ -78,6 +78,7 @@ async fn task_tool_subagent_result_json_shape_is_byte_identical() {
             override_isolation_id: None,
             override_budget: None,
             spawn_mode: None,
+            council_index: None,
         },
     )
     .await

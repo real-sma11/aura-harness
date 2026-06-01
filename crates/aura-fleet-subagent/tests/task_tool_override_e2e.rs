@@ -53,6 +53,7 @@ fn base_request(parent_agent_id: AgentId) -> SubagentDispatchRequest {
         override_isolation_id: None,
         override_budget: None,
         spawn_mode: None,
+        council_index: None,
     }
 }
 

@@ -14,7 +14,7 @@
 //! route in event-only mode.
 
 use super::super::*;
-use crate::gateway::session::{prepare_chat_session, ChatRequestError};
+use crate::gateway::session::{prepare_chat_session, start_council_run, ChatRequestError};
 use aura_protocol::{AgentPermissionsWire, RuntimeRequest, RuntimeRequestType, RuntimeRunResponse};
 use uuid::Uuid;
 
@@ -40,10 +40,7 @@ pub(in crate::gateway) async fn run_start_handler(
         RuntimeRequestType::Chat { .. } => start_chat_run(state, req, auth_token).await,
         RuntimeRequestType::DevLoop {} => start_dev_loop_run(state, req, auth_token).await,
         RuntimeRequestType::TaskRun { .. } => start_task_run(state, req, auth_token).await,
-        RuntimeRequestType::Council { .. } => Err((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({"error": "council run not yet implemented"})),
-        )),
+        RuntimeRequestType::Council { .. } => start_council_run_handler(state, req, auth_token).await,
     }
 }
 
@@ -81,6 +78,44 @@ async fn start_chat_run(
     // `WS /stream/:run_id` attaches non-destructively (history replay +
     // live) and a dropped socket can reattach without killing the turn.
     crate::gateway::session::spawn_chat_run(session, ctx, run_id.clone(), state.chat_runs.clone());
+
+    let event_stream_url = format!("/stream/{run_id}");
+    Ok((
+        StatusCode::CREATED,
+        Json(RuntimeRunResponse {
+            run_id,
+            event_stream_url,
+        }),
+    ))
+}
+
+async fn start_council_run_handler(
+    state: RouterState,
+    mut req: RuntimeRequest,
+    auth_token: Option<String>,
+) -> Result<(StatusCode, Json<RuntimeRunResponse>), (StatusCode, Json<serde_json::Value>)> {
+    // Header-resolved JWT takes precedence (same convention as the chat
+    // path), so the council session + member dispatch see the right token.
+    if auth_token.is_some() {
+        req.auth_jwt = auth_token.clone();
+    }
+    let ctx = crate::gateway::session::WsContext::from_state(&state, auth_token);
+    let run_id = start_council_run(req, ctx)
+        .await
+        .map_err(|ChatRequestError { code, message }| {
+            let status = match code {
+                "council_no_members"
+                | "invalid_council_request"
+                | "invalid_workspace"
+                | "invalid_provider_config"
+                | "tool_permissions_load_failed" => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (
+                status,
+                Json(serde_json::json!({"error": message, "code": code})),
+            )
+        })?;
 
     let event_stream_url = format!("/stream/{run_id}");
     Ok((

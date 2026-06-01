@@ -197,6 +197,17 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
         let parent_tool_use_id = request.tool_call_id.clone();
         let subagent_type = request.subagent_type.clone();
         let prompt = request.prompt.clone();
+        // Council labelling: a council-member dispatch carries
+        // `council_index = Some(i)`. Both `model` and `council_index` on
+        // the emitted `SubagentSpawned` are gated behind that being
+        // `Some`, so an ordinary `task` spawn (which may legitimately set
+        // `model_override` for a non-default model) keeps emitting
+        // `model: None, council_index: None` exactly as before — the
+        // least-surprising behavior, avoiding mislabelling task spawns as
+        // council members.
+        let council_index = request.council_index;
+        let council_model = council_index
+            .and(request.model_override.clone());
         let is_detached = matches!(
             request.spawn_mode,
             Some(aura_core_types::SpawnMode::Detached)
@@ -237,8 +248,8 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
                 parent_tool_use_id,
                 subagent_type,
                 prompt,
-                model: None,
-                council_index: None,
+                model: council_model,
+                council_index,
             }));
 
         let result = self
@@ -415,6 +426,7 @@ mod tests {
             override_isolation_id: None,
             override_budget: None,
             spawn_mode: None,
+            council_index: None,
         }
     }
 

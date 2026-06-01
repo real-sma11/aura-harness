@@ -107,6 +107,7 @@ async fn task_child_run_uses_injected_factory_with_parent_chain() {
             override_isolation_id: None,
             override_budget: None,
             spawn_mode: None,
+            council_index: None,
         },
     )
     .await

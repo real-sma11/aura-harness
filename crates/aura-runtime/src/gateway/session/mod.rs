@@ -18,6 +18,7 @@
 mod chat;
 pub(crate) mod chat_run;
 mod child_kernel;
+mod council;
 pub(crate) mod cross_agent_hook;
 mod generation;
 mod helpers;
@@ -29,6 +30,7 @@ mod tests;
 mod tool_approval;
 
 pub(crate) use chat_run::{handle_chat_ws_attach, spawn_chat_run};
+pub(crate) use council::start_council_run;
 pub(crate) use helpers::{prepare_chat_session, ChatRequestError};
 pub(crate) use state::agent_permissions_from_wire;
 pub use state::Session;

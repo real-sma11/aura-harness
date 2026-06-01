@@ -141,6 +141,14 @@ pub struct SubagentDispatchRequest {
     /// parent can continue and observe the child's live thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_mode: Option<crate::SpawnMode>,
+    /// AURA Council slot index for a council-member dispatch. `Some(i)`
+    /// marks this dispatch as council member `i` so the runtime
+    /// observability hook stamps `council_index` (and the member model)
+    /// onto the emitted `SubagentSpawned`. `None` (the default) for every
+    /// ordinary `task` spawn, which keeps those spawns emitting
+    /// `council_index: None` exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_index: Option<u32>,
 }
 
 /// Terminal state of a foreground subagent task.

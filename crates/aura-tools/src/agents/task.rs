@@ -224,6 +224,8 @@ impl TaskTool {
             override_isolation_id: input.isolation.clone(),
             override_budget: input.budget.clone(),
             spawn_mode: input.spawn_mode,
+            // Ordinary `task` spawns are never council members.
+            council_index: None,
         })
     }
 }
