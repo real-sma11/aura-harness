@@ -24,6 +24,36 @@ pub struct LineDiff {
     pub lines_removed: u32,
 }
 
+/// A single rendered image attached to a [`ToolResult`].
+///
+/// Computer-use / vision tools (e.g. the `computer` tool) return a
+/// screenshot alongside their textual result. The bytes are carried as
+/// a base64 string (NOT raw [`Bytes`]) so the value round-trips through
+/// the kernel effect log and the outbound wire boundary as plain JSON
+/// without a second encode/decode hop.
+///
+/// Invariant: `base64` is the base64-encoded payload of an image whose
+/// IANA media type is `media_type` (e.g. `"image/png"`). Never log
+/// `base64`; log `media_type` and the encoded length instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultImage {
+    /// Base64-encoded image payload (PNG/JPEG).
+    pub base64: String,
+    /// IANA media type of [`Self::base64`] (e.g. `"image/png"`).
+    pub media_type: String,
+}
+
+impl ToolResultImage {
+    /// Construct an image attachment from its base64 payload + media type.
+    #[must_use]
+    pub fn new(base64: impl Into<String>, media_type: impl Into<String>) -> Self {
+        Self {
+            base64: base64.into(),
+            media_type: media_type.into(),
+        }
+    }
+}
+
 /// Classification for a tool result.
 ///
 /// `CompactionStructural` is reserved for history-redaction placeholders
@@ -69,6 +99,12 @@ pub struct ToolResult {
     /// zero-line change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_diff: Option<LineDiff>,
+    /// Optional rendered image produced by computer-use / vision tools
+    /// (e.g. the `computer` tool's screenshot). `None` for every
+    /// text-only tool. Strictly additive: older records omit the field
+    /// and it deserializes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ToolResultImage>,
 }
 
 impl<'de> Deserialize<'de> for ToolResult {
@@ -92,6 +128,8 @@ impl<'de> Deserialize<'de> for ToolResult {
             metadata: HashMap<String, String>,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             line_diff: Option<LineDiff>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            image: Option<ToolResultImage>,
         }
 
         let wire = ToolResultWire::deserialize(deserializer)?;
@@ -109,6 +147,7 @@ impl<'de> Deserialize<'de> for ToolResult {
             stderr: wire.stderr,
             metadata: wire.metadata,
             line_diff: wire.line_diff,
+            image: wire.image,
         })
     }
 }
@@ -126,6 +165,7 @@ impl ToolResult {
             stderr: Bytes::new(),
             metadata: HashMap::new(),
             line_diff: None,
+            image: None,
         }
     }
 
@@ -141,6 +181,7 @@ impl ToolResult {
             stderr: stderr.into(),
             metadata: HashMap::new(),
             line_diff: None,
+            image: None,
         }
     }
 
@@ -159,6 +200,7 @@ impl ToolResult {
             stderr: stderr.into(),
             metadata: HashMap::new(),
             line_diff: None,
+            image: None,
         }
     }
 
@@ -182,11 +224,65 @@ impl ToolResult {
         });
         self
     }
+
+    /// Attach a rendered image (base64 + media type) to this result.
+    ///
+    /// Used by computer-use / vision tools (e.g. the `computer` tool)
+    /// to carry a screenshot alongside the textual result so the kernel
+    /// boundary and the outbound wire can replay it to the model as an
+    /// image block.
+    #[must_use]
+    pub fn with_image(mut self, base64: impl Into<String>, media_type: impl Into<String>) -> Self {
+        self.image = Some(ToolResultImage::new(base64, media_type));
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolResult, ToolResultKind};
+    use super::{ToolResult, ToolResultImage, ToolResultKind};
+
+    #[test]
+    fn tool_result_without_image_omits_field_and_round_trips() {
+        // The text-only path must serialize byte-identically to the
+        // pre-image contract: no `image` key appears when `None`.
+        let result = ToolResult::success("read_file", b"hello".to_vec());
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            !json.contains("image"),
+            "absent image must be skipped: {json}"
+        );
+        let back: ToolResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, result);
+        assert!(back.image.is_none());
+    }
+
+    #[test]
+    fn tool_result_image_round_trips() {
+        // A computer-use screenshot result must round-trip the image
+        // attachment. The base64 here is a tiny placeholder.
+        let result = ToolResult::success("computer", b"screenshot taken".to_vec())
+            .with_image("aGVsbG8=", "image/png");
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(json.contains("\"base64\":\"aGVsbG8=\""), "{json}");
+        assert!(json.contains("\"media_type\":\"image/png\""), "{json}");
+
+        let back: ToolResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, result);
+        assert_eq!(
+            back.image,
+            Some(ToolResultImage::new("aGVsbG8=", "image/png"))
+        );
+    }
+
+    #[test]
+    fn tool_result_legacy_json_deserializes_without_image() {
+        let legacy: ToolResult = serde_json::from_str(
+            r#"{"tool":"read_file","ok":true,"stdout":"aGk=","stderr":"","metadata":{}}"#,
+        )
+        .expect("legacy payload deserializes");
+        assert!(legacy.image.is_none());
+    }
 
     #[test]
     fn missing_kind_defaults_from_ok_for_old_records() {

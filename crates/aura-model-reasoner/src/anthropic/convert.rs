@@ -1,6 +1,6 @@
 use super::api_types::{
-    ApiContent, ApiImageSource, ApiMessage, ApiOutputConfig, ApiThinkingConfig, ApiTool,
-    ApiToolChoice,
+    ApiComputerTool, ApiContent, ApiImageSource, ApiMessage, ApiOutputConfig, ApiThinkingConfig,
+    ApiTool, ApiToolChoice, ApiToolEntry,
 };
 use crate::{
     ContentBlock, ImageSource, Message, ModelRequest, Role, ThinkingEffort, ToolChoice,
@@ -333,6 +333,56 @@ pub(super) fn convert_tools_to_api(
     }
 
     api_tools
+}
+
+/// Canonical name of the computer-use tool. Its presence in a request's
+/// tool list is the single signal that flips the request into
+/// computer-use mode (special tool entry + beta header).
+pub(super) const COMPUTER_TOOL_NAME: &str = "computer";
+
+/// Anthropic computer-use beta header value (the `computer_20250124`
+/// tool type ships under this beta).
+pub(super) const COMPUTER_USE_BETA: &str = "computer-use-2025-01-24";
+
+/// Virtual display geometry advertised to Anthropic's computer-use tool.
+/// Mirrors the desktop executor's capture surface so model-emitted
+/// coordinates land on the same pixel grid the executor renders.
+const COMPUTER_DISPLAY_WIDTH_PX: u32 = 1280;
+const COMPUTER_DISPLAY_HEIGHT_PX: u32 = 800;
+const COMPUTER_DISPLAY_NUMBER: u32 = 1;
+
+/// True when `tools` carries the computer-use tool. Drives both the
+/// special tool entry ([`convert_tool_entries_to_api`]) and the beta
+/// header in the provider.
+pub(super) fn request_uses_computer_tool(tools: &[ToolDefinition]) -> bool {
+    tools.iter().any(|t| t.name == COMPUTER_TOOL_NAME)
+}
+
+/// Build the outbound `tools` array, swapping the harness's `computer`
+/// custom-tool definition for Anthropic's built-in `computer_20250124`
+/// server tool entry. Every other tool is forwarded unchanged, so
+/// requests without a `computer` tool serialize byte-identically to the
+/// pre-computer-use contract.
+pub(super) fn convert_tool_entries_to_api(
+    tools: &[ToolDefinition],
+    prompt_caching_enabled: bool,
+) -> Vec<ApiToolEntry> {
+    convert_tools_to_api(tools, prompt_caching_enabled)
+        .into_iter()
+        .map(|tool| {
+            if tool.name == COMPUTER_TOOL_NAME {
+                ApiToolEntry::Computer(ApiComputerTool {
+                    tool_type: "computer_20250124",
+                    name: "computer",
+                    display_width_px: COMPUTER_DISPLAY_WIDTH_PX,
+                    display_height_px: COMPUTER_DISPLAY_HEIGHT_PX,
+                    display_number: COMPUTER_DISPLAY_NUMBER,
+                })
+            } else {
+                ApiToolEntry::Custom(tool)
+            }
+        })
+        .collect()
 }
 
 pub(super) fn convert_tool_choice(

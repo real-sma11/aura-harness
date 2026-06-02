@@ -114,6 +114,20 @@ impl ToolCatalog {
             }
         }
 
+        // Computer-use tool. Always compiled into the catalog but gated
+        // behind `Capability::ComputerUse`, so `visible_tools` hides it
+        // from runs that did not opt into computer-use. The executable
+        // `ComputerTool` impl (which needs the per-session executor URL)
+        // is registered separately on the session's tool resolver.
+        if seen.insert(crate::computer_tool::COMPUTER_TOOL_NAME.to_string()) {
+            entries.push(CatalogEntry {
+                definition: crate::computer_tool::computer_tool_definition(),
+                owner: ToolOwner::Internal,
+                profiles: all_profiles.clone(),
+                required_capabilities: vec![Capability::ComputerUse],
+            });
+        }
+
         // Agent-only management tools (spec, task, project, dev-loop).
         for def in definitions::chat_management_tools() {
             let required_capabilities = domain_tool_required_capabilities(&def.name);

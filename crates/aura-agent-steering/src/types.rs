@@ -61,6 +61,13 @@ pub struct ToolCallResult {
     pub stop_loop: bool,
     /// File mutations performed by this tool call, if known.
     pub file_changes: Vec<FileChange>,
+    /// Optional rendered image (base64 + media type) produced by
+    /// computer-use / vision tools (e.g. the `computer` tool). `None`
+    /// for text-only tools. Threaded from
+    /// [`aura_core_types::ToolResult::image`] so the agent loop can
+    /// replay the screenshot to the model and the outbound wire can
+    /// carry it to aura-os.
+    pub image: Option<aura_core_types::ToolResultImage>,
 }
 
 impl ToolCallResult {
@@ -74,6 +81,7 @@ impl ToolCallResult {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 
@@ -87,6 +95,7 @@ impl ToolCallResult {
             kind: aura_core_types::ToolResultKind::AgentError,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 
@@ -103,6 +112,7 @@ impl ToolCallResult {
             kind: aura_core_types::ToolResultKind::CompactionStructural,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 
@@ -110,6 +120,13 @@ impl ToolCallResult {
     #[must_use]
     pub fn with_file_changes(mut self, file_changes: Vec<FileChange>) -> Self {
         self.file_changes = file_changes;
+        self
+    }
+
+    /// Attach a rendered image (base64 + media type) to this result.
+    #[must_use]
+    pub fn with_image(mut self, image: Option<aura_core_types::ToolResultImage>) -> Self {
+        self.image = image;
         self
     }
 }

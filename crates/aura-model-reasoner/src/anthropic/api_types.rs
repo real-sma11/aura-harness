@@ -14,7 +14,7 @@ pub(super) struct ApiRequest {
     pub system: Option<serde_json::Value>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ApiTool>>,
+    pub tools: Option<Vec<ApiToolEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ApiToolChoice>,
     pub max_tokens: u32,
@@ -97,6 +97,36 @@ pub(super) struct ApiTool {
     pub eager_input_streaming: Option<bool>,
 }
 
+/// Anthropic's built-in computer-use tool entry
+/// (`{"type":"computer_20250124","name":"computer", ...}`).
+///
+/// Unlike a [`ApiTool`] this carries no `description` / `input_schema`
+/// — Anthropic owns the schema for its server-side tool type. The
+/// harness only forwards the display geometry so the model knows the
+/// virtual screen size it is driving.
+#[derive(Debug, Serialize)]
+pub(super) struct ApiComputerTool {
+    #[serde(rename = "type")]
+    pub tool_type: &'static str,
+    pub name: &'static str,
+    pub display_width_px: u32,
+    pub display_height_px: u32,
+    pub display_number: u32,
+}
+
+/// One entry in the outbound `tools` array.
+///
+/// Untagged so the existing custom-tool shape serializes byte-identically
+/// to the pre-computer-use contract; the `Computer` variant carries its
+/// own `"type"` discriminant. Non-computer-use requests only ever hold
+/// `Custom` entries, keeping their wire bytes unchanged.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(super) enum ApiToolEntry {
+    Computer(ApiComputerTool),
+    Custom(ApiTool),
+}
+
 /// Anthropic `tool_choice` wire shape.
 ///
 /// Phase 3: each variant carries an optional
@@ -160,7 +190,7 @@ pub(super) struct StreamingApiRequest {
     pub system: Option<serde_json::Value>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ApiTool>>,
+    pub tools: Option<Vec<ApiToolEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ApiToolChoice>,
     pub max_tokens: u32,

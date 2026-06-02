@@ -29,10 +29,10 @@ use crate::policy::{Policy, PolicyConfig};
 use crate::replay::{ReplayConsumer, ReplayReport};
 use crate::ExecutorRouter;
 use async_trait::async_trait;
-use aura_core_types::{AgentId, RecordEntry, RuntimeCapabilityInstall, ToolState};
 use aura_core_modes::KernelMode;
-use aura_plugin_hooks::PluginHookHost;
+use aura_core_types::{AgentId, RecordEntry, RuntimeCapabilityInstall, ToolState};
 use aura_model_reasoner::ModelProvider;
+use aura_plugin_hooks::PluginHookHost;
 use aura_store_db::Store;
 use aura_store_record::DEFAULT_SUMMARY_CHUNK_BYTES;
 use aura_store_snapshot::{NoopSnapshotStore, SnapshotStore};
@@ -181,6 +181,12 @@ pub struct ToolOutput {
     /// to its `FileChange` records without re-reading the filesystem.
     /// `None` for every other tool and for tool failures.
     pub line_diff: Option<aura_core_types::LineDiff>,
+    /// Optional rendered image (base64 + media type) produced by
+    /// computer-use / vision tools, carried up from the underlying
+    /// [`aura_core_types::ToolResult::image`] so the agent loop can
+    /// replay the screenshot to the model as an image block. `None` for
+    /// every other tool and for tool failures.
+    pub image: Option<aura_core_types::ToolResultImage>,
 }
 
 /// Details about a tool invocation that was denied because it needs an
@@ -600,8 +606,8 @@ fn append_system_record_once(
         Err(aura_store_db::StoreError::SequenceMismatch { .. }) => {
             Err(SystemRecordError::SequenceMismatch)
         }
-        Err(e) => Err(SystemRecordError::Other(crate::KernelError::Store(format!(
-            "append_entry_direct: {e}"
-        )))),
+        Err(e) => Err(SystemRecordError::Other(crate::KernelError::Store(
+            format!("append_entry_direct: {e}"),
+        ))),
     }
 }

@@ -63,6 +63,11 @@ pub enum TurnEvent {
         content: String,
         /// Whether the result is an error.
         is_error: bool,
+        /// Optional rendered image (base64 + media type) produced by
+        /// computer-use / vision tools. `None` for text-only tools.
+        /// Carried to the wire boundary so aura-os can persist + replay
+        /// the screenshot to the model.
+        image: Option<aura_core_types::ToolResultImage>,
     },
 
     /// Authoritative "this tool call finished" marker carrying the full

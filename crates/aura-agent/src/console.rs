@@ -732,6 +732,7 @@ mod tests {
                 kind: aura_core_types::ToolResultKind::Ok,
                 stop_loop: false,
                 file_changes: Vec::new(),
+                image: None,
             },
             ToolCallResult {
                 tool_use_id: "toolu_bbbbbbbb5678".into(),
@@ -740,6 +741,7 @@ mod tests {
                 kind: aura_core_types::ToolResultKind::Ok,
                 stop_loop: false,
                 file_changes: Vec::new(),
+                image: None,
             },
         ];
         let cached: HashSet<String> = HashSet::new();

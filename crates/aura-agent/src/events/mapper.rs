@@ -50,6 +50,7 @@ pub trait TurnEventSink: Send {
         _tool_name: String,
         _content: String,
         _is_error: bool,
+        _image: Option<aura_core_types::ToolResultImage>,
     ) {
     }
     async fn on_tool_complete(
@@ -143,8 +144,9 @@ where
             tool_name,
             content,
             is_error,
+            image,
         } => {
-            sink.on_tool_result(tool_use_id, tool_name, content, is_error)
+            sink.on_tool_result(tool_use_id, tool_name, content, is_error, image)
                 .await;
         }
         AgentLoopEvent::ToolComplete {
@@ -259,6 +261,7 @@ mod mapper_tests {
             tool_name: String,
             _content: String,
             is_error: bool,
+            _image: Option<aura_core_types::ToolResultImage>,
         ) {
             self.calls
                 .push(format!("tool_res:{tool_use_id}:{tool_name}:{is_error}"));
@@ -317,6 +320,7 @@ mod mapper_tests {
                 tool_name: "read_file".into(),
                 content: "ok".into(),
                 is_error: false,
+                image: None,
             },
             AgentLoopEvent::TextDelta("hello".into()),
             AgentLoopEvent::IterationComplete {

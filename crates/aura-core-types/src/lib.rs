@@ -61,8 +61,8 @@ pub use types::{
     RuntimeCapabilityInstall, SubagentBudget, SubagentDispatchRequest, SubagentExit,
     SubagentKindSpec, SubagentResult, SystemKind, ToolAuth, ToolCall, ToolCallContext,
     ToolDefinition, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultContent,
-    ToolResultKind, Trace, Transaction, TransactionType, DEFAULT_SUBAGENT_TIMEOUT_MS,
-    KERNEL_VERSION, MAX_TURNS,
+    ToolResultImage, ToolResultKind, Trace, Transaction, TransactionType,
+    DEFAULT_SUBAGENT_TIMEOUT_MS, KERNEL_VERSION, MAX_TURNS,
 };
 
 // Convenience re-exports of mode/permission primitives so downstream

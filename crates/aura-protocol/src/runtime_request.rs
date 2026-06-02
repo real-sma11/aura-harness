@@ -345,6 +345,20 @@ pub struct AgentCapabilities {
     /// user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_classifier: Option<IntentClassifierSpec>,
+    /// Computer-use capability flag. When `true`, the harness exposes
+    /// the Anthropic computer-use tool for this run so the agent can
+    /// drive the real OS cursor/keyboard and read back screenshots.
+    /// Off by default; strictly additive (older producers omit it and
+    /// it deserializes to `false`).
+    #[serde(default)]
+    pub computer_use: bool,
+    /// Base URL of the desktop computer-use executor the harness should
+    /// forward `computer` actions to (e.g.
+    /// `"http://127.0.0.1:<port>"`). `None` disables forwarding even
+    /// when [`Self::computer_use`] is set. Additive and omitted from
+    /// the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_executor_url: Option<String>,
 }
 
 /// Response body of `POST /v1/run`.

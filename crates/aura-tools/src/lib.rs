@@ -29,6 +29,7 @@
 pub mod agents;
 pub mod automaton_tools;
 pub mod catalog;
+pub mod computer_tool;
 pub mod definitions;
 pub mod domain_tools;
 mod error;
@@ -44,6 +45,7 @@ pub mod schema;
 pub(crate) mod tool;
 
 pub use catalog::ToolCatalog;
+pub use computer_tool::{computer_tool_definition, ComputerTool, COMPUTER_TOOL_NAME};
 pub use error::ToolError;
 pub use executor::ToolExecutor;
 pub use fs_tools::{cmd_run_with_threshold, cmd_spawn, output_to_tool_result, ThresholdResult};

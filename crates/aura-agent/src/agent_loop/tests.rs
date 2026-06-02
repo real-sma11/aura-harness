@@ -512,6 +512,7 @@ fn begin_iteration_injects_implement_now_after_exploration_threshold() {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         };
         state.steering.observe_tool(&tool, &result);
     }
@@ -829,6 +830,7 @@ async fn agentloop_endturn_terminates_after_partial_write() {
                 lines_added: 1,
                 lines_removed: 0,
             }],
+            image: None,
         }],
     };
 

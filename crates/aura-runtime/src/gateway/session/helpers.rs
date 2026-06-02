@@ -406,6 +406,20 @@ pub(super) async fn build_kernel_with_config(
         executor::build_tool_resolver(&ctx.catalog, &session_tool_config, domain_exec.clone())
             .with_installed_tools(session.installed_tools.clone());
 
+    // Register the live computer-use tool only when the run opted into
+    // computer-use AND an executor URL is configured. The catalog gates
+    // visibility behind `Capability::ComputerUse`; this registers the
+    // executable side bound to the per-session executor endpoint.
+    if session.computer_use {
+        if let Some(url) = session
+            .computer_executor_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+        {
+            resolver.register(Box::new(aura_tools::ComputerTool::new(url)));
+        }
+    }
+
     if let Some(ref controller) = ctx.automaton_controller {
         let project_id = session.project_id.clone().unwrap_or_default();
         let workspace_root = session.project_path.clone();
@@ -807,12 +821,22 @@ impl TurnEventSink for OutboundMessageSink<'_> {
         tool_name: String,
         content: String,
         is_error: bool,
+        image: Option<aura_core_types::ToolResultImage>,
     ) {
+        // Split the typed image into the flat wire fields aura-os
+        // persists. Never log the base64 payload — only dims/length are
+        // safe (the executor already logged dims on capture).
+        let (image_base64, image_media_type) = match image {
+            Some(img) => (Some(img.base64), Some(img.media_type)),
+            None => (None, None),
+        };
         self.push(OutboundMessage::ToolResult(ToolResultMsg {
             name: tool_name,
             result: content,
             is_error,
             tool_use_id: Some(tool_use_id),
+            image_base64,
+            image_media_type,
         }))
         .await;
     }

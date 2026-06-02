@@ -85,6 +85,7 @@ impl Permissions {
                 Capability::InvokeProcess,
                 Capability::PostToFeed,
                 Capability::GenerateMedia,
+                Capability::ComputerUse,
                 Capability::ReadAllProjects,
                 Capability::WriteAllProjects,
             ],

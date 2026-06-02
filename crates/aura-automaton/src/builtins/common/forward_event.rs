@@ -131,6 +131,7 @@ pub fn forward_agent_event(
             tool_name,
             content,
             is_error,
+            image: _,
         } => AutomatonEvent::ToolResult {
             task_id: task_id_value(),
             id: tool_use_id,

@@ -14,20 +14,20 @@
 
 use crate::gateway::session::ToolApprovalBroker;
 use aura_agent::AgentLoopConfig;
+use aura_context_prompts::{
+    default_system_prompt, AgentIdentity as PromptAgentIdentity, ProjectInfo, SystemPromptBuilder,
+};
 use aura_core_types::{
     AgentId, AgentPermissions, AgentScope, AgentToolPermissions, Capability,
     InstalledIntegrationDefinition, InstalledToolDefinition,
 };
 use aura_engine::scheduler::AgentIdentity as RuntimeAgentIdentity;
-use aura_context_prompts::{
-    default_system_prompt, AgentIdentity as PromptAgentIdentity, ProjectInfo, SystemPromptBuilder,
+use aura_model_reasoner::{
+    Message, ModelProvider, ModelRequestKind, PromptCacheRetention, ThinkingEffort, ToolDefinition,
 };
 use aura_protocol::{
     AgentPermissionsWire, AgentPersona, CapabilityWire, ChatProjectInfoWire, IntentClassifierSpec,
     ReasoningEffort, RuntimeRequest, RuntimeRequestType, SessionModelOverrides,
-};
-use aura_model_reasoner::{
-    Message, ModelProvider, ModelRequestKind, PromptCacheRetention, ThinkingEffort, ToolDefinition,
 };
 use aura_tools::IntentClassifier;
 use std::path::PathBuf;
@@ -141,6 +141,14 @@ pub struct Session {
     /// assembled [`Self::system_prompt`] from the typed identity /
     /// project_info fields via [`SystemPromptBuilder`].
     pub(crate) typed_chat_prompt: bool,
+    /// Whether this run opted into Anthropic computer-use. Drives both
+    /// the `Capability::ComputerUse` injection (tool visibility) and the
+    /// live `ComputerTool` registration on the session resolver.
+    pub(crate) computer_use: bool,
+    /// Base URL of the desktop computer-use executor the `ComputerTool`
+    /// forwards actions to. `None` disables forwarding even when
+    /// [`Self::computer_use`] is set.
+    pub(crate) computer_executor_url: Option<String>,
 }
 
 impl Session {
@@ -187,6 +195,8 @@ impl Session {
             tool_permissions: None,
             tool_approval_broker: None,
             typed_chat_prompt: false,
+            computer_use: false,
+            computer_executor_url: None,
         }
     }
 
@@ -277,6 +287,10 @@ impl Session {
             .into_iter()
             .map(aura_protocol::installed_integration_to_core)
             .collect();
+        self.computer_use = agent_capabilities.computer_use;
+        self.computer_executor_url = agent_capabilities
+            .computer_executor_url
+            .filter(|u| !u.trim().is_empty());
         if let Some(ws) = workspace.workspace {
             let candidate = PathBuf::from(&ws);
             if candidate
@@ -365,6 +379,22 @@ impl Session {
         }
 
         self.agent_permissions = agent_permissions_from_wire(agent_permissions);
+        // Computer-use arrives as a separate boolean (not a wire
+        // capability), so synthesize the `ComputerUse` capability into
+        // the bundle when the run opted in. This makes the catalog's
+        // capability-gated `computer` tool visible + lets the kernel
+        // policy gate accept it.
+        if self.computer_use
+            && !self
+                .agent_permissions
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, aura_core_types::Capability::ComputerUse))
+        {
+            self.agent_permissions
+                .capabilities
+                .push(aura_core_types::Capability::ComputerUse);
+        }
         for msg in conversation_messages {
             match msg.role.as_str() {
                 "user" => self.messages.push(Message::user(&msg.content)),

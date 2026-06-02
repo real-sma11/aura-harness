@@ -7,7 +7,6 @@
 //! `(verdict, optional execution outcome)` pair into the final
 //! `ProcessResult` shape.
 
-use aura_exec_traits::{decode_tool_effect, ExecuteContext};
 use crate::kernel::{
     ApprovalRequiredInfo, Kernel, PendingToolPrompt, ProcessResult, ToolApprovalRemember,
     ToolApprovalResponse, ToolDecision, ToolOutput,
@@ -18,6 +17,7 @@ use aura_core_types::{
     ProposalSet, RecordEntry, ToolCall, ToolProposal, ToolState, Transaction, UserDefaultMode,
     UserToolDefaults,
 };
+use aura_exec_traits::{decode_tool_effect, ExecuteContext};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -323,6 +323,9 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
         let had_failures = effect_failed || decoded.is_error;
         let line_diff = decoded.line_diff;
         let kind = decoded.kind;
+        // Drop any image on a failed effect: the screenshot is only
+        // meaningful for a successful computer-use action.
+        let image = if had_failures { None } else { decoded.image };
         let output_content = decoded.content;
 
         let mut decision = Decision::new();
@@ -345,6 +348,7 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
                 kind,
                 approval_required: None,
                 line_diff,
+                image,
             }),
             had_failures,
             runtime_capability_update: None,
@@ -399,6 +403,7 @@ pub(super) fn record_entry_for_tool_outcome(inputs: ToolOutcomeInputs<'_>) -> Pr
                 kind: aura_core_types::ToolResultKind::AgentError,
                 approval_required,
                 line_diff: None,
+                image: None,
             }),
             had_failures: false,
             runtime_capability_update: None,

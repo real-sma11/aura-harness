@@ -73,7 +73,9 @@ fn mk_call(id: &str, name: &str) -> ResponseEvent {
 
 fn mk_stream(events: Vec<ResponseEvent>) -> ResponseEventStream {
     Box::pin(futures_util::stream::iter(
-        events.into_iter().map(Ok::<_, aura_model_reasoner::StreamError>),
+        events
+            .into_iter()
+            .map(Ok::<_, aura_model_reasoner::StreamError>),
     ))
 }
 
@@ -626,6 +628,7 @@ async fn pump_triggers_auto_build_on_write() {
                         lines_added: 3,
                         lines_removed: 0,
                     }],
+                    image: None,
                 })
                 .collect()
         }
@@ -674,6 +677,7 @@ async fn pump_triggers_auto_build_on_write() {
             lines_added: 3,
             lines_removed: 0,
         }],
+        image: None,
     };
     let mut state = super::super::LoopState::new_for_tests(&config, Vec::new());
     let agent = super::super::AgentLoop::new(config.clone());

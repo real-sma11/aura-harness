@@ -157,6 +157,11 @@ pub struct DecodedToolResult {
     /// counts (every other tool, plus tool failures); consumers must
     /// not interpret `None` as "zero lines changed".
     pub line_diff: Option<aura_core_types::LineDiff>,
+    /// Optional rendered image (base64 + media type) produced by
+    /// computer-use / vision tools. `None` for text-only tools and for
+    /// tool failures. Carried up so the kernel boundary can replay the
+    /// screenshot to the model as an image block.
+    pub image: Option<aura_core_types::ToolResultImage>,
 }
 
 /// Resolve a command exit code from either the typed `exit_code` field
@@ -229,6 +234,7 @@ pub fn decode_tool_effect(effect: &Effect) -> DecodedToolResult {
                     kind: tool_result.kind,
                     metadata: tool_result.metadata,
                     line_diff: tool_result.line_diff,
+                    image: tool_result.image,
                 }
             }
             Err(e) => {
@@ -244,6 +250,7 @@ pub fn decode_tool_effect(effect: &Effect) -> DecodedToolResult {
                     kind: aura_core_types::ToolResultKind::AgentError,
                     metadata: HashMap::new(),
                     line_diff: None,
+                    image: None,
                 }
             }
         }
@@ -269,6 +276,7 @@ pub fn decode_tool_effect(effect: &Effect) -> DecodedToolResult {
             kind,
             metadata: HashMap::new(),
             line_diff: None,
+            image: None,
         }
     }
 }

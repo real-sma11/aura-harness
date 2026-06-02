@@ -150,6 +150,24 @@ pub struct ToolCallSnapshot {
 }
 
 /// Payload for `tool_result`.
+///
+/// `result` carries the textual tool output (the string-only contract
+/// used by every existing tool). Computer-use / vision tools may
+/// additionally attach a single rendered frame via the optional
+/// `image_base64` + `image_media_type` pair: the harness (the
+/// producer of this message) base64-encodes a PNG/JPEG screenshot and
+/// stamps its media type so the server can persist it and replay it to
+/// the model as an Anthropic `image` content block inside the
+/// `tool_result`.
+///
+/// Both image fields are strictly additive and backward compatible:
+/// `#[serde(default)]` lets older producers omit them on the wire, and
+/// `skip_serializing_if = "Option::is_none"` keeps the JSON
+/// byte-identical to today's shape when no image is present. A message
+/// with neither field behaves exactly as before — a string result.
+///
+/// Never log the base64 payload; log `image_media_type` and the
+/// encoded byte length only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct ToolResultMsg {
@@ -158,6 +176,15 @@ pub struct ToolResultMsg {
     pub is_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// Base64-encoded PNG/JPEG payload of an image tool-result (e.g. a
+    /// computer-use screenshot). `None` for the ordinary string-only
+    /// path. Pairs with [`Self::image_media_type`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_base64: Option<String>,
+    /// IANA media type of [`Self::image_base64`] (e.g. `"image/png"`).
+    /// `None` when no image is attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_media_type: Option<String>,
 }
 
 /// Payload for `subagent_spawned`.
@@ -485,4 +512,83 @@ pub struct GenerationCompleted {
 pub struct GenerationErrorMsg {
     pub code: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_without_image_omits_image_fields() {
+        // The string-only path must serialize byte-identically to the
+        // pre-image contract: no `image_base64` / `image_media_type`
+        // keys appear when both are `None`.
+        let msg = ToolResultMsg {
+            name: "read_file".to_string(),
+            result: "file contents".to_string(),
+            is_error: false,
+            tool_use_id: Some("toolu_1".to_string()),
+            image_base64: None,
+            image_media_type: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize tool result");
+        assert!(
+            !json.contains("image_base64"),
+            "absent image must be skipped: {json}"
+        );
+        assert!(
+            !json.contains("image_media_type"),
+            "absent media type must be skipped: {json}"
+        );
+
+        let back: ToolResultMsg = serde_json::from_str(&json).expect("deserialize tool result");
+        assert_eq!(back.name, "read_file");
+        assert_eq!(back.result, "file contents");
+        assert!(!back.is_error);
+        assert_eq!(back.tool_use_id.as_deref(), Some("toolu_1"));
+        assert_eq!(back.image_base64, None);
+        assert_eq!(back.image_media_type, None);
+    }
+
+    #[test]
+    fn tool_result_with_image_round_trips() {
+        // A computer-use screenshot result must round-trip both image
+        // fields. The base64 here is a tiny placeholder — the test
+        // asserts the contract, not the payload.
+        let msg = ToolResultMsg {
+            name: "computer".to_string(),
+            result: "screenshot taken".to_string(),
+            is_error: false,
+            tool_use_id: Some("toolu_shot".to_string()),
+            image_base64: Some("aGVsbG8=".to_string()),
+            image_media_type: Some("image/png".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize image tool result");
+        assert!(json.contains("\"image_base64\":\"aGVsbG8=\""), "{json}");
+        assert!(
+            json.contains("\"image_media_type\":\"image/png\""),
+            "{json}"
+        );
+
+        let back: ToolResultMsg = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.image_base64.as_deref(), Some("aGVsbG8="));
+        assert_eq!(back.image_media_type.as_deref(), Some("image/png"));
+        assert_eq!(back.result, "screenshot taken");
+    }
+
+    #[test]
+    fn tool_result_legacy_json_deserializes_without_image_fields() {
+        // An older harness build emits no image keys at all; the field
+        // defaults must keep that payload deserializing cleanly.
+        let legacy = serde_json::json!({
+            "name": "list_files",
+            "result": "a\nb\nc",
+            "is_error": false,
+        });
+        let back: ToolResultMsg =
+            serde_json::from_value(legacy).expect("legacy payload deserializes");
+        assert_eq!(back.image_base64, None);
+        assert_eq!(back.image_media_type, None);
+        assert_eq!(back.tool_use_id, None);
+    }
 }

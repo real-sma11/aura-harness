@@ -52,6 +52,7 @@ impl TaskToolExecutor {
             },
             stop_loop,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 

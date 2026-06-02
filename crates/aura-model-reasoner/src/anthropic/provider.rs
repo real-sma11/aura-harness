@@ -1,7 +1,8 @@
 use super::api_types::{ApiRequest, ApiResponse, StreamingApiRequest};
 use super::convert::{
     build_system_block, convert_messages_to_api, convert_response_to_aura, convert_tool_choice,
-    convert_tools_to_api, resolve_output_config, resolve_thinking,
+    convert_tool_entries_to_api, request_uses_computer_tool, resolve_output_config,
+    resolve_thinking, COMPUTER_USE_BETA,
 };
 use super::sse::SseStream;
 use super::{AnthropicProvider, ApiError};
@@ -704,10 +705,21 @@ impl AnthropicProvider {
             req_builder = req_builder.header("authorization", format!("Bearer {token}"));
         }
 
+        // Assemble the `anthropic-beta` header. Prompt caching keeps its
+        // exact prior token, and computer-use appends a second token only
+        // when the run carries the `computer` tool — so non-computer-use
+        // requests stay byte-identical.
+        let mut beta_tokens: Vec<&str> = Vec::new();
         if self.config.prompt_caching_enabled
             && Self::supports_anthropic_proxy_features(request_ctx, model)
         {
-            req_builder = req_builder.header("anthropic-beta", "prompt-caching-2024-07-31");
+            beta_tokens.push("prompt-caching-2024-07-31");
+        }
+        if request_uses_computer_tool(&request_ctx.tools) {
+            beta_tokens.push(COMPUTER_USE_BETA);
+        }
+        if !beta_tokens.is_empty() {
+            req_builder = req_builder.header("anthropic-beta", beta_tokens.join(","));
         }
 
         if let Some(ref v) = request_ctx.aura_project_id {
@@ -2052,7 +2064,10 @@ fn build_api_request(
         tools: if request.tools.is_empty() {
             None
         } else {
-            Some(convert_tools_to_api(&request.tools, prompt_caching_enabled))
+            Some(convert_tool_entries_to_api(
+                &request.tools,
+                prompt_caching_enabled,
+            ))
         },
         tool_choice: convert_tool_choice(&request.tool_choice, request.parallel_tool_use),
         max_tokens: request.max_tokens.get(),
@@ -2710,7 +2725,7 @@ impl ModelProvider for AnthropicProvider {
                     tools: if request_ref.tools.is_empty() {
                         None
                     } else {
-                        Some(convert_tools_to_api(
+                        Some(convert_tool_entries_to_api(
                             &request_ref.tools,
                             prompt_caching_enabled,
                         ))

@@ -40,6 +40,7 @@ fn ok_read_result(id: &str, content: &str) -> ToolCallResult {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     }
 }
 
@@ -56,6 +57,7 @@ fn ok_write_result(id: &str, path: &str) -> ToolCallResult {
             lines_added: 1,
             lines_removed: 0,
         }],
+        image: None,
     }
 }
 

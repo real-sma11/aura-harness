@@ -71,6 +71,7 @@ impl Default for PolicyConfig {
         tool_capability_requirements.insert("post_to_feed".to_string(), Capability::PostToFeed);
         tool_capability_requirements.insert("check_budget".to_string(), Capability::ManageBilling);
         tool_capability_requirements.insert("record_usage".to_string(), Capability::ManageBilling);
+        tool_capability_requirements.insert("computer".to_string(), Capability::ComputerUse);
 
         Self {
             allowed_action_kinds,

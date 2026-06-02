@@ -239,6 +239,7 @@ fn shamir_replay_meets_eight_distinct_read_target() {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         };
         update_cache(
             &mut cache,

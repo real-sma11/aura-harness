@@ -168,6 +168,7 @@ mod tests {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 

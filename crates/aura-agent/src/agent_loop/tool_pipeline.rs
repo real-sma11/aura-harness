@@ -528,6 +528,7 @@ fn emit_and_log_results(
                 tool_name,
                 content: r.content.clone(),
                 is_error: r.is_error,
+                image: r.image.clone(),
             },
         );
     }
@@ -548,13 +549,33 @@ pub(super) fn push_tool_result_message(
     context_texts: Vec<String>,
 ) {
     let mut blocks: Vec<ContentBlock> = Vec::new();
+    // Images ride along as standalone `Image` blocks appended after the
+    // `tool_result` blocks (Anthropic allows additional content after
+    // tool_result blocks in the same user turn; text side-messages
+    // already use this pattern below). The screenshot from a
+    // computer-use action therefore reaches the model on the very next
+    // iteration of the same turn. We deliberately do NOT nest the image
+    // inside the tool_result content array here — aura-os's history
+    // replay path reconstructs the nested form from the persisted
+    // `image_base64`/`image_media_type` wire fields.
+    let mut image_blocks: Vec<ContentBlock> = Vec::new();
     for r in results {
+        if let Some(image) = &r.image {
+            image_blocks.push(ContentBlock::Image {
+                source: aura_model_reasoner::ImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: image.media_type.clone(),
+                    data: image.base64.clone(),
+                },
+            });
+        }
         blocks.push(ContentBlock::tool_result(
             &r.tool_use_id,
             ToolResultContent::text(r.content),
             r.is_error,
         ));
     }
+    blocks.append(&mut image_blocks);
     for text in context_texts {
         blocks.push(ContentBlock::Text { text });
     }
@@ -632,6 +653,7 @@ pub(super) fn cancelled_results_for(to_execute: &[ToolCallInfo]) -> Vec<ToolCall
             kind: aura_core_types::ToolResultKind::AgentError,
             stop_loop: true,
             file_changes: Vec::new(),
+            image: None,
         })
         .collect()
 }
@@ -692,6 +714,7 @@ pub(super) fn partition_circling_duplicate_reads(
                 kind: aura_core_types::ToolResultKind::AgentError,
                 stop_loop: false,
                 file_changes: Vec::new(),
+                image: None,
             });
         } else {
             remaining.push(tool.clone());
@@ -728,10 +751,11 @@ fn partition_oversized_writes(
                         .get("path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let msg = aura_context_prompts::model_messages::chunk_guard::render_chunk_guard_body(
-                        content.len(),
-                        WRITE_FILE_CHUNK_BYTES,
-                    );
+                    let msg =
+                        aura_context_prompts::model_messages::chunk_guard::render_chunk_guard_body(
+                            content.len(),
+                            WRITE_FILE_CHUNK_BYTES,
+                        );
                     let content_msg = format!(
                         "{tag}{msg}",
                         tag = aura_context_prompts::model_messages::chunk_guard::CHUNK_GUARD_TAG,
@@ -755,6 +779,7 @@ fn partition_oversized_writes(
                         kind: aura_core_types::ToolResultKind::AgentError,
                         stop_loop: false,
                         file_changes: Vec::new(),
+                        image: None,
                     });
                     continue;
                 }
@@ -1037,6 +1062,7 @@ mod track_tool_effects_tests {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         }
     }
 
@@ -1061,6 +1087,7 @@ mod track_tool_effects_tests {
                 lines_added: 1,
                 lines_removed: 0,
             }],
+            image: None,
         }
     }
 

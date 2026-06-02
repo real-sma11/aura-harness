@@ -291,6 +291,7 @@ impl AgentToolExecutor for TaskToolExecutor {
                         kind: aura_core_types::ToolResultKind::AgentError,
                         stop_loop: false,
                         file_changes: Vec::new(),
+                        image: None,
                     },
                 );
                 continue;
@@ -381,7 +382,9 @@ impl AgentToolExecutor for TaskToolExecutor {
             .map(String::from)
             .or_else(|| infer_default_build_command(project_root))?;
 
-        self.emit_text(aura_context_prompts::model_messages::auto_build::auto_build_status_line(&cmd));
+        self.emit_text(
+            aura_context_prompts::model_messages::auto_build::auto_build_status_line(&cmd),
+        );
 
         match crate::verify::run_build_command(project_root, &cmd, None).await {
             Ok(result) => {

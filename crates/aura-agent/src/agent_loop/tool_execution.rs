@@ -120,6 +120,7 @@ fn cached_tool_result(call: &ToolCallInfo, content: String) -> ToolCallResult {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     }
 }
 

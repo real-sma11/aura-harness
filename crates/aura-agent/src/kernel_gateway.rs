@@ -10,7 +10,9 @@ use crate::recording_stream::RecordingStream;
 use crate::types::{AgentToolExecutor, ToolCallInfo, ToolCallResult};
 use async_trait::async_trait;
 use aura_agent_kernel::{Kernel, KernelError};
-use aura_model_reasoner::{ModelProvider, ModelRequest, ModelResponse, ReasonerError, StreamEventStream};
+use aura_model_reasoner::{
+    ModelProvider, ModelRequest, ModelResponse, ReasonerError, StreamEventStream,
+};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -88,6 +90,7 @@ impl AgentToolExecutor for KernelToolGateway {
                             kind: output.kind,
                             stop_loop: false,
                             file_changes,
+                            image: output.image,
                         }
                     } else {
                         let tc = &tool_calls[i];
@@ -193,8 +196,8 @@ impl ModelProvider for KernelModelGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aura_core_types::AgentId;
     use aura_agent_kernel::{ExecutorRouter, KernelConfig};
+    use aura_core_types::AgentId;
     use aura_model_reasoner::{Message, MockProvider};
     use aura_store_db::RocksStore;
     use aura_tools::ToolExecutor;

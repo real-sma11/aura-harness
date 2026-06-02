@@ -277,7 +277,7 @@ pub(super) async fn drive_stream(
                     .copied()
                     .unwrap_or(usize::MAX);
                 spawn_cursor = spawn_cursor.saturating_add(1);
-                spawned_pairs.push((submission_index, pair));
+                spawned_pairs.push((submission_index, *pair));
             }
         }
     }
@@ -494,7 +494,10 @@ async fn next_stream_step(
 }
 
 enum DrainStep {
-    Result((ToolCallInfo, ToolCallResult)),
+    // Boxed: `ToolCallResult` carries an optional screenshot image, so
+    // the pair is large relative to the unit `Done` / `Cancelled`
+    // variants. Boxing keeps the enum small (clippy::large_enum_variant).
+    Result(Box<(ToolCallInfo, ToolCallResult)>),
     Done,
     Cancelled,
 }
@@ -511,13 +514,13 @@ async fn drain_next<'a>(
             biased;
             () = token.cancelled() => DrainStep::Cancelled,
             next = in_flight.next() => match next {
-                Some(pair) => DrainStep::Result(pair),
+                Some(pair) => DrainStep::Result(Box::new(pair)),
                 None => DrainStep::Done,
             }
         }
     } else {
         match in_flight.next().await {
-            Some(pair) => DrainStep::Result(pair),
+            Some(pair) => DrainStep::Result(Box::new(pair)),
             None => DrainStep::Done,
         }
     }
@@ -594,6 +597,7 @@ fn cancelled_outcome(
                 is_error: true,
                 kind: aura_core_types::ToolResultKind::AgentError,
                 stop_loop: true,
+                image: None,
                 file_changes: Vec::new(),
             };
             spawned_pairs.push((idx, (call.clone(), result)));

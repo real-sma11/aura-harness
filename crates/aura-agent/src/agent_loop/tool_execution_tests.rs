@@ -20,6 +20,7 @@ fn tool_results_are_emitted_before_context_texts() {
             kind: aura_core_types::ToolResultKind::Ok,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         },
         ToolCallResult {
             tool_use_id: "tool_2".to_string(),
@@ -28,6 +29,7 @@ fn tool_results_are_emitted_before_context_texts() {
             kind: aura_core_types::ToolResultKind::AgentError,
             stop_loop: false,
             file_changes: Vec::new(),
+            image: None,
         },
     ];
     let context = vec!["Build check failed".to_string()];
@@ -92,6 +94,7 @@ fn fuzzy_cache_hits_after_alternation_reorder() {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     let mut cache = ToolResultCache::default();
     update_cache(
@@ -142,6 +145,7 @@ fn write_clears_both_caches() {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     let mut cache = ToolResultCache::default();
     update_cache(
@@ -171,6 +175,7 @@ fn write_clears_both_caches() {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     update_cache(
         &mut cache,
@@ -205,6 +210,7 @@ fn failed_write_does_not_clear_caches() {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     let mut cache = ToolResultCache::default();
     update_cache(
@@ -225,6 +231,7 @@ fn failed_write_does_not_clear_caches() {
         kind: aura_core_types::ToolResultKind::AgentError,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     update_cache(
         &mut cache,
@@ -343,6 +350,7 @@ fn drive_read_file(
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     update_cache(
         cache,
@@ -470,6 +478,7 @@ fn write_invalidates_only_overlapping_path() {
         kind: aura_core_types::ToolResultKind::Ok,
         stop_loop: false,
         file_changes: Vec::new(),
+        image: None,
     };
     update_cache(
         &mut cache,

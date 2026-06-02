@@ -180,6 +180,8 @@ mod tests {
             result: "file contents here".to_string(),
             is_error: false,
             tool_use_id: Some("tu_1".to_string()),
+            image_base64: None,
+            image_media_type: None,
         });
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "tool_result");
@@ -195,6 +197,8 @@ mod tests {
             result: "permission denied".to_string(),
             is_error: true,
             tool_use_id: None,
+            image_base64: None,
+            image_media_type: None,
         });
         let json = serde_json::to_value(&msg).unwrap();
         assert!(json["is_error"].as_bool().unwrap());

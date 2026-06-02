@@ -29,6 +29,11 @@ pub enum Capability {
     PostToFeed,
     /// May call media-generation tools (image / video / audio).
     GenerateMedia,
+    /// May call the Anthropic computer-use `computer` tool (drive the
+    /// real OS cursor/keyboard and read back screenshots). Gated so the
+    /// tool is only visible + callable for runs that explicitly opted
+    /// into computer-use.
+    ComputerUse,
     /// May read project `id`.
     #[serde(rename_all = "camelCase")]
     ReadProject {
@@ -93,6 +98,7 @@ impl Capability {
             Capability::InvokeProcess => "invokeProcess",
             Capability::PostToFeed => "postToFeed",
             Capability::GenerateMedia => "generateMedia",
+            Capability::ComputerUse => "computerUse",
             Capability::ReadProject { .. } => "readProject",
             Capability::WriteProject { .. } => "writeProject",
             Capability::ReadAllProjects => "readAllProjects",

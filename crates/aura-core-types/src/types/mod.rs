@@ -35,7 +35,8 @@ pub use tool::{
     InstalledToolCapability, InstalledToolDefinition, InstalledToolIntegrationRequirement,
     InstalledToolRuntimeAuth, InstalledToolRuntimeExecution, InstalledToolRuntimeIntegration,
     InstalledToolRuntimeProviderExecution, LineDiff, RuntimeCapabilityInstall, ToolAuth, ToolCall,
-    ToolCallContext, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultKind,
+    ToolCallContext, ToolExecution, ToolGateVerdict, ToolProposal, ToolResult, ToolResultImage,
+    ToolResultKind,
 };
 pub use transaction::{SystemKind, Transaction, TransactionType};
 

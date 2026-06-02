@@ -78,6 +78,7 @@ impl TurnEventSink for UiCommandSink {
         _tool_name: String,
         content: String,
         is_error: bool,
+        _image: Option<aura_core_types::ToolResultImage>,
     ) {
         let _ = self
             .commands
