@@ -5,8 +5,8 @@
 //! `aura_context_memory` domain types and dispatch to
 //! [`aura_context_memory::MemoryStoreApi`].
 
-use aura_core_types::{AgentEventId, FactId, ProcedureId};
 use aura_context_memory::{AgentEvent, Fact, FactSource, MemoryStoreApi, Procedure};
+use aura_core_types::{AgentEventId, FactId, ProcedureId};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,

@@ -572,7 +572,9 @@ impl ModelRequestBuilder {
             // and the `X-Aura-Prompt-Cache-Key` header downstream read
             // this one field, so clamping here is the only place the
             // limit needs to be enforced across the whole stack.
-            prompt_cache_key: self.prompt_cache_key.map(aura_protocol::clamp_prompt_cache_key),
+            prompt_cache_key: self
+                .prompt_cache_key
+                .map(aura_protocol::clamp_prompt_cache_key),
             prompt_cache_retention: self.prompt_cache_retention,
             metadata: self.metadata,
         })

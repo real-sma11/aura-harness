@@ -9,7 +9,9 @@
 //! reassembly and is the home of the
 //! `Completed.end_turn` → [`StopReason`] mapping.
 
-use aura_model_reasoner::{ContentBlock, Message, ModelResponse, ProviderTrace, Role, StopReason, Usage};
+use aura_model_reasoner::{
+    ContentBlock, Message, ModelResponse, ProviderTrace, Role, StopReason, Usage,
+};
 
 use crate::types::ToolCallInfo;
 

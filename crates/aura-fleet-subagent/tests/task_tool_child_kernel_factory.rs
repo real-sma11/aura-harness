@@ -136,8 +136,5 @@ async fn task_child_run_uses_injected_factory_with_parent_chain() {
         result.child_agent_id.unwrap(),
         "the router is built for the same child agent id the run reports"
     );
-    assert_eq!(
-        request.originating_user_id.as_deref(),
-        Some("factory-user")
-    );
+    assert_eq!(request.originating_user_id.as_deref(), Some("factory-user"));
 }

@@ -33,12 +33,13 @@ mod policy;
 mod replay;
 pub(crate) mod spawn_hook;
 
-pub use billing::walk_parent_chain;
-pub use context::{hash_tx_with_window, Context, ContextBuilder};
 pub use aura_exec_traits::{
     decode_tool_effect, DecodedToolResult, ExecuteContext, ExecuteLimits, Executor, ExecutorError,
     ExecutorRouter,
 };
+pub use aura_exec_traits::{ChildAgentSpec, NoopSpawnHook, SpawnError, SpawnHook, SpawnOutcome};
+pub use billing::walk_parent_chain;
+pub use context::{hash_tx_with_window, Context, ContextBuilder};
 pub use kernel::{
     write_system_record, ApprovalRequiredInfo, Kernel, KernelConfig, PendingToolPrompt,
     ProcessResult, ReasonResult, ReasonStreamHandle, ToolApprovalError, ToolApprovalPrompter,
@@ -46,7 +47,6 @@ pub use kernel::{
 };
 pub use policy::{Policy, PolicyConfig, PolicyResult, PolicyVerdict};
 pub use replay::{ReplayConsumer, ReplayError, ReplayReport};
-pub use aura_exec_traits::{ChildAgentSpec, NoopSpawnHook, SpawnError, SpawnHook, SpawnOutcome};
 pub use spawn_hook::KernelSpawnHook;
 
 /// Errors from the deterministic kernel (store, reasoner, serialization).

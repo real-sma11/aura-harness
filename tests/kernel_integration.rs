@@ -3,8 +3,8 @@
 //! Verifies the full flow: process → reason → process_tools → reason → process,
 //! checking all invariants hold.
 
-use aura_core_types::{AgentId, TransactionType};
 use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
+use aura_core_types::{AgentId, TransactionType};
 use aura_model_reasoner::{Message, MockProvider, ModelRequest};
 use aura_store_db::{RocksStore, Store};
 use std::sync::Arc;
@@ -73,7 +73,8 @@ async fn test_full_kernel_mediated_flow() {
     }
 
     // Verify context hashes are non-zero and unique
-    let hashes: Vec<aura_core_types::ContextHash> = entries.iter().map(|e| e.context_hash).collect();
+    let hashes: Vec<aura_core_types::ContextHash> =
+        entries.iter().map(|e| e.context_hash).collect();
     for hash in &hashes {
         assert_ne!(
             *hash,

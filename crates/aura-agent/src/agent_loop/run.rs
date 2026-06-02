@@ -15,8 +15,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use aura_plugin_hooks::HookEvent;
 use aura_model_reasoner::{Message, ModelProvider, ToolDefinition};
+use aura_plugin_hooks::HookEvent;
 use chrono::Utc;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -240,7 +240,11 @@ impl AgentLoop {
         };
         let fut = self.run_inner(&ctx, messages, tools);
         let result = match observer {
-            Some(obs) => aura_model_reasoner::DEBUG_RETRY_OBSERVER.scope(obs, fut).await,
+            Some(obs) => {
+                aura_model_reasoner::DEBUG_RETRY_OBSERVER
+                    .scope(obs, fut)
+                    .await
+            }
             None => fut.await,
         };
         // Phase 8: fire `Stop` when the agent loop completes

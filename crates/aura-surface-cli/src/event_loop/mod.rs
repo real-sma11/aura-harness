@@ -8,8 +8,8 @@ pub(crate) use agent_events::forward_agent_events;
 pub(crate) use record_ui::send_record_to_ui;
 
 use aura_agent::{AgentLoop, KernelModelGateway, KernelToolGateway, ProcessManager};
-use aura_core_types::{AgentId, Transaction};
 use aura_agent_kernel::Kernel;
+use aura_core_types::{AgentId, Transaction};
 use aura_model_reasoner::{Message, ToolDefinition};
 use aura_terminal::{UiCommand, UiEvent};
 use std::sync::Arc;

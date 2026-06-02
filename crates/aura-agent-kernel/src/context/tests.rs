@@ -4,7 +4,9 @@
 #![allow(clippy::cast_possible_truncation)] // TODO(W5): seq<256 in fixtures; migrate to u8::try_from.
 
 use super::*;
-use aura_core_types::{Action, ActionId, ActionKind, AgentId, Decision, ProposalSet, TransactionType};
+use aura_core_types::{
+    Action, ActionId, ActionKind, AgentId, Decision, ProposalSet, TransactionType,
+};
 use bytes::Bytes;
 
 fn create_test_entry(

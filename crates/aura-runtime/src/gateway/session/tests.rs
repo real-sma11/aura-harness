@@ -13,11 +13,11 @@ use super::state::agent_loop_stream_timeout;
 use super::Session;
 use aura_context_compaction::{compact_for_storage, SESSION_TOOL_BLOB_MAX_BYTES};
 use aura_core_types::{AgentPermissions, Capability};
+use aura_model_reasoner::Message;
 use aura_protocol::{
     AgentCapabilities, AgentIdentity, AgentPermissionsWire, ChatProjectInfoWire, ModelSelection,
     ProjectContext, RuntimeRequest, RuntimeRequestType, WorkspaceLocation,
 };
-use aura_model_reasoner::Message;
 use std::path::PathBuf;
 
 fn absolute_path(parts: &[&str]) -> PathBuf {

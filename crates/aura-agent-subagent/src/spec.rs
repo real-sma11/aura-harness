@@ -1,8 +1,8 @@
 //! Derived [`SubagentSpec`] + supporting attribution / lineage types.
 
-use aura_core_types::{AgentId, AgentToolPermissions, UserToolDefaults};
 use aura_core_modes::{AgentMode, JoinPolicy, KernelMode, ModeProfile, ReplayMode, SpawnMode};
 use aura_core_permissions::Permissions;
+use aura_core_types::{AgentId, AgentToolPermissions, UserToolDefaults};
 
 use crate::manifest::OverrideManifest;
 use crate::overrides::SubagentBudget;

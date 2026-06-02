@@ -8,9 +8,9 @@
 //! policy, and override fields between the wire/core types in
 //! `aura_core_types` and the agent-layer types this crate already owns.
 
-use aura_core_types::{AgentPermissions, SubagentDispatchRequest, SubagentKindSpec};
 use aura_core_modes::{AgentMode, KernelMode, ModeProfile, ReplayMode, SandboxMode};
 use aura_core_permissions::Permissions;
+use aura_core_types::{AgentPermissions, SubagentDispatchRequest, SubagentKindSpec};
 
 use crate::{ParentContext, SubagentLineage, SubagentOverrides};
 

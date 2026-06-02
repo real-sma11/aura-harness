@@ -1,8 +1,8 @@
 //! Shared construction helpers for `ToolResolver` and `ExecutorRouter`.
 
 use aura_agent_kernel::ExecutorRouter;
-use aura_tools::domain_tools::DomainToolExecutor;
 use aura_exec_runner::{ToolCatalog, ToolConfig, ToolResolver};
+use aura_tools::domain_tools::DomainToolExecutor;
 use std::sync::Arc;
 
 /// Build a [`ToolResolver`] over the shared catalog + tool config,

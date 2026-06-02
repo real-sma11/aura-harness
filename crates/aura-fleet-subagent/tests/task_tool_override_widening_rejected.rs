@@ -19,9 +19,9 @@ use aura_agent_subagent::{
     DefaultDerivation, DerivationError, ParentContext, SubagentDerivation, SubagentLineage,
     SubagentOverrides,
 };
-use aura_core_types::AgentId;
 use aura_core_modes::{AgentMode, KernelMode, ModeProfile, ReplayMode, SandboxMode};
 use aura_core_permissions::{AgentScope, Capability, Permissions};
+use aura_core_types::AgentId;
 
 fn parent_with_caps(caps: Vec<Capability>) -> ParentContext {
     let agent_id = AgentId::generate();

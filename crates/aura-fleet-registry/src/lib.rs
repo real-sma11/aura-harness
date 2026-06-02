@@ -56,9 +56,9 @@
 
 use std::collections::HashMap;
 
-use aura_core_types::AgentId;
 use aura_core_modes::{AgentMode, KernelMode};
 use aura_core_permissions::Permissions;
+use aura_core_types::AgentId;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -371,8 +371,10 @@ mod tests {
             .map(|id| id.to_hex())
             .collect();
         got_hex.sort();
-        let mut expected_hex: Vec<String> =
-            expected.iter().map(aura_core_types::AgentId::to_hex).collect();
+        let mut expected_hex: Vec<String> = expected
+            .iter()
+            .map(aura_core_types::AgentId::to_hex)
+            .collect();
         expected_hex.sort();
         assert_eq!(got_hex, expected_hex);
     }

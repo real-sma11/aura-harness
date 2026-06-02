@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aura_agent::{AgentLoopResult, TurnObserver};
-use aura_core_types::AgentId;
 use aura_context_memory::{MemoryManager, TurnSummary};
+use aura_core_types::AgentId;
 use tracing::warn;
 
 /// Build a layer-neutral [`TurnSummary`] from an

@@ -12,8 +12,8 @@
 //!   spec's [`JoinPolicy`]; the parent gets a [`BatchSpawn`] handle
 //!   it `await`s on.
 
-use aura_core_types::{AgentId, SubagentResult};
 use aura_core_modes::{JoinPolicy, SpawnMode};
+use aura_core_types::{AgentId, SubagentResult};
 use tokio::sync::oneshot;
 
 use crate::SpawnError;

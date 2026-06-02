@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use aura_agent::agent_runner::AgentRunnerConfig;
 use aura_agent::{KernelDomainGateway, KernelModelGateway, KernelToolGateway};
+use aura_agent_kernel::Kernel;
 use aura_automaton::{DevLoopAutomaton, TaskRunAutomaton};
 use aura_core_types::AgentPermissions;
-use aura_agent_kernel::Kernel;
 use aura_protocol::AgentPersona;
 use aura_tools::catalog::ToolCatalog;
 use aura_tools::domain_tools::DomainApi;

@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use aura_core_types::{
-    Action, ActionKind, AgentId, AgentToolPermissions, Effect, ToolCall, ToolResult, ToolState,
-};
 use aura_agent_kernel::{
     ExecuteContext, Executor, ExecutorError, ExecutorRouter, Kernel, KernelConfig, PolicyConfig,
+};
+use aura_core_types::{
+    Action, ActionKind, AgentId, AgentToolPermissions, Effect, ToolCall, ToolResult, ToolState,
 };
 use aura_model_reasoner::{
     ContentBlock, Message, MockProvider, MockResponse, ModelProvider, StopReason, ToolDefinition,

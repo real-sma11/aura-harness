@@ -152,12 +152,11 @@ pub(crate) async fn start_council_run(
     // `task`-tool path constructs, so members inherit the parent's
     // identity / permissions / workspace and run the full real-agent
     // loop with only their model overridden.
-    let dispatcher = build_fleet_subagent_dispatcher(&session, &ctx).map_err(|e| {
-        ChatRequestError {
+    let dispatcher =
+        build_fleet_subagent_dispatcher(&session, &ctx).map_err(|e| ChatRequestError {
             code: "council_dispatcher_build_failed",
             message: format!("failed to build council member dispatcher: {e}"),
-        }
-    })?;
+        })?;
     let user_tool_defaults =
         super::helpers::session_user_defaults(&session, &ctx).map_err(|e| ChatRequestError {
             code: "council_user_defaults_failed",
@@ -530,7 +529,10 @@ mod tests {
         let prompt = build_synthesis_prompt("what is rust?", &answers);
 
         assert!(prompt.contains("what is rust?"), "embeds the question");
-        assert!(prompt.contains("model-a") && prompt.contains("model-b"), "labels members");
+        assert!(
+            prompt.contains("model-a") && prompt.contains("model-b"),
+            "labels members"
+        );
         assert!(
             prompt.contains("rust is a systems language")
                 && prompt.contains("rust has a borrow checker"),

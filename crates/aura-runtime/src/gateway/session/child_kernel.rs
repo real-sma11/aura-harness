@@ -94,12 +94,14 @@ impl SessionChildKernelFactory {
     /// Build the self-referential factory. The returned `Arc` is what
     /// gets injected into the parent's [`RuntimeChildRunner`].
     pub(crate) fn new(params: SessionChildKernelFactoryParams) -> Arc<Self> {
-        let automaton = params.automaton_controller.map(|controller| AutomatonToolParams {
-            controller,
-            project_id: params.automaton_project_id,
-            workspace_root: params.automaton_workspace_root,
-            auth_token: params.auth_token.clone(),
-        });
+        let automaton = params
+            .automaton_controller
+            .map(|controller| AutomatonToolParams {
+                controller,
+                project_id: params.automaton_project_id,
+                workspace_root: params.automaton_workspace_root,
+                auth_token: params.auth_token.clone(),
+            });
         Arc::new_cyclic(|me| SessionChildKernelFactory {
             me: me.clone(),
             catalog: params.catalog,
@@ -199,7 +201,10 @@ impl ChildKernelFactory for SessionChildKernelFactory {
 
         resolver = resolver
             .with_caller_permissions(request.permissions)
-            .with_tool_permission_context(request.user_tool_defaults, Some(request.tool_permissions))
+            .with_tool_permission_context(
+                request.user_tool_defaults,
+                Some(request.tool_permissions),
+            )
             .with_parent_chain(request.parent_chain);
         if let Some(user_id) = request.originating_user_id {
             if !user_id.trim().is_empty() {

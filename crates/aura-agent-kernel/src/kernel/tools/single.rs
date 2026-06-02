@@ -21,11 +21,11 @@
 //!    [`super::shared::record_entry_for_tool_outcome`].
 
 use super::shared::{record_entry_for_tool_outcome, ToolOutcomeInputs};
-use aura_exec_traits::ExecuteContext;
 use crate::kernel::{Kernel, ProcessResult};
 use aura_core_types::{
     Action, ActionId, ActionKind, ContextHash, Effect, EffectKind, ToolProposal, Transaction,
 };
+use aura_exec_traits::ExecuteContext;
 use bytes::Bytes;
 
 pub(super) async fn process_one(

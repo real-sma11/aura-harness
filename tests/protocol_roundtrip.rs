@@ -403,7 +403,10 @@ fn aura_os_contract_includes_current_additive_wire_fields() {
     let end_decoded: aura_protocol::OutboundMessage = serde_json::from_value(end_json).unwrap();
     match end_decoded {
         aura_protocol::OutboundMessage::AssistantMessageEnd(end) => {
-            let contents = end.usage.context_contents.expect("context_contents present");
+            let contents = end
+                .usage
+                .context_contents
+                .expect("context_contents present");
             assert_eq!(contents.tools.len(), 1);
             assert_eq!(contents.tools[0].tokens, 7);
         }

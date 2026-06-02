@@ -20,7 +20,10 @@ impl ConversationTurn {
     /// Walks backward to find the final assistant text and the user message
     /// that preceded it. Returns `None` if either side is empty.
     #[must_use]
-    pub fn from_messages(messages: &[aura_model_reasoner::Message], total_text: &str) -> Option<Self> {
+    pub fn from_messages(
+        messages: &[aura_model_reasoner::Message],
+        total_text: &str,
+    ) -> Option<Self> {
         let assistant_text = if total_text.is_empty() {
             // Fallback: collect from trailing assistant messages
             let text: String = messages

@@ -271,6 +271,7 @@ async fn tool_use_emits_tool_start_input_snapshot_then_result() {
         tool_name,
         content,
         is_error,
+        ..
     } = &events[tool_result_pos.unwrap()]
     {
         assert_eq!(tool_use_id, "tool_1");

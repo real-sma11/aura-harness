@@ -8,11 +8,11 @@
 //! "this dev-loop saw exactly these tools at startup" from a record-log
 //! scan.
 
+use aura_agent_kernel::{Kernel, KernelError};
 use aura_core_types::{
     InstalledIntegrationDefinition, InstalledToolCapability, InstalledToolDefinition,
     RuntimeCapabilityInstall, SystemKind, Transaction, TransactionType,
 };
-use aura_agent_kernel::{Kernel, KernelError};
 
 /// Record a `SessionStart` followed by a `CapabilityInstall` system
 /// entry on the supplied kernel. The bridge calls this for every

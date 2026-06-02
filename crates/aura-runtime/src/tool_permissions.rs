@@ -99,8 +99,11 @@ pub(crate) fn effective_tool_infos(
         .visible_tools_with_permissions(ToolProfile::Agent, tool_config, agent_permissions)
         .into_iter()
         .filter_map(|tool| {
-            let state =
-                aura_core_types::resolve_effective_permission(user_default, agent_override, &tool.name);
+            let state = aura_core_types::resolve_effective_permission(
+                user_default,
+                agent_override,
+                &tool.name,
+            );
             (state != ToolState::Deny).then(|| EffectiveToolInfo {
                 name: tool.name,
                 description: tool.description,
@@ -158,7 +161,8 @@ pub(crate) fn enforce_monotonic_update(
     next: &AgentToolPermissions,
 ) -> Result<(), String> {
     for (tool, next_state) in &next.per_tool {
-        let current_state = aura_core_types::resolve_effective_permission(user_default, current, tool);
+        let current_state =
+            aura_core_types::resolve_effective_permission(user_default, current, tool);
         if !next_state.is_subset_of(current_state) {
             return Err(format!(
                 "tool '{tool}' cannot be widened from {} to {}",

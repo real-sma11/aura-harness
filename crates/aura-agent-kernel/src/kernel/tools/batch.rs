@@ -8,12 +8,12 @@
 
 use super::shared::{record_entry_for_tool_outcome, ToolOutcomeInputs};
 use crate::context::hash_tx_with_window;
-use aura_exec_traits::ExecuteContext;
 use crate::kernel::{Kernel, ProcessResult};
 use crate::policy::PolicyVerdict;
 use aura_core_types::{
     Action, ActionId, ActionKind, Effect, EffectKind, Proposal, ToolProposal, Transaction,
 };
+use aura_exec_traits::ExecuteContext;
 use bytes::Bytes;
 
 pub(super) async fn process_many(

@@ -10,8 +10,8 @@
 //! stays confined to `aura-kernel` per Invariant §10.
 
 use aura_agent::{AgentLoop, AgentLoopConfig, KernelToolGateway};
-use aura_core_types::{AgentId, Transaction, TransactionType};
 use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
+use aura_core_types::{AgentId, Transaction, TransactionType};
 use aura_model_reasoner::{MockProvider, MockResponse, ModelProvider, ToolDefinition};
 use aura_store_db::{RocksStore, Store};
 use bytes::Bytes;

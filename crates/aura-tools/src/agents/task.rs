@@ -340,7 +340,9 @@ mod tests {
             scope: AgentScope::default(),
             capabilities: vec![Capability::SpawnAgent],
         });
-        ctx.parent_chain = (0..MAX_SUBAGENT_DEPTH).map(|_| AgentId::generate()).collect();
+        ctx.parent_chain = (0..MAX_SUBAGENT_DEPTH)
+            .map(|_| AgentId::generate())
+            .collect();
         let input = minimal_input();
         let err = TaskTool::build_request(&ctx, &input).unwrap_err();
         assert!(

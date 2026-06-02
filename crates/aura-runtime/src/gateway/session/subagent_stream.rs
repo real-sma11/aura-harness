@@ -216,8 +216,7 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
         // least-surprising behavior, avoiding mislabelling task spawns as
         // council members.
         let council_index = request.council_index;
-        let council_model = council_index
-            .and(request.model_override.clone());
+        let council_model = council_index.and(request.model_override.clone());
         let is_detached = matches!(
             request.spawn_mode,
             Some(aura_core_types::SpawnMode::Detached)

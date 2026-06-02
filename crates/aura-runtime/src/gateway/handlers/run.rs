@@ -40,7 +40,9 @@ pub(in crate::gateway) async fn run_start_handler(
         RuntimeRequestType::Chat { .. } => start_chat_run(state, req, auth_token).await,
         RuntimeRequestType::DevLoop {} => start_dev_loop_run(state, req, auth_token).await,
         RuntimeRequestType::TaskRun { .. } => start_task_run(state, req, auth_token).await,
-        RuntimeRequestType::Council { .. } => start_council_run_handler(state, req, auth_token).await,
+        RuntimeRequestType::Council { .. } => {
+            start_council_run_handler(state, req, auth_token).await
+        }
     }
 }
 
@@ -100,22 +102,23 @@ async fn start_council_run_handler(
         req.auth_jwt = auth_token.clone();
     }
     let ctx = crate::gateway::session::WsContext::from_state(&state, auth_token);
-    let run_id = start_council_run(req, ctx)
-        .await
-        .map_err(|ChatRequestError { code, message }| {
-            let status = match code {
-                "council_no_members"
-                | "invalid_council_request"
-                | "invalid_workspace"
-                | "invalid_provider_config"
-                | "tool_permissions_load_failed" => StatusCode::BAD_REQUEST,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(serde_json::json!({"error": message, "code": code})),
-            )
-        })?;
+    let run_id =
+        start_council_run(req, ctx)
+            .await
+            .map_err(|ChatRequestError { code, message }| {
+                let status = match code {
+                    "council_no_members"
+                    | "invalid_council_request"
+                    | "invalid_workspace"
+                    | "invalid_provider_config"
+                    | "tool_permissions_load_failed" => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (
+                    status,
+                    Json(serde_json::json!({"error": message, "code": code})),
+                )
+            })?;
 
     let event_stream_url = format!("/stream/{run_id}");
     Ok((

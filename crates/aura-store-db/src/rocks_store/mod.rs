@@ -40,7 +40,9 @@ use crate::error::StoreError;
 use crate::keys::{AgentMetaKey, InboxKey, KeyCodec, RecordKey};
 use crate::store::ReadStore;
 use aura_core_types::AgentStatus;
-use aura_core_types::{AgentId, RecordEntry, RuntimeCapabilityInstall, Transaction, UserToolDefaults};
+use aura_core_types::{
+    AgentId, RecordEntry, RuntimeCapabilityInstall, Transaction, UserToolDefaults,
+};
 use rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBCompressionType,
     DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch, WriteOptions,

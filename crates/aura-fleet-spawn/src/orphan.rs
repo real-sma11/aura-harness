@@ -36,8 +36,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use aura_core_types::AgentId;
 use aura_core_modes::{AgentMode, KernelMode, SpawnMode};
+use aura_core_types::AgentId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -336,7 +336,8 @@ fn empty_envelope_keeps_identity_sections_off() {
         build_command: Some("cargo build"),
         test_command: Some("cargo test"),
     };
-    let prompt = aura_context_prompts::agentic_execution_system_prompt(&project, info.as_ref(), None);
+    let prompt =
+        aura_context_prompts::agentic_execution_system_prompt(&project, info.as_ref(), None);
 
     for tag in [
         "<agent_identity>",

@@ -14,8 +14,8 @@ use anyhow::Context;
 use aura_agent::{
     AgentLoop, KernelModelGateway, KernelToolGateway, ProcessManager, ProcessManagerConfig,
 };
-use aura_core_types::{Identity, Transaction};
 use aura_agent_kernel::{Kernel, KernelConfig};
+use aura_core_types::{Identity, Transaction};
 use aura_model_reasoner::ModelProvider;
 use aura_terminal::{App, Terminal, Theme, UiCommand, UiEvent};
 use aura_tools::ToolConfig;

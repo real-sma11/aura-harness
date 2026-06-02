@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aura_auth::CredentialStore;
 use aura_agent_kernel::Executor;
+use aura_auth::CredentialStore;
 use aura_model_reasoner::{AnthropicConfig, AnthropicProvider, MockProvider, ModelProvider};
 use aura_runtime::test_support::{create_router, RouterState, RouterStateConfig, Scheduler};
 use aura_runtime::NodeConfig;

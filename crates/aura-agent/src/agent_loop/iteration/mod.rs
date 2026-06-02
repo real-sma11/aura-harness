@@ -12,8 +12,8 @@ use crate::dup_audit;
 use crate::events::AgentLoopEvent;
 use crate::sanitize;
 use crate::types::AgentLoopResult;
-use aura_context_compaction as compaction;
 use aura_config::CHARS_PER_TOKEN;
+use aura_context_compaction as compaction;
 
 use super::streaming;
 use super::{AgentLoop, AgentLoopConfig, LoopState};

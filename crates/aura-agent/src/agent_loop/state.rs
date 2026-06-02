@@ -655,7 +655,10 @@ mod intent_classifier_tests {
         let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
 
         assert_eq!(names, vec!["read_file", "create_task"]);
-        assert!(matches!(req.tool_choice, aura_model_reasoner::ToolChoice::Auto));
+        assert!(matches!(
+            req.tool_choice,
+            aura_model_reasoner::ToolChoice::Auto
+        ));
     }
 
     #[test]
@@ -675,7 +678,10 @@ mod intent_classifier_tests {
         let names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
 
         assert_eq!(names, vec!["read_file", "create_task"]);
-        assert!(matches!(req.tool_choice, aura_model_reasoner::ToolChoice::Auto));
+        assert!(matches!(
+            req.tool_choice,
+            aura_model_reasoner::ToolChoice::Auto
+        ));
     }
 
     /// Regression: a `Chat` request with `create_task` in scope must

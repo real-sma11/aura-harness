@@ -38,11 +38,11 @@ use aura_agent_kernel::{
     hash_tx_with_window, Executor, ExecutorError, ExecutorRouter, Kernel, KernelConfig,
     KernelError, ReplayError,
 };
+use aura_core_modes::KernelMode;
 use aura_core_types::{
     Action, ActionKind, AgentId, ContextHash, Decision, Effect, EffectKind, EffectStatus,
     ProposalSet, RecordEntry, ToolProposal, ToolResult, Transaction, TransactionType,
 };
-use aura_core_modes::KernelMode;
 use aura_model_reasoner::{MockProvider, ModelProvider};
 use aura_store_db::{RocksStore, Store, WriteStore};
 use aura_store_snapshot::{NoopSnapshotStore, SnapshotStore};

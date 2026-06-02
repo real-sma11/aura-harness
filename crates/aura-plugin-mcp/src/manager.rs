@@ -71,9 +71,7 @@ impl McpConnectionManager {
     /// Returns `true` iff a server with this id is registered.
     #[must_use]
     pub fn contains(&self, server_id: &str) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|g| g.contains_key(server_id))
+        self.inner.lock().is_ok_and(|g| g.contains_key(server_id))
     }
 
     /// Snapshot of currently-registered server ids (unordered).

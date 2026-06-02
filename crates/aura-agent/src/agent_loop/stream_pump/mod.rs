@@ -73,7 +73,9 @@
 //!   `expect()` calls that remain inside `#[cfg(test)]` are
 //!   intentional — test fixtures are exempt per Rule 4.1.
 
-use aura_model_reasoner::{ModelProvider, ModelRequest, ModelResponse, PartialToolUse, ReasonerError};
+use aura_model_reasoner::{
+    ModelProvider, ModelRequest, ModelResponse, PartialToolUse, ReasonerError,
+};
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};

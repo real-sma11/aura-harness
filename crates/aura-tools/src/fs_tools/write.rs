@@ -182,8 +182,8 @@ pub fn fs_write(
     })?;
 
     // Post-write verification
-    let on_disk_size = usize::try_from(fs::metadata(&resolved).map_or(0, |m| m.len()))
-        .unwrap_or(usize::MAX);
+    let on_disk_size =
+        usize::try_from(fs::metadata(&resolved).map_or(0, |m| m.len())).unwrap_or(usize::MAX);
     if on_disk_size != content.len() {
         return Err(ToolError::InvalidArguments(format!(
             "Post-write verification failed: wrote {} bytes but file is {} bytes on disk",

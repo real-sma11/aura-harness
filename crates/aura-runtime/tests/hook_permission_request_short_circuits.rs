@@ -27,8 +27,8 @@ use aura_agent_kernel::{
     ExecutorRouter, Kernel, KernelConfig, PendingToolPrompt, ToolApprovalError,
     ToolApprovalPrompter, ToolApprovalRemember, ToolApprovalResponse,
 };
-use aura_plugin_hooks::{HookEngine, HookEvent, PluginHookHost, RegisteredHook};
 use aura_model_reasoner::{MockProvider, ModelProvider};
+use aura_plugin_hooks::{HookEngine, HookEvent, PluginHookHost, RegisteredHook};
 use aura_store_db::{RocksStore, Store};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -163,8 +163,8 @@ async fn run_ask_tool(
     let provider: Arc<dyn ModelProvider + Send + Sync> =
         Arc::new(MockProvider::simple_response("noop"));
 
-    let policy =
-        aura_agent_kernel::PolicyConfig::default().with_user_default(UserToolDefaults::auto_review());
+    let policy = aura_agent_kernel::PolicyConfig::default()
+        .with_user_default(UserToolDefaults::auto_review());
     let config = KernelConfig {
         workspace_base: ws_dir.path().to_path_buf(),
         policy,

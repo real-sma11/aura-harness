@@ -30,8 +30,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
-use aura_plugin_hooks::{HookEngine, HookEvent, PluginHookHost, RegisteredHook};
 use aura_model_reasoner::{MockProvider, ModelProvider};
+use aura_plugin_hooks::{HookEngine, HookEvent, PluginHookHost, RegisteredHook};
 use aura_store_db::{RocksStore, Store};
 use tempfile::TempDir;
 

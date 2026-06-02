@@ -1,9 +1,9 @@
 //! Unit tests covering every [`DerivationError`] variant + the
 //! narrowing-only invariant proptest.
 
-use aura_core_types::AgentId;
 use aura_core_modes::{AgentMode, KernelMode, ModeProfile, SandboxMode};
 use aura_core_permissions::{Capability, Permissions};
+use aura_core_types::AgentId;
 use proptest::prelude::*;
 
 use crate::{

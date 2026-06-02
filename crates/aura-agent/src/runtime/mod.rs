@@ -45,7 +45,9 @@ impl From<aura_model_reasoner::ReasonerError> for RuntimeError {
             aura_model_reasoner::ReasonerError::Request(msg) => {
                 Self::Model(format!("request error: {msg}"))
             }
-            aura_model_reasoner::ReasonerError::Parse(msg) => Self::Model(format!("parse error: {msg}")),
+            aura_model_reasoner::ReasonerError::Parse(msg) => {
+                Self::Model(format!("parse error: {msg}"))
+            }
             aura_model_reasoner::ReasonerError::Internal(msg) => Self::Model(msg),
             // Exhausted per-tool-call streaming retries: surface the
             // classified reason through `Model(..)` so the outer

@@ -6,11 +6,11 @@ use crate::protocol::{
     ToolApprovalResponse as ProtocolResponse,
 };
 use async_trait::async_trait;
-use aura_core_types::ToolState;
 use aura_agent_kernel::{
     PendingToolPrompt, ToolApprovalError, ToolApprovalPrompter, ToolApprovalRemember,
     ToolApprovalResponse,
 };
+use aura_core_types::ToolState;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
@@ -143,11 +143,11 @@ mod tests {
         OutboundMessage, TextDelta, ToolApprovalDecision, ToolApprovalRemember,
         ToolApprovalResponse as ProtocolResponse,
     };
-    use aura_core_types::{AgentId, ToolState};
     use aura_agent_kernel::{
         PendingToolPrompt, ToolApprovalError, ToolApprovalPrompter,
         ToolApprovalRemember as Remember,
     };
+    use aura_core_types::{AgentId, ToolState};
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::time::Duration;

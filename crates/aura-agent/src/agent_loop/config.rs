@@ -366,7 +366,9 @@ pub(super) fn parse_cache_retention(
         "24h" | "h24" | "hours_24" | "Hours24" => {
             Some(aura_model_reasoner::PromptCacheRetention::Hours24)
         }
-        "in_memory" | "InMemory" | "memory" => Some(aura_model_reasoner::PromptCacheRetention::InMemory),
+        "in_memory" | "InMemory" | "memory" => {
+            Some(aura_model_reasoner::PromptCacheRetention::InMemory)
+        }
         _ => None,
     }
 }

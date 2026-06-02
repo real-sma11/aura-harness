@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aura_agent::KernelModelGateway;
+use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
 use aura_automaton::{Automaton, AutomatonId, AutomatonState, TickContext};
 use aura_core_types::{AgentId, TransactionType};
-use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
 use aura_model_reasoner::{MockProvider, ModelProvider};
 use aura_store_db::{RocksStore, Store};
 use aura_tools::domain_tools::{

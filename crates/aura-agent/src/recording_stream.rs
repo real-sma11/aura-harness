@@ -142,8 +142,8 @@ impl Drop for RecordingStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aura_core_types::{AgentId, TransactionType};
     use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
+    use aura_core_types::{AgentId, TransactionType};
     use aura_model_reasoner::{Message, MockProvider, ModelProvider, ModelRequest, StreamEvent};
     use aura_store_db::{RocksStore, Store};
     use futures_util::{stream, StreamExt};

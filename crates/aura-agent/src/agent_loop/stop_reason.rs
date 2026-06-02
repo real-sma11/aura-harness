@@ -22,8 +22,8 @@
 //! ladder against the active transport rather than resurrect the
 //! buffered helper.
 
-use aura_context_compaction as compaction;
 use aura_config::CHARS_PER_TOKEN;
+use aura_context_compaction as compaction;
 use aura_model_reasoner::{
     ContentBlock, Message, ModelProvider, ModelRequest, ModelRequestKind, ThinkingEffort,
     ToolChoice, ToolDefinition,

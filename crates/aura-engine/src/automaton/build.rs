@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
+use aura_agent_kernel::{Kernel, KernelConfig, PolicyConfig};
 use aura_core_types::{
     installed_integrations_satisfy, AgentId, AgentPermissions, InstalledIntegrationDefinition,
     InstalledToolDefinition,
 };
-use aura_agent_kernel::{Kernel, KernelConfig, PolicyConfig};
 use aura_tools::domain_tools::{DomainApi, DomainToolExecutor};
 use tracing::warn;
 
