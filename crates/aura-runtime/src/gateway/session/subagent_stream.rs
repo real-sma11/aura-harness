@@ -93,6 +93,11 @@ pub(crate) struct RuntimeSubagentObservabilityHook {
     /// before being reaped (see [`schedule_child_run_cleanup`]).
     /// Defaults to [`CHAT_RUN_IDLE_RETENTION`]; overridable in tests.
     cleanup_retention: Duration,
+    /// Council combine mechanism (`synthesize` / `contrast` /
+    /// `side_by_side`) stamped onto every council-member `SubagentSpawned`
+    /// this hook emits (gated by `council_index`, like `model`). `None`
+    /// for the ordinary `task`-tool hook, which emits no council members.
+    council_mechanism: Option<String>,
 }
 
 impl RuntimeSubagentObservabilityHook {
@@ -113,7 +118,16 @@ impl RuntimeSubagentObservabilityHook {
             parent_cancellation,
             parent_run_id,
             cleanup_retention: CHAT_RUN_IDLE_RETENTION,
+            council_mechanism: None,
         }
+    }
+
+    /// Stamp the AURA Council combine mechanism onto every council-member
+    /// `SubagentSpawned` this hook emits. Set by the council coordinator;
+    /// left unset by the ordinary `task`-tool path.
+    pub(crate) fn with_council_mechanism(mut self, mechanism: Option<String>) -> Self {
+        self.council_mechanism = mechanism;
+        self
     }
 
     /// Override the post-completion registry retention. Test-only: the
@@ -217,6 +231,9 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
         // council members.
         let council_index = request.council_index;
         let council_model = council_index.and(request.model_override.clone());
+        // Gate the mechanism behind `council_index` too so an ordinary
+        // `task` spawn never carries it (mirrors `council_model`).
+        let council_mechanism = council_index.and(self.council_mechanism.clone());
         let is_detached = matches!(
             request.spawn_mode,
             Some(aura_core_types::SpawnMode::Detached)
@@ -259,6 +276,7 @@ impl SubagentDispatchHook for RuntimeSubagentObservabilityHook {
                 prompt,
                 model: council_model,
                 council_index,
+                council_mechanism,
             }));
 
         let result = self
@@ -527,6 +545,69 @@ mod tests {
             "child stream should carry the terminal status"
         );
         assert!(events.subscribe().already_done, "child stream marked done");
+    }
+
+    /// A council-member dispatch (`council_index` set) stamps the
+    /// configured combine mechanism onto the emitted `SubagentSpawned`,
+    /// while an ordinary `task` spawn leaves it `None` even when the hook
+    /// carries a mechanism.
+    #[tokio::test]
+    async fn council_member_spawn_carries_mechanism() {
+        let (parent_tx, mut parent_rx) = mpsc::channel::<OutboundMessage>(16);
+        let registry: ChatRunRegistry = Arc::new(DashMap::new());
+        let hook = RuntimeSubagentObservabilityHook::new(
+            Arc::new(StubDispatch {
+                exit: SubagentExit::Completed,
+                streamed_text: None,
+            }),
+            parent_tx,
+            registry,
+            Some(CancellationToken::new()),
+            None,
+        )
+        .with_council_mechanism(Some("side_by_side".to_string()));
+
+        let mut council_req = request();
+        council_req.council_index = Some(0);
+        council_req.council_parent_tool_use_id = Some("council-1".to_string());
+        let _ = hook.dispatch(council_req).await.expect("dispatch ok");
+
+        match parent_rx.recv().await.expect("spawned frame") {
+            OutboundMessage::SubagentSpawned(spawned) => {
+                assert_eq!(spawned.council_index, Some(0));
+                assert_eq!(spawned.council_mechanism.as_deref(), Some("side_by_side"));
+            }
+            other => panic!("expected SubagentSpawned, got {other:?}"),
+        }
+    }
+
+    /// An ordinary `task` spawn never carries a council mechanism even
+    /// when the hook was (unexpectedly) configured with one.
+    #[tokio::test]
+    async fn task_spawn_omits_council_mechanism() {
+        let (parent_tx, mut parent_rx) = mpsc::channel::<OutboundMessage>(16);
+        let registry: ChatRunRegistry = Arc::new(DashMap::new());
+        let hook = RuntimeSubagentObservabilityHook::new(
+            Arc::new(StubDispatch {
+                exit: SubagentExit::Completed,
+                streamed_text: None,
+            }),
+            parent_tx,
+            registry,
+            Some(CancellationToken::new()),
+            None,
+        )
+        .with_council_mechanism(Some("contrast".to_string()));
+
+        let _ = hook.dispatch(request()).await.expect("dispatch ok");
+
+        match parent_rx.recv().await.expect("spawned frame") {
+            OutboundMessage::SubagentSpawned(spawned) => {
+                assert!(spawned.council_index.is_none());
+                assert!(spawned.council_mechanism.is_none());
+            }
+            other => panic!("expected SubagentSpawned, got {other:?}"),
+        }
     }
 
     /// A rejected dispatch (e.g. depth/quota) surfaces as

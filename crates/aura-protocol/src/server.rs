@@ -210,6 +210,12 @@ pub struct SubagentSpawned {
     /// the columns); `None` for ordinary `task` spawns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council_index: Option<u32>,
+    /// Council combine mechanism (`synthesize` / `contrast` /
+    /// `side_by_side`) shared by every member of the turn. Set on AURA
+    /// Council member spawns so the UI can label the panel with the
+    /// active mechanism; `None` for ordinary `task` spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub council_mechanism: Option<String>,
 }
 
 /// Payload for `subagent_status`.

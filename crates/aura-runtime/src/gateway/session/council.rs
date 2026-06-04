@@ -82,6 +82,9 @@ struct CouncilDispatchParams {
     parent_model_id: String,
     chat_runs: ChatRunRegistry,
     dispatcher: Arc<FleetSubagentDispatcher>,
+    /// Combine mechanism stamped onto every member's `SubagentSpawned`
+    /// so the UI can label the council panel with the active mechanism.
+    mechanism: CouncilMechanism,
 }
 
 /// Everything the detached coordinator task needs to fan a council out
@@ -175,6 +178,7 @@ pub(crate) async fn start_council_run(
         parent_model_id: session.model.clone(),
         chat_runs: registry.clone(),
         dispatcher,
+        mechanism,
     };
 
     let run_id = Uuid::new_v4().to_string();
@@ -277,13 +281,16 @@ async fn dispatch_members(
     // Emit member spawn/status frames into the SAME replay channel the
     // parent run streams over, via a forwarder onto its event channel.
     let parent_outbound = spawn_event_forwarder(handle.events.clone());
-    let hook = Arc::new(RuntimeSubagentObservabilityHook::new(
-        params.dispatcher.clone(),
-        parent_outbound,
-        params.chat_runs.clone(),
-        Some(shutdown.clone()),
-        Some(run_id.to_string()),
-    ));
+    let hook = Arc::new(
+        RuntimeSubagentObservabilityHook::new(
+            params.dispatcher.clone(),
+            parent_outbound,
+            params.chat_runs.clone(),
+            Some(shutdown.clone()),
+            Some(run_id.to_string()),
+        )
+        .with_council_mechanism(Some(params.mechanism.as_wire().to_string())),
+    );
 
     // One synthetic grouping id every member shares so the UI folds them
     // into a single council panel (N columns). Distinct from each
