@@ -309,6 +309,7 @@ fn apply_chat_runtime_request_applies_ceo_preset_when_wired_explicitly() {
             CapabilityWire::WriteAllProjects,
         ],
     };
+    req.agent_capabilities.computer_use = true;
     session.apply_chat_runtime_request(req).unwrap();
     assert_eq!(session.agent_permissions, AgentPermissions::ceo_preset());
 }
