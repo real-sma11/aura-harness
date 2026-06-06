@@ -24,9 +24,10 @@
 //! resolution, URL templating, runtime-spec parsing).
 
 use super::json_paths::{
-    insert_json_path, optional_json_from_names, optional_json_from_names_map,
-    optional_positive_number_from_names, optional_positive_number_from_names_map, optional_string,
-    optional_string_from_names, optional_string_from_names_map, optional_string_list_from_names,
+    insert_json_path, optional_boolean_from_names, optional_boolean_from_names_map,
+    optional_json_from_names, optional_json_from_names_map, optional_positive_number_from_names,
+    optional_positive_number_from_names_map, optional_string, optional_string_from_names,
+    optional_string_from_names_map, optional_string_list_from_names,
     optional_string_list_from_names_map, required_string,
 };
 use super::{ToolResolver, TRUSTED_INTEGRATION_RUNTIME_METADATA_KEY};
@@ -61,6 +62,7 @@ pub(super) enum TrustedIntegrationArgValueType {
     String,
     StringList,
     PositiveNumber,
+    Boolean,
     Json,
 }
 
@@ -498,6 +500,9 @@ fn resolve_binding_value(
                 optional_positive_number_from_names(args, &binding.arg_names)
                     .map(|value| json!(value))
             }
+            TrustedIntegrationArgValueType::Boolean => {
+                optional_boolean_from_names(args, &binding.arg_names).map(|value| json!(value))
+            }
             TrustedIntegrationArgValueType::Json => {
                 optional_json_from_names(args, &binding.arg_names)
             }
@@ -513,6 +518,10 @@ fn resolve_binding_value(
             }
             TrustedIntegrationArgValueType::PositiveNumber => {
                 optional_positive_number_from_names_map(provider_config, &binding.arg_names)
+                    .map(|value| json!(value))
+            }
+            TrustedIntegrationArgValueType::Boolean => {
+                optional_boolean_from_names_map(provider_config, &binding.arg_names)
                     .map(|value| json!(value))
             }
             TrustedIntegrationArgValueType::Json => {

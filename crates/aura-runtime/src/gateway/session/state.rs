@@ -391,9 +391,21 @@ impl Session {
                 .iter()
                 .any(|c| matches!(c, aura_core_types::Capability::ComputerUse))
         {
+            let insert_at = self
+                .agent_permissions
+                .capabilities
+                .iter()
+                .position(|c| {
+                    matches!(
+                        c,
+                        aura_core_types::Capability::ReadAllProjects
+                            | aura_core_types::Capability::WriteAllProjects
+                    )
+                })
+                .unwrap_or(self.agent_permissions.capabilities.len());
             self.agent_permissions
                 .capabilities
-                .push(aura_core_types::Capability::ComputerUse);
+                .insert(insert_at, aura_core_types::Capability::ComputerUse);
         }
         for msg in conversation_messages {
             match msg.role.as_str() {

@@ -101,13 +101,14 @@ insta = { workspace = true }
 # auto-deny-timeout test, without affecting the production build.
 tokio = { workspace = true, features = ["test-util"] }
 
-# Phase 9: `aura-context-skills` and `aura-fleet-daemon` are held
+# Phase 9: `aura-context-skills`, `aura-automaton`, and
+# `aura-fleet-daemon` are held
 # as direct deps so the runtime can reach into the
 # Phase 8 plugin-skills wiring and the Phase 7a fleet daemon
 # without an extra migration touch. The lib.rs `pub use`s do not
 # always name them today (the surface migration is incremental).
 [package.metadata.cargo-machete]
-ignored = ["aura-context-skills", "aura-fleet-daemon"]
+ignored = ["aura-automaton", "aura-context-skills", "aura-fleet-daemon"]
 
 [lints]
 workspace = true

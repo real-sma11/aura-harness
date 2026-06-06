@@ -197,6 +197,19 @@ pub(super) fn optional_positive_number_from_names_map(
         .find_map(|key| values.get(key.as_str()).and_then(Value::as_u64))
 }
 
+pub(super) fn optional_boolean_from_names(args: &Value, keys: &[String]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| args.get(key.as_str()).and_then(Value::as_bool))
+}
+
+pub(super) fn optional_boolean_from_names_map(
+    values: &HashMap<String, Value>,
+    keys: &[String],
+) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| values.get(key.as_str()).and_then(Value::as_bool))
+}
+
 pub(super) fn optional_json_from_names(args: &Value, keys: &[String]) -> Option<Value> {
     keys.iter().find_map(|key| args.get(key.as_str()).cloned())
 }

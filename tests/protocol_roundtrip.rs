@@ -294,6 +294,8 @@ fn aura_os_contract_includes_current_additive_wire_fields() {
                 metadata: HashMap::new(),
             }],
             intent_classifier: None,
+            computer_use: false,
+            computer_executor_url: None,
         },
         auth_jwt: Some("jwt".into()),
         user_id: "user-1".into(),

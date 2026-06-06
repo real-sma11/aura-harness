@@ -654,6 +654,10 @@ band. Production holders:
   — `Scheduler` builds per-agent kernels.
 - [`crates/aura-runtime/src/gateway/session/mod.rs`](../crates/aura-runtime/src/gateway/session/mod.rs)
   — `WsContext` handed to `Kernel::new`.
+- [`crates/aura-runtime/src/gateway/session/child_kernel.rs`](../crates/aura-runtime/src/gateway/session/child_kernel.rs)
+  — session-scoped child-kernel factory captures the same store handle as
+  `WsContext` so nested child runs route through `RuntimeChildRunner` /
+  `Scheduler`.
 - [`crates/aura-engine/src/child_runner.rs`](../crates/aura-engine/src/child_runner.rs)
   — `RuntimeChildRunner` constructs child kernels through the scheduler.
 - [`crates/aura-runtime/src/node.rs`](../crates/aura-runtime/src/node.rs)

@@ -151,6 +151,10 @@ run_band "§1" "Command::new(\"git\") outside the GitExecutor / declared excepti
 #   - crates/aura-runtime/src/gateway/state.rs   — RouterState field piped into WsContext
 #   - crates/aura-runtime/src/gateway/session/mod.rs — WsContext handed to Kernel::new
 #   - crates/aura-runtime/src/gateway/session/cross_agent_hook.rs — cross-agent chat/spawn hook
+#   - crates/aura-runtime/src/gateway/session/child_kernel.rs — session-scoped child-kernel
+#                                                  factory captures the same store handle as
+#                                                  WsContext so nested child runs route through
+#                                                  RuntimeChildRunner / Scheduler.
 #   - crates/aura-engine/src/scheduler.rs        — Scheduler builds per-agent kernels (§12.a claim seam)
 #   - crates/aura-engine/src/automaton/          — AutomatonBridge builds per-agent automaton kernels
 #                                                  (mod.rs + build.rs + dispatch.rs + event_channel.rs)
@@ -175,7 +179,7 @@ run_band "§1" "Command::new(\"git\") outside the GitExecutor / declared excepti
 #   - crates/aura-engine/src/worker.rs
 run_band "§10" "Arc<dyn Store> outside the kernel / store crates" \
     'Arc<dyn (aura_store(_db)?::)?Store>' \
-    '^(crates/aura-agent-kernel/|crates/aura-kernel/|crates/aura-store-db/|crates/aura-store/|crates/aura-store-record/|crates/aura-runtime/src/gateway/state\.rs|crates/aura-runtime/src/gateway/session/mod\.rs|crates/aura-runtime/src/gateway/session/cross_agent_hook\.rs|crates/aura-engine/src/scheduler\.rs|crates/aura-engine/src/automaton/|crates/aura-engine/src/child_runner\.rs|crates/aura-engine/src/worker\.rs|crates/aura-runtime/src/node\.rs|crates/aura-runtime/src/tool_permissions\.rs|crates/aura-fleet-daemon/|crates/aura-fleet-spawn/|crates/aura-fleet-subagent/src/dispatch\.rs|crates/aura-surface-cli/src/runner\.rs|crates/aura-agent/src/kernel_gateway\.rs|crates/aura-agent/src/kernel_domain_gateway/|crates/aura-agent/src/recording_stream\.rs|crates/aura-agent/src/agent_loop/|crates/aura-memory/src/test_kernel\.rs|.*/tests/|.*test.*\.rs|.*tests.*\.rs)'
+    '^(crates/aura-agent-kernel/|crates/aura-kernel/|crates/aura-store-db/|crates/aura-store/|crates/aura-store-record/|crates/aura-runtime/src/gateway/state\.rs|crates/aura-runtime/src/gateway/session/mod\.rs|crates/aura-runtime/src/gateway/session/cross_agent_hook\.rs|crates/aura-runtime/src/gateway/session/child_kernel\.rs|crates/aura-engine/src/scheduler\.rs|crates/aura-engine/src/automaton/|crates/aura-engine/src/child_runner\.rs|crates/aura-engine/src/worker\.rs|crates/aura-runtime/src/node\.rs|crates/aura-runtime/src/tool_permissions\.rs|crates/aura-fleet-daemon/|crates/aura-fleet-spawn/|crates/aura-fleet-subagent/src/dispatch\.rs|crates/aura-surface-cli/src/runner\.rs|crates/aura-agent/src/kernel_gateway\.rs|crates/aura-agent/src/kernel_domain_gateway/|crates/aura-agent/src/recording_stream\.rs|crates/aura-agent/src/agent_loop/|crates/aura-memory/src/test_kernel\.rs|.*/tests/|.*test.*\.rs|.*tests.*\.rs)'
 
 # §9 — the agent loop must not reach into the store crates directly. Any
 # code that needs persistence goes through the per-agent kernel. Test files
