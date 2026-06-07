@@ -617,6 +617,171 @@ async fn installed_tool_executes_via_trusted_runtime_metadata_resend_send_email(
     assert!(stdout.contains("\"email_123\""), "stdout was: {stdout}");
 }
 
+#[test]
+fn trusted_runtime_metadata_accepts_provider_specific_variants() {
+    for spec in [
+        serde_json::json!({"type":"brave_search","vertical":"web"}),
+        serde_json::json!({"type":"resend_send_email"}),
+        serde_json::json!({"type":"gmail_send_email"}),
+        serde_json::json!({"type":"gmail_create_draft"}),
+        serde_json::json!({"type":"google_calendar_create_event"}),
+        serde_json::json!({"type":"google_calendar_update_event"}),
+        serde_json::json!({"type":"google_calendar_delete_event"}),
+    ] {
+        let variant = spec["type"].as_str().unwrap().to_string();
+        let tool = InstalledToolDefinition {
+            name: variant.clone(),
+            description: "Provider-specific trusted runtime".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            endpoint: "http://unused.local".into(),
+            auth: ToolAuth::None,
+            timeout_ms: Some(5_000),
+            namespace: Some("aura_org_tools".into()),
+            required_integration: None,
+            runtime_execution: None,
+            metadata: trusted_runtime_metadata(spec),
+        };
+        assert!(
+            super::trusted::trusted_runtime_spec(&tool)
+                .unwrap()
+                .is_some(),
+            "expected trusted runtime metadata variant `{variant}` to parse"
+        );
+    }
+}
+
+#[tokio::test]
+async fn installed_tool_executes_via_trusted_runtime_metadata_gmail_send_email() {
+    let (_cat, resolver) = make_catalog_and_resolver();
+    let endpoint = spawn_asserting_request_server(
+        "POST",
+        &[
+            "POST /gmail/v1/users/me/messages/send ",
+            "authorization: Bearer google-access-token",
+            "\"raw\":\"",
+            "\"threadId\":\"thread-1\"",
+        ],
+        "200 OK",
+        r#"{"id":"msg-123","threadId":"thread-1","labelIds":["SENT"]}"#,
+    );
+    let resolver = resolver.with_installed_tools(vec![InstalledToolDefinition {
+        name: "gmail_send_email".into(),
+        description: "Send Gmail".into(),
+        input_schema: serde_json::json!({"type":"object"}),
+        endpoint: "http://unused.local".into(),
+        auth: ToolAuth::None,
+        timeout_ms: Some(5_000),
+        namespace: Some("aura_org_tools".into()),
+        required_integration: None,
+        runtime_execution: Some(InstalledToolRuntimeExecution::AppProvider(
+            InstalledToolRuntimeProviderExecution {
+                provider: "google".into(),
+                base_url: endpoint,
+                static_headers: std::collections::HashMap::new(),
+                integrations: vec![InstalledToolRuntimeIntegration {
+                    integration_id: "google-default".into(),
+                    base_url: None,
+                    auth: InstalledToolRuntimeAuth::AuthorizationBearer {
+                        token: "google-access-token".into(),
+                    },
+                    provider_config: std::collections::HashMap::new(),
+                }],
+            },
+        )),
+        metadata: trusted_runtime_metadata(serde_json::json!({
+            "type":"gmail_send_email"
+        })),
+    }]);
+    let (ctx, _dir) = test_context();
+    let tc = ToolCall::new(
+        "gmail_send_email",
+        serde_json::json!({
+            "from":"shahroz@wilderworld.com",
+            "to":"n30@wilderworld.com",
+            "subject":"Google integration working smoothly",
+            "text":"hello",
+            "thread_id":"thread-1"
+        }),
+    );
+    let action = Action::delegate_tool(&tc).unwrap();
+    let effect = resolver.execute(&ctx, &action).await.unwrap();
+    assert_eq!(effect.status, EffectStatus::Committed);
+    let result: ToolResult = serde_json::from_slice(&effect.payload).unwrap();
+    assert!(result.ok, "trusted runtime Gmail send should succeed");
+    let stdout = std::str::from_utf8(&result.stdout).unwrap();
+    assert!(stdout.contains("\"msg-123\""), "stdout was: {stdout}");
+    assert!(stdout.contains("\"SENT\""), "stdout was: {stdout}");
+}
+
+#[tokio::test]
+async fn installed_tool_executes_via_trusted_runtime_metadata_google_calendar_create_event() {
+    let (_cat, resolver) = make_catalog_and_resolver();
+    let endpoint = spawn_asserting_request_server(
+        "POST",
+        &[
+            "POST /calendar/v3/calendars/primary/events?sendUpdates=all&conferenceDataVersion=1 ",
+            "authorization: Bearer google-access-token",
+            "\"summary\":\"Planning\"",
+            "\"dateTime\":\"2026-06-08T10:00:00-04:00\"",
+            "\"conferenceData\"",
+        ],
+        "200 OK",
+        r#"{"id":"event-123","summary":"Planning","htmlLink":"https://calendar.google.com/event","status":"confirmed","start":{"dateTime":"2026-06-08T10:00:00-04:00"},"end":{"dateTime":"2026-06-08T10:30:00-04:00"},"attendees":[{"email":"n30@wilderworld.com"}],"conferenceData":{"conferenceId":"meet-123"}}"#,
+    );
+    let resolver = resolver.with_installed_tools(vec![InstalledToolDefinition {
+        name: "google_calendar_create_event".into(),
+        description: "Create Google Calendar event".into(),
+        input_schema: serde_json::json!({"type":"object"}),
+        endpoint: "http://unused.local".into(),
+        auth: ToolAuth::None,
+        timeout_ms: Some(5_000),
+        namespace: Some("aura_org_tools".into()),
+        required_integration: None,
+        runtime_execution: Some(InstalledToolRuntimeExecution::AppProvider(
+            InstalledToolRuntimeProviderExecution {
+                provider: "google".into(),
+                base_url: endpoint,
+                static_headers: std::collections::HashMap::new(),
+                integrations: vec![InstalledToolRuntimeIntegration {
+                    integration_id: "google-default".into(),
+                    base_url: None,
+                    auth: InstalledToolRuntimeAuth::AuthorizationBearer {
+                        token: "google-access-token".into(),
+                    },
+                    provider_config: std::collections::HashMap::new(),
+                }],
+            },
+        )),
+        metadata: trusted_runtime_metadata(serde_json::json!({
+            "type":"google_calendar_create_event"
+        })),
+    }]);
+    let (ctx, _dir) = test_context();
+    let tc = ToolCall::new(
+        "google_calendar_create_event",
+        serde_json::json!({
+            "calendar_id":"primary",
+            "summary":"Planning",
+            "start":"2026-06-08T10:00:00-04:00",
+            "end":"2026-06-08T10:30:00-04:00",
+            "attendees":["n30@wilderworld.com"],
+            "send_updates":"all",
+            "create_google_meet":true
+        }),
+    );
+    let action = Action::delegate_tool(&tc).unwrap();
+    let effect = resolver.execute(&ctx, &action).await.unwrap();
+    assert_eq!(effect.status, EffectStatus::Committed);
+    let result: ToolResult = serde_json::from_slice(&effect.payload).unwrap();
+    assert!(result.ok, "trusted runtime Calendar create should succeed");
+    let stdout = std::str::from_utf8(&result.stdout).unwrap();
+    assert!(stdout.contains("\"event-123\""), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("\"conference_data\""),
+        "stdout was: {stdout}"
+    );
+}
+
 #[tokio::test]
 async fn installed_tool_executes_via_trusted_runtime_metadata_buffer_query_and_form_path() {
     let (_cat, resolver) = make_catalog_and_resolver();

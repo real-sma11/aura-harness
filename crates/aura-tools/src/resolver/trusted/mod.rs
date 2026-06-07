@@ -176,6 +176,11 @@ pub(super) enum TrustedIntegrationRuntimeSpec {
         vertical: String,
     },
     ResendSendEmail,
+    GmailSendEmail,
+    GmailCreateDraft,
+    GoogleCalendarCreateEvent,
+    GoogleCalendarUpdateEvent,
+    GoogleCalendarDeleteEvent,
 }
 
 // ============================================================================
@@ -269,6 +274,24 @@ impl ToolResolver {
             }
             TrustedIntegrationRuntimeSpec::ResendSendEmail => {
                 self.resend_send_email(provider, integration, args).await
+            }
+            TrustedIntegrationRuntimeSpec::GmailSendEmail => {
+                self.gmail_send_email(provider, integration, args).await
+            }
+            TrustedIntegrationRuntimeSpec::GmailCreateDraft => {
+                self.gmail_create_draft(provider, integration, args).await
+            }
+            TrustedIntegrationRuntimeSpec::GoogleCalendarCreateEvent => {
+                self.google_calendar_create_event(provider, integration, args)
+                    .await
+            }
+            TrustedIntegrationRuntimeSpec::GoogleCalendarUpdateEvent => {
+                self.google_calendar_update_event(provider, integration, args)
+                    .await
+            }
+            TrustedIntegrationRuntimeSpec::GoogleCalendarDeleteEvent => {
+                self.google_calendar_delete_event(provider, integration, args)
+                    .await
             }
         }
     }

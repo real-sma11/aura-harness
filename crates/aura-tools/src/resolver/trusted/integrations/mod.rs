@@ -10,6 +10,7 @@
 
 mod brave;
 mod github;
+mod google;
 mod linear;
 mod resend;
 mod slack;

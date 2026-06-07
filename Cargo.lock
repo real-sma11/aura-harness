@@ -980,6 +980,7 @@ dependencies = [
  "aura-core-types",
  "aura-exec-traits",
  "aura-store-db",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "glob",
@@ -993,6 +994,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "uuid",
  "walkdir",
  "which",
 ]
