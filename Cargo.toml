@@ -210,7 +210,7 @@ dirs = "5.0"
 
 # CLI / TTY helpers
 colored = "2.1"
-rpassword = "5.0"
+rpassword = "7.5"
 rustyline = "14.0"
 
 # Terminal size detection for log wrap

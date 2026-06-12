@@ -446,7 +446,7 @@ async fn cmd_login() -> anyhow::Result<()> {
         anyhow::bail!("Email cannot be empty");
     }
 
-    let password = rpassword::prompt_password_stdout("Password: ")?;
+    let password = rpassword::prompt_password("Password: ")?;
     if password.is_empty() {
         anyhow::bail!("Password cannot be empty");
     }

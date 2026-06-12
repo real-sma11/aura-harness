@@ -16,6 +16,9 @@ on:
     # failures aren't drowned out by regular CI noise.
     - cron: '0 6 * * 1'
 
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # cargo-deny: license + advisory + ban + source policy
@@ -42,6 +45,12 @@ jobs:
   cargo-audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check creates check runs and opens issues for new
+    # advisories, so this job needs more than the read-only default.
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v5
 
