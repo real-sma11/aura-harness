@@ -1379,6 +1379,11 @@ enum BodyFitMode {
     /// One or more pairs of oldest non-system messages were dropped
     /// before truncating the last user message.
     DroppedOldestPairs,
+    /// Replaced base64 image blocks in all but the last message with
+    /// text stubs. Images dominate oversized bodies and the model has
+    /// already consumed older ones, so this preserves the full text
+    /// history where dropping pairs would not.
+    StubbedOlderImages,
     /// Last-resort: replaced the entire message history with a
     /// single placeholder user turn carrying the truncation marker.
     Collapsed,
@@ -1394,6 +1399,7 @@ impl std::fmt::Display for BodyFitMode {
             BodyFitMode::NoOp => "noop",
             BodyFitMode::TruncatedLastUser => "truncated_last_user",
             BodyFitMode::DroppedOldestPairs => "dropped_oldest_pairs",
+            BodyFitMode::StubbedOlderImages => "stubbed_older_images",
             BodyFitMode::Collapsed => "collapsed_to_marker",
             BodyFitMode::Unparseable => "unparseable",
         };
@@ -1412,13 +1418,17 @@ impl std::fmt::Display for BodyFitMode {
 ///   2. **Truncate last user.** Shrink the largest text /
 ///      `tool_result` payload in the last user message. This is the
 ///      common case — one giant pasted blob or one huge tool result.
-///   3. **Drop oldest message pairs.** When the rest of the
+///   3. **Stub older images.** Replace base64 image blocks in all but
+///      the last message with text stubs. Image payloads dominate
+///      oversized bodies; stubbing them preserves the entire text
+///      history where dropping pairs would discard it.
+///   4. **Drop oldest message pairs.** When the rest of the
 ///      transcript is the bulk of the body (long agent loops), drop
 ///      the oldest user/assistant pair (system messages are
-///      preserved) and re-attempt step 2. We deliberately drop in
-///      pairs so we never leave a dangling `tool_use` without its
-///      `tool_result`.
-///   4. **Collapse.** Last-ditch: replace `messages` with a single
+///      preserved) and re-attempt step 2. Each drop is followed by an
+///      orphan-`tool_result` repair pass so the positional
+///      `tool_use`/`tool_result` pairing rule still holds.
+///   5. **Collapse.** Last-ditch: replace `messages` with a single
 ///      synthetic user turn `[history elided due to body cap]\n<original last user text>`.
 ///
 /// The function never returns `Err`; if the body can't even be
@@ -1441,8 +1451,26 @@ fn fit_body_under_cap(body_bytes: &[u8], cap_bytes: usize) -> (Vec<u8>, usize, B
         }
     }
 
-    // History-trimming path: drop oldest non-system pair, re-truncate, repeat.
     let mut value = parsed;
+
+    // Image-stub path: base64 images are usually the bulk of an
+    // oversized body. Stubbing the ones the model already consumed
+    // (everything outside the last message) keeps the full text
+    // history intact, which dropping pairs below would not.
+    if stub_images_in_older_messages(&mut value) > 0 {
+        if let Ok(candidate) = serialize_request_body(&value) {
+            if candidate.len() <= cap_bytes {
+                return (candidate, 0, BodyFitMode::StubbedOlderImages);
+            }
+            if let Ok(truncated) = truncate_last_user_message_to_cap(&candidate, cap_bytes) {
+                if truncated.len() <= cap_bytes + TRUNCATION_MARKER_BUDGET {
+                    return (truncated, 0, BodyFitMode::StubbedOlderImages);
+                }
+            }
+        }
+    }
+
+    // History-trimming path: drop oldest non-system pair, re-truncate, repeat.
     let mut dropped = 0usize;
     for _ in 0..MAX_HISTORY_DROP_ITERATIONS {
         if drop_oldest_non_system_message_pair(&mut value).is_err() {
@@ -1474,6 +1502,49 @@ fn fit_body_under_cap(body_bytes: &[u8], cap_bytes: usize) -> (Vec<u8>, usize, B
 /// burn cycles indefinitely. 64 iterations × 2 messages = 128
 /// messages dropped, which is more than any real chat history.
 const MAX_HISTORY_DROP_ITERATIONS: usize = 64;
+
+/// Replace base64 image blocks in every message except the last with a
+/// text stub, returning how many images were stubbed. The last message
+/// is exempt so images attached on the current turn (user uploads,
+/// fresh tool screenshots) still reach the model.
+fn stub_images_in_older_messages(value: &mut serde_json::Value) -> usize {
+    let Some(messages) = value
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return 0;
+    };
+    let len = messages.len();
+    if len < 2 {
+        return 0;
+    }
+
+    let mut stubbed = 0usize;
+    for msg in &mut messages[..len - 1] {
+        let Some(blocks) = msg
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                continue;
+            }
+            let kb = block
+                .get("source")
+                .and_then(|s| s.get("data"))
+                .and_then(serde_json::Value::as_str)
+                .map_or(0, |d| d.len() / 1024);
+            *block = serde_json::json!({
+                "type": "text",
+                "text": format!("[image removed to fit the request size limit: ~{kb} KB base64]")
+            });
+            stubbed += 1;
+        }
+    }
+    stubbed
+}
 
 /// Strip `tool_result` blocks that violate Anthropic's positional rule:
 /// each `tool_result` in message `i` must reference a `tool_use` in
@@ -3703,6 +3774,70 @@ mod emergency_body_cap_tests {
         );
     }
 
+    /// Image payloads are the dominant cause of cap overflow (the real
+    /// incident was a ~1.5 MB body from two attached images against a
+    /// 512 KB cap). Stubbing older images must fit the body without
+    /// dropping any history, and must leave the last message's image
+    /// intact so the current turn still reaches the model.
+    #[test]
+    fn fit_body_under_cap_stubs_older_images_before_dropping_history() {
+        let body = serde_json::to_vec(&json!({
+            "model": "aura-claude-opus-4-7",
+            "system": [{"type": "text", "text": "system prompt"}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "make the homepage look like this"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(200_000)}}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "got it, here is my plan"}]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "also use this reference"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "B".repeat(10_000)}}
+                    ]
+                }
+            ],
+            "max_tokens": 1024,
+            "stream": true,
+        }))
+        .unwrap();
+
+        let cap = 50 * 1024;
+        let (capped, dropped, mode) = fit_body_under_cap(&body, cap);
+
+        assert_eq!(mode, BodyFitMode::StubbedOlderImages, "got {mode:?}");
+        assert_eq!(dropped, 0, "no history may be dropped when stubbing suffices");
+        assert!(capped.len() <= cap, "body ({}) must fit cap ({cap})", capped.len());
+
+        let parsed: serde_json::Value = serde_json::from_slice(&capped).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "full history preserved");
+
+        let first_blocks = msgs[0]["content"].as_array().unwrap();
+        assert!(
+            first_blocks.iter().all(|b| b["type"].as_str() != Some("image")),
+            "older image must be stubbed out"
+        );
+        assert!(
+            first_blocks.iter().any(|b| b["type"].as_str() == Some("text")
+                && b["text"].as_str().unwrap().contains("make the homepage")),
+            "original text of the first turn must survive"
+        );
+
+        let last_blocks = msgs[2]["content"].as_array().unwrap();
+        assert!(
+            last_blocks.iter().any(|b| b["type"].as_str() == Some("image")),
+            "the current turn's image must be preserved"
+        );
+    }
+
     /// Regression for the production 400 "messages.0.content.0:
     /// unexpected `tool_use_id` found in `tool_result` blocks": the
     /// pair-drop ladder removed the assistant message carrying the
@@ -3731,7 +3866,7 @@ mod emergency_body_cap_tests {
             messages.push(json!({
                 "role": "user",
                 "content": [
-                    {"type": "tool_result", "tool_use_id": id, "content": "Z".repeat(3_000)}
+                    {"type": "tool_result", "tool_use_id": id, "content": "Z".repeat(30_000)}
                 ]
             }));
         }
@@ -3745,8 +3880,9 @@ mod emergency_body_cap_tests {
         }))
         .unwrap();
 
-        // Tight enough to force pair drops past the image turn.
-        let cap = 20 * 1024;
+        // Over the post-image-stub size (~180 KB of tool results) so the
+        // ladder must proceed past image stubbing into pair drops.
+        let cap = 100 * 1024;
         let (capped, dropped, mode) = fit_body_under_cap(&body, cap);
         assert!(dropped > 0, "must have dropped pairs, got mode {mode:?}");
 

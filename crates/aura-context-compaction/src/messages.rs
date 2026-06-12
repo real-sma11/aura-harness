@@ -727,11 +727,38 @@ fn compact_content_block(
     }
 }
 
+/// Replace an image block with a small text stub. Base64 image
+/// payloads are by far the largest blocks in a transcript (hundreds of
+/// KB each) and the model has already consumed them on the turn they
+/// were attached; keeping them in older history permanently inflates
+/// every subsequent request, to the point of tripping the wire-level
+/// emergency body cap on each call.
+fn stub_image_block(block: &mut ContentBlock) {
+    if let ContentBlock::Image { source } = block {
+        let kb = source.data.len() / 1024;
+        let media_type = source.media_type.clone();
+        *block = ContentBlock::Text {
+            text: format!(
+                "[image removed during context compaction: {media_type}, ~{kb} KB base64]"
+            ),
+        };
+    }
+}
+
 /// Compact older messages using the given tier configuration.
 pub fn compact_older_messages(messages: &mut [Message], config: &CompactionConfig) {
     let Some(params) = select_compaction_candidates(messages, config) else {
         return;
     };
+    // Image stubbing covers messages[0] too: the first user turn is
+    // exempt from text truncation (its task statement must survive
+    // verbatim) but attached images there are the dominant payload and
+    // must not be exempt with it.
+    for msg in &mut messages[..params.compact_end] {
+        for block in &mut msg.content {
+            stub_image_block(block);
+        }
+    }
     for msg in &mut messages[1..params.compact_end] {
         for block in &mut msg.content {
             compact_content_block(block, config, params.head_chars, params.tail_chars);
@@ -1192,6 +1219,79 @@ pub fn compact_for_storage(messages: &mut [Message]) {
 mod tests {
     use super::*;
     use aura_model_reasoner::Role;
+
+    /// Root-cause regression for the emergency-body-cap incidents:
+    /// base64 images outside the preserved recent tail — including the
+    /// first message, which is exempt from text truncation — must be
+    /// replaced with text stubs so they stop inflating every request.
+    #[test]
+    fn compaction_stubs_images_outside_recent_tail_including_first_message() {
+        fn image(bytes: usize) -> ContentBlock {
+            ContentBlock::Image {
+                source: aura_model_reasoner::ImageSource {
+                    source_type: "base64".to_string(),
+                    media_type: "image/png".to_string(),
+                    data: "A".repeat(bytes),
+                },
+            }
+        }
+        fn has_image(msg: &Message) -> bool {
+            msg.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. }))
+        }
+
+        let mut messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::text("build the homepage"), image(100_000)],
+            ),
+            Message::assistant("here is my plan"),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::text("use this reference"), image(50_000)],
+            ),
+            Message::assistant("working on it"),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::text("latest turn"), image(10_000)],
+            ),
+        ];
+        let before_chars = estimate_message_chars(&messages);
+
+        let config = CompactionConfig {
+            tool_result_max_chars: 500,
+            text_max_chars: 800,
+            preserve_recent: 2,
+        };
+        compact_older_messages(&mut messages, &config);
+
+        // compact_end = 5 - 2 = 3: messages[0..3] lose images.
+        assert!(!has_image(&messages[0]), "first message image must be stubbed");
+        assert!(!has_image(&messages[2]), "middle message image must be stubbed");
+        assert!(
+            has_image(&messages[4]),
+            "image in the preserved recent tail must survive"
+        );
+        assert!(
+            messages[0].content.iter().any(|b| matches!(
+                b,
+                ContentBlock::Text { text } if text == "build the homepage"
+            )),
+            "first message task text must survive verbatim"
+        );
+        assert!(
+            messages[0].content.iter().any(|b| matches!(
+                b,
+                ContentBlock::Text { text } if text.contains("image removed during context compaction")
+            )),
+            "stub marker must replace the image"
+        );
+        assert!(
+            estimate_message_chars(&messages) < before_chars / 4,
+            "stripping images must collapse the size estimate"
+        );
+    }
 
     #[test]
     fn test_truncate_below_threshold() {
