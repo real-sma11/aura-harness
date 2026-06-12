@@ -638,7 +638,10 @@ mod tests {
     fn provider_selection_requires_key_id_without_key_file() {
         let mut cfg = sealed_config();
         cfg.key_id = None;
-        let err = cfg.build_provider().unwrap_err();
+        let err = match cfg.build_provider() {
+            Ok(_) => panic!("sealed mode without key id or key file must be rejected"),
+            Err(e) => e,
+        };
         assert!(err.to_string().contains(ENV_STATE_KEY_ID));
     }
 
