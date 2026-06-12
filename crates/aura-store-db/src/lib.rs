@@ -20,6 +20,7 @@
 
 mod error;
 mod keys;
+pub mod processes;
 mod record_log_bridge;
 mod rocks_store;
 pub mod seal;
@@ -29,6 +30,10 @@ pub mod vault;
 pub use aura_core_types::AgentStatus;
 pub use error::StoreError;
 pub use keys::{AgentMetaKey, InboxKey, KeyCodec, MetaField, RecordKey};
+pub use processes::{
+    NewProcess, ProcessError, ProcessRecord, ProcessRunRecord, ProcessRunStatus, ProcessStore,
+    ProcessTriggerMeta, ProcessUpdate,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use rocks_store::FaultAt;
 pub use rocks_store::RocksStore;
@@ -64,4 +69,14 @@ pub mod cf {
     /// value is a JSON-serialised [`crate::vault::SecretRecord`],
     /// sealed at rest in sealed mode.
     pub const SECRETS: &str = "secrets";
+    /// Process definitions (Swarm TEE phase 7). Keyed by process id;
+    /// value is a JSON-serialised [`crate::processes::ProcessRecord`]
+    /// (prompt + config included), sealed at rest in sealed mode.
+    pub const PROCESSES: &str = "processes";
+    /// Process run history (Swarm TEE phase 7). Keyed
+    /// `{process_id}/{started_millis}/{run_id}`; value is a
+    /// JSON-serialised [`crate::processes::ProcessRunRecord`], sealed
+    /// at rest in sealed mode. Capped per process — see
+    /// [`crate::processes::MAX_PROCESS_RUNS_KEPT`].
+    pub const PROCESS_RUNS: &str = "process_runs";
 }

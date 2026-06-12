@@ -236,6 +236,14 @@ impl Node {
             seal_cipher.clone(),
         ));
 
+        // In-TEE process store (Swarm TEE phase 7): same shared DB +
+        // optional state cipher, so process prompts/config and run
+        // history are sealed at rest in sealed mode.
+        let process_store = Arc::new(aura_store_db::ProcessStore::with_cipher(
+            store.db_handle().clone(),
+            seal_cipher.clone(),
+        ));
+
         let state = RouterState::new(crate::gateway::RouterStateConfig {
             store,
             scheduler,
@@ -249,6 +257,7 @@ impl Node {
             memory_manager: Some(memory_manager),
             skill_manager: Some(skill_manager),
             secrets_vault: Some(secrets_vault),
+            process_store: Some(process_store),
             router_url,
         });
         let app = create_router(state);

@@ -874,6 +874,7 @@ dependencies = [
  "aura-store-record",
  "bytes",
  "chrono",
+ "cron",
  "futures-util",
  "proptest",
  "rocksdb",
@@ -884,6 +885,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
  "zeroize",
 ]
 
@@ -1458,6 +1460,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "cron"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "089df96cf6a25253b4b6b6744d86f91150a3d4df546f31a95def47976b8cba97"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "phf",
+ "winnow",
 ]
 
 [[package]]

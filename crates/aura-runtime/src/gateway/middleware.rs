@@ -52,6 +52,11 @@ use crate::terminal;
 use super::auth_mw;
 use super::handlers::files::{list_files_handler, read_file_handler, resolve_workspace_handler};
 use super::handlers::memory;
+use super::handlers::processes::{
+    create_process_handler, delete_process_handler, get_process_handler,
+    list_process_runs_handler, list_processes_handler, trigger_process_handler,
+    update_process_handler,
+};
 use super::handlers::run::{
     run_list_handler, run_pause_handler, run_start_handler, run_status_handler, run_stop_handler,
 };
@@ -289,6 +294,27 @@ pub fn create_router(state: RouterState) -> Router {
                 .put(put_secret_handler)
                 .delete(delete_secret_handler)
                 .route_layer(body_limit_16k),
+        )
+        // In-TEE processes / automations (Swarm TEE phase 7). The
+        // definitions (cron + prompt + config) and run history are
+        // sealed at rest and only readable through this authenticated
+        // in-VM API; the sole off-VM export is the trigger-metadata
+        // seam (`ProcessStore::trigger_metadata`), wired up in the
+        // next phase. `/v1` prefix matches the `/v1/run` route family.
+        .route(
+            "/v1/processes",
+            get(list_processes_handler).post(create_process_handler),
+        )
+        .route(
+            "/v1/processes/:id",
+            get(get_process_handler)
+                .put(update_process_handler)
+                .delete(delete_process_handler),
+        )
+        .route("/v1/processes/:id/trigger", post(trigger_process_handler))
+        .route(
+            "/v1/processes/:id/runs",
+            get(list_process_runs_handler).route_layer(body_limit_16k),
         )
         .merge(strict);
 

@@ -69,6 +69,7 @@ fn test_router_state(store: Arc<dyn Store>) -> RouterState {
         memory_manager: None,
         skill_manager: None,
         secrets_vault: None,
+        process_store: None,
         router_url: None,
     })
 }
@@ -571,7 +572,8 @@ fn test_router_state_with_managers() -> RouterState {
         skill_store,
     )));
 
-    let secrets_vault = Arc::new(aura_store_db::SecretsVault::new(db));
+    let secrets_vault = Arc::new(aura_store_db::SecretsVault::new(db.clone()));
+    let process_store = Arc::new(aura_store_db::ProcessStore::new(db));
 
     // See note on `test_router_state` - opt in to bearer enforcement
     // because the ambient default is now off but the rest of this
@@ -593,6 +595,7 @@ fn test_router_state_with_managers() -> RouterState {
         memory_manager: Some(memory_manager),
         skill_manager: Some(skill_manager),
         secrets_vault: Some(secrets_vault),
+        process_store: Some(process_store),
         router_url: None,
     })
 }
@@ -1431,6 +1434,288 @@ async fn test_secrets_invalid_name_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ============================================================================
+// Processes / automations (Swarm TEE phase 7)
+// ============================================================================
+
+/// Full CRUD pass over /v1/processes, including enable/disable via PUT.
+#[tokio::test]
+async fn test_processes_crud_roundtrip() {
+    let state = test_router_state_with_managers();
+    let app = create_router(state);
+
+    // Create.
+    let body = serde_json::json!({
+        "name": "nightly-report",
+        "description": "summarize the day",
+        "cron": "0 3 * * *",
+        "prompt": "Summarize yesterday's commits.",
+        "config": { "channel": "ops" }
+    });
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = json["process"]["id"].as_str().unwrap().to_string();
+    assert_eq!(json["process"]["enabled"], true, "enabled defaults to true");
+    assert!(
+        json["process"]["next_run_at"].is_string(),
+        "next_run_at computed on create"
+    );
+
+    // List includes the full definition (in-VM API).
+    let req = authed_request()
+        .uri("/v1/processes")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["processes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["processes"][0]["prompt"],
+        "Summarize yesterday's commits."
+    );
+
+    // Update: disable + new cron.
+    let body = serde_json::json!({ "enabled": false, "cron": "*/5 * * * *" });
+    let req = authed_request()
+        .method("PUT")
+        .uri(format!("/v1/processes/{id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["process"]["enabled"], false);
+    assert_eq!(json["process"]["cron"], "*/5 * * * *");
+    // Prompt untouched by a partial update.
+    assert_eq!(json["process"]["prompt"], "Summarize yesterday's commits.");
+
+    // Get reflects the update.
+    let req = authed_request()
+        .uri(format!("/v1/processes/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Delete, then 404.
+    let req = authed_request()
+        .method("DELETE")
+        .uri(format!("/v1/processes/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = authed_request()
+        .uri(format!("/v1/processes/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Invalid cron expressions are rejected with 400 on create and update.
+#[tokio::test]
+async fn test_processes_invalid_cron_rejected() {
+    let state = test_router_state_with_managers();
+    let app = create_router(state);
+
+    let body = serde_json::json!({
+        "name": "broken",
+        "cron": "not a cron",
+        "prompt": "do things"
+    });
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Create a valid one, then try to update it with a bad cron.
+    let body = serde_json::json!({
+        "name": "ok", "cron": "0 3 * * *", "prompt": "do things"
+    });
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = json["process"]["id"].as_str().unwrap();
+
+    let body = serde_json::json!({ "cron": "99 99 99 99 99" });
+    let req = authed_request()
+        .method("PUT")
+        .uri(format!("/v1/processes/{id}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Process routes sit on the protected sub-router: no bearer → 401.
+#[tokio::test]
+async fn test_processes_require_bearer() {
+    let state = test_router_state_with_managers();
+    let app = create_router(state);
+
+    for (method, uri) in [
+        ("GET", "/v1/processes"),
+        ("GET", "/v1/processes/some-id"),
+        ("DELETE", "/v1/processes/some-id"),
+        ("POST", "/v1/processes/some-id/trigger"),
+        ("GET", "/v1/processes/some-id/runs"),
+    ] {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} must require a bearer token"
+        );
+    }
+}
+
+/// `POST /v1/processes/:id/trigger` executes the process prompt
+/// through the real chat-run path (MockProvider model, real driver +
+/// kernel) and records a run that transitions Running → Success, with
+/// `last_run_at` / `next_run_at` bookkeeping on the definition.
+#[tokio::test]
+async fn test_process_trigger_executes_run_and_records_history() {
+    let (state, _tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+
+    // Create the process.
+    let body = serde_json::json!({
+        "name": "triggered",
+        "cron": "0 4 * * *",
+        "prompt": "Run the nightly checks."
+    });
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = json["process"]["id"].as_str().unwrap().to_string();
+
+    // Trigger: runs are async → 202 with the run record.
+    let req = authed_request()
+        .method("POST")
+        .uri(format!("/v1/processes/{id}/trigger"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let run_id = json["run"]["run_id"].as_str().unwrap().to_string();
+    assert_eq!(json["run"]["status"], "running");
+    assert_eq!(
+        json["event_stream_url"],
+        format!("/stream/{run_id}"),
+        "triggered runs are attachable through the standard stream route"
+    );
+
+    // Poll run history until the MockProvider turn completes.
+    let mut last_status = String::new();
+    for _ in 0..600 {
+        let req = authed_request()
+            .uri(format!("/v1/processes/{id}/runs"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let runs = json["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["run_id"], run_id.as_str());
+        last_status = runs[0]["status"].as_str().unwrap_or_default().to_string();
+        if last_status != "running" {
+            assert_eq!(
+                last_status, "success",
+                "run must finish successfully (error: {:?})",
+                runs[0]["error"]
+            );
+            assert!(runs[0]["finished_at"].is_string());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(last_status, "success", "timed out waiting for run completion");
+
+    // Definition bookkeeping: last_run_at stamped, next_run_at fresh.
+    let req = authed_request()
+        .uri(format!("/v1/processes/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["process"]["last_run_at"].is_string());
+    assert!(json["process"]["next_run_at"].is_string());
+}
+
+/// Triggering an unknown process must 404 without spawning anything.
+#[tokio::test]
+async fn test_process_trigger_unknown_id_404() {
+    let (state, _tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes/00000000-0000-0000-0000-000000000000/trigger")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 /// Overwrite the default `ConnectInfo<SocketAddr>` that
 /// `router::ensure_connect_info` would otherwise inject, so callers
 /// can appear to the governor as different peer IPs.
@@ -1533,6 +1818,7 @@ async fn test_rejects_when_server_auth_token_empty() {
         memory_manager: None,
         skill_manager: None,
         secrets_vault: None,
+        process_store: None,
         router_url: None,
     });
     let app = create_router(state);
@@ -1598,7 +1884,12 @@ fn test_router_state_with_workspace() -> (RouterState, tempfile::TempDir) {
     let data_dir = tmp.path().to_path_buf();
     std::fs::create_dir_all(data_dir.join("workspaces")).unwrap();
 
-    let store = create_test_store();
+    let db_dir = tempfile::tempdir().unwrap().keep();
+    let rocks = RocksStore::open(&db_dir, false).unwrap();
+    let db = rocks.db_handle().clone();
+    let store: Arc<dyn Store> = Arc::new(rocks);
+    let process_store = Arc::new(aura_store_db::ProcessStore::new(db));
+
     let provider: Arc<dyn ModelProvider + Send + Sync> =
         Arc::new(MockProvider::simple_response("mock"));
     let scheduler = Arc::new(Scheduler::new(
@@ -1626,6 +1917,7 @@ fn test_router_state_with_workspace() -> (RouterState, tempfile::TempDir) {
         memory_manager: None,
         skill_manager: None,
         secrets_vault: None,
+        process_store: Some(process_store),
         router_url: None,
     });
     (state, tmp)

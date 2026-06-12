@@ -22,6 +22,10 @@ zeroize = { workspace = true }
 # Secret metadata timestamps (Swarm TEE phase 6 vault).
 chrono = { workspace = true }
 serde = { workspace = true }
+# Processes / automations (Swarm TEE phase 7): cron-expression
+# validation + next_run_at computation, UUID process/run ids.
+cron = { workspace = true }
+uuid = { workspace = true }
 
 [features]
 # Expose fault-injection helpers for the Wave 7 invariant-atomicity

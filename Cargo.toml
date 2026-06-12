@@ -187,6 +187,8 @@ insta = { version = "1.40", features = ["json", "redactions"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# Cron-expression parsing for process schedules (Swarm TEE phase 7).
+cron = "0.16"
 
 # UUID
 uuid = { version = "1.7", features = ["v4", "serde"] }
