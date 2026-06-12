@@ -92,6 +92,9 @@ dotenvy = { workspace = true }
 dirs = { workspace = true }
 colored = { workspace = true }
 terminal_size = { workspace = true }
+# Sealed state-at-rest boot flow (Swarm TEE phase 5): the per-agent DEK
+# fetched from the CoCo CDH/KBS is held in zeroizing buffers only.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

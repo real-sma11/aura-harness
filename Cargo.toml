@@ -247,6 +247,10 @@ keyring = { version = "3", default-features = false, features = [
 # Lazy statics (used for default HTTP client initialization)
 once_cell = "1.19"
 
+# Sealed state-at-rest (Swarm TEE upgrade phase 5)
+aes-gcm = "0.10"
+zeroize = "1"
+
 [dev-dependencies]
 aura-runtime = { path = "crates/aura-runtime", features = ["test-support"] }
 aura-config = { path = "crates/aura-config" }

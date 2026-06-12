@@ -46,7 +46,33 @@ impl MemoryManager {
         consolidation_config: ConsolidationConfig,
         procedure_config: ProcedureConfig,
     ) -> Self {
-        let store: Arc<dyn MemoryStoreApi> = Arc::new(MemoryStore::new(db));
+        Self::with_cipher(
+            db,
+            None,
+            provider,
+            refiner_config,
+            write_config,
+            retrieval_config,
+            consolidation_config,
+            procedure_config,
+        )
+    }
+
+    /// Like [`Self::new`], but with optional sealed (encrypted-at-rest)
+    /// memory values (Swarm TEE phase 5). `cipher: None` is exactly the
+    /// legacy plaintext behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cipher(
+        db: Arc<DBWithThreadMode<MultiThreaded>>,
+        cipher: Option<Arc<aura_store_db::SealCipher>>,
+        provider: Arc<dyn ModelProvider + Send + Sync>,
+        refiner_config: RefinerConfig,
+        write_config: WriteConfig,
+        retrieval_config: RetrievalConfig,
+        consolidation_config: ConsolidationConfig,
+        procedure_config: ProcedureConfig,
+    ) -> Self {
+        let store: Arc<dyn MemoryStoreApi> = Arc::new(MemoryStore::with_cipher(db, cipher));
         let retriever = MemoryRetriever::new(Arc::clone(&store), retrieval_config);
         let refiner = LlmRefiner::new(Arc::clone(&provider), refiner_config);
         let pipeline = MemoryWritePipeline::new(Arc::clone(&store), refiner, write_config);

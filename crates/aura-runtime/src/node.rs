@@ -97,10 +97,21 @@ impl Node {
             self.config.auth_token.clear();
         }
 
+        // Swarm TEE phase 5 (attest-boot): when AURA_STATE_ENCRYPTION=sealed,
+        // fetch the per-agent DEK from the CoCo CDH/KBS (or the dev-mode key
+        // file) BEFORE opening or serving any state. This either returns a
+        // value cipher or fails the whole startup — sealed mode never falls
+        // back to plaintext. In plaintext mode (env unset) `seal_cipher` is
+        // `None` and everything below behaves exactly as before.
+        let seal_cipher = crate::sealing::prepare_state_sealing(&self.config.data_dir)
+            .await
+            .context("preparing sealed state mode (refusing to serve without the state DEK)")?;
+
         let store = Arc::new(
-            RocksStore::open(&db_path, self.config.sync_writes).context("opening RocksDB store")?,
+            RocksStore::open_sealed(&db_path, self.config.sync_writes, seal_cipher.clone())
+                .context("opening RocksDB store")?,
         );
-        info!("Store opened");
+        info!(sealed = seal_cipher.is_some(), "Store opened");
 
         let mut tool_config = ToolConfig::for_autonomous_dev_loop();
         if self.config.allow_unrestricted_full_access {
@@ -160,8 +171,9 @@ impl Node {
             .context("building memory-service kernel")?,
         );
         let memory_gateway = Arc::new(KernelModelGateway::new(memory_kernel));
-        let memory_manager = Arc::new(MemoryManager::new(
+        let memory_manager = Arc::new(MemoryManager::with_cipher(
             store.db_handle().clone(),
+            seal_cipher.clone(),
             memory_gateway,
             RefinerConfig::default(),
             WriteConfig::default(),
@@ -204,7 +216,10 @@ impl Node {
         }
 
         let skill_loader = SkillLoader::with_defaults(Some(self.config.workspaces_path()), None);
-        let skill_install_store = Arc::new(SkillInstallStore::new(store.db_handle().clone()));
+        let skill_install_store = Arc::new(SkillInstallStore::with_cipher(
+            store.db_handle().clone(),
+            seal_cipher.clone(),
+        ));
         let skill_manager_inner =
             SkillManager::with_install_store(skill_loader, skill_install_store);
         let skill_count = skill_manager_inner.list_all().len();

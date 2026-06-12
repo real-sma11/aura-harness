@@ -22,6 +22,7 @@ mod error;
 mod keys;
 mod record_log_bridge;
 mod rocks_store;
+pub mod seal;
 mod store;
 
 pub use aura_core_types::AgentStatus;
@@ -30,6 +31,7 @@ pub use keys::{AgentMetaKey, InboxKey, KeyCodec, MetaField, RecordKey};
 #[cfg(any(test, feature = "test-support"))]
 pub use rocks_store::FaultAt;
 pub use rocks_store::RocksStore;
+pub use seal::{SealCipher, SealError, SEAL_MAGIC, SEAL_VERSION};
 pub use store::{DequeueToken, ReadStore, Store, WriteStore};
 
 /// Column family names.

@@ -48,13 +48,45 @@ pub trait SkillInstallStoreApi: Send + Sync {
 /// Tracks per-agent skill installations in `RocksDB`.
 pub struct SkillInstallStore {
     db: Arc<DBWithThreadMode<MultiThreaded>>,
+    /// Optional value-sealing cipher (Swarm TEE phase 5). When `Some`,
+    /// installation records are AES-256-GCM sealed at rest; `None`
+    /// keeps the legacy plaintext JSON format byte-for-byte.
+    cipher: Option<Arc<aura_store_db::SealCipher>>,
 }
 
 impl SkillInstallStore {
     /// Create a new store backed by the given shared database handle.
     #[must_use]
     pub const fn new(db: Arc<DBWithThreadMode<MultiThreaded>>) -> Self {
-        Self { db }
+        Self { db, cipher: None }
+    }
+
+    /// Create a store with optional sealed (encrypted-at-rest) values.
+    #[must_use]
+    pub const fn with_cipher(
+        db: Arc<DBWithThreadMode<MultiThreaded>>,
+        cipher: Option<Arc<aura_store_db::SealCipher>>,
+    ) -> Self {
+        Self { db, cipher }
+    }
+
+    fn seal_value(&self, plain: Vec<u8>) -> Result<Vec<u8>, SkillError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .seal(&plain)
+                .map_err(|e| SkillError::Store(format!("sealing value: {e}"))),
+            None => Ok(plain),
+        }
+    }
+
+    fn open_value<'a>(&self, bytes: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>, SkillError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .open(bytes)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| SkillError::Store(format!("opening sealed value: {e}"))),
+            None => Ok(std::borrow::Cow::Borrowed(bytes)),
+        }
     }
 
     fn cf_handle(&self) -> Result<Arc<rocksdb::BoundColumnFamily<'_>>, SkillError> {
@@ -92,6 +124,7 @@ impl SkillInstallStoreApi for SkillInstallStore {
         let key = Self::key(installation.agent_id, &installation.skill_name);
         let value =
             serde_json::to_vec(installation).map_err(|e| SkillError::Parse(e.to_string()))?;
+        let value = self.seal_value(value)?;
         self.db
             .put_cf(&cf, key, value)
             .map_err(|e| SkillError::Store(e.to_string()))
@@ -119,8 +152,8 @@ impl SkillInstallStoreApi for SkillInstallStore {
             if !k.starts_with(&prefix) {
                 break;
             }
-            let record: SkillInstallation =
-                serde_json::from_slice(&v).map_err(|e| SkillError::Parse(e.to_string()))?;
+            let record: SkillInstallation = serde_json::from_slice(&self.open_value(&v)?)
+                .map_err(|e| SkillError::Parse(e.to_string()))?;
             installations.push(record);
         }
         Ok(installations)
@@ -134,5 +167,84 @@ impl SkillInstallStoreApi for SkillInstallStore {
             .get_cf(&cf, key)
             .map_err(|e| SkillError::Store(e.to_string()))?;
         Ok(exists.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aura_store_db::SealCipher;
+    use rocksdb::{ColumnFamilyDescriptor, Options};
+
+    fn test_db(dir: &std::path::Path) -> Arc<DBWithThreadMode<MultiThreaded>> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let cfs = vec![ColumnFamilyDescriptor::new(
+            aura_store_db::cf::AGENT_SKILLS,
+            Options::default(),
+        )];
+        Arc::new(DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, dir, cfs).unwrap())
+    }
+
+    fn make_installation(agent_id: AgentId) -> SkillInstallation {
+        SkillInstallation {
+            agent_id,
+            skill_name: "deploy".to_string(),
+            source_url: Some("https://example.com/deploy".to_string()),
+            installed_at: Utc::now(),
+            version: Some("1.0.0".to_string()),
+            approved_paths: vec!["/workspace".to_string()],
+            approved_commands: vec!["kubectl".to_string()],
+        }
+    }
+
+    /// Sealed mode (Swarm TEE phase 5): installation records roundtrip
+    /// through the cipher and the on-disk bytes are ciphertext.
+    #[test]
+    fn sealed_install_roundtrip_and_ciphertext_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+        let cipher = Arc::new(SealCipher::new(&[3u8; 32]));
+        let store = SkillInstallStore::with_cipher(Arc::clone(&db), Some(cipher));
+
+        let agent = AgentId::generate();
+        store.install(&make_installation(agent)).unwrap();
+
+        assert!(store.is_installed(agent, "deploy").unwrap());
+        let listed = store.list_for_agent(agent).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].skill_name, "deploy");
+
+        let cf = db.cf_handle(aura_store_db::cf::AGENT_SKILLS).unwrap();
+        let raw = db
+            .iterator_cf(&cf, IteratorMode::Start)
+            .next()
+            .unwrap()
+            .unwrap()
+            .1;
+        assert!(SealCipher::is_sealed(&raw));
+    }
+
+    /// Plaintext mode stays byte-for-byte the legacy JSON format.
+    #[test]
+    fn plaintext_install_on_disk_format_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+        let store = SkillInstallStore::new(Arc::clone(&db));
+
+        let agent = AgentId::generate();
+        let installation = make_installation(agent);
+        store.install(&installation).unwrap();
+
+        let cf = db.cf_handle(aura_store_db::cf::AGENT_SKILLS).unwrap();
+        let raw = db
+            .iterator_cf(&cf, IteratorMode::Start)
+            .next()
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(raw.to_vec(), serde_json::to_vec(&installation).unwrap());
+        assert!(!SealCipher::is_sealed(&raw));
     }
 }

@@ -15,6 +15,10 @@ thiserror = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 static_assertions = "1.1"
+# Sealed state-at-rest (Swarm TEE phase 5): AES-256-GCM value sealing
+# under the per-agent DEK released by the KBS after attestation.
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
 
 [features]
 # Expose fault-injection helpers for the Wave 7 invariant-atomicity

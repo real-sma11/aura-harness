@@ -24,9 +24,11 @@ use crate::error::MemoryError;
 use crate::types::{AgentEvent, Fact, Procedure};
 use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
 use aura_store_db::cf;
+use aura_store_db::SealCipher;
 use chrono::{DateTime, Utc};
 use rocksdb::{DBWithThreadMode, IteratorMode, MultiThreaded, WriteBatch};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 /// Abstraction over the memory store for testability.
@@ -80,12 +82,45 @@ pub trait MemoryStoreApi: Send + Sync {
 
 pub struct MemoryStore {
     db: Arc<DBWithThreadMode<MultiThreaded>>,
+    /// Optional value-sealing cipher (Swarm TEE phase 5). When `Some`,
+    /// fact / event / procedure values are AES-256-GCM sealed at rest;
+    /// `None` keeps the legacy plaintext format byte-for-byte. The
+    /// event-id → timestamp index values stay plaintext (pure metadata).
+    cipher: Option<Arc<SealCipher>>,
 }
 
 impl MemoryStore {
     #[must_use]
     pub const fn new(db: Arc<DBWithThreadMode<MultiThreaded>>) -> Self {
-        Self { db }
+        Self { db, cipher: None }
+    }
+
+    /// Create a store with optional sealed (encrypted-at-rest) values.
+    #[must_use]
+    pub const fn with_cipher(
+        db: Arc<DBWithThreadMode<MultiThreaded>>,
+        cipher: Option<Arc<SealCipher>>,
+    ) -> Self {
+        Self { db, cipher }
+    }
+
+    fn seal_value(&self, plain: Vec<u8>) -> Result<Vec<u8>, MemoryError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .seal(&plain)
+                .map_err(|e| MemoryError::Deserialization(format!("sealing value: {e}"))),
+            None => Ok(plain),
+        }
+    }
+
+    fn open_value<'a>(&self, bytes: &'a [u8]) -> Result<Cow<'a, [u8]>, MemoryError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .open(bytes)
+                .map(Cow::Owned)
+                .map_err(|e| MemoryError::Deserialization(format!("opening sealed value: {e}"))),
+            None => Ok(Cow::Borrowed(bytes)),
+        }
     }
 
     /// Expose the raw DB handle for callers that need to wrap operations in
@@ -197,7 +232,7 @@ impl MemoryStoreApi for MemoryStore {
     fn put_fact(&self, fact: &Fact) -> Result<(), MemoryError> {
         let cf = self.cf_handle(cf::MEMORY_FACTS)?;
         let key = Self::fact_key(fact.agent_id, fact.fact_id);
-        let value = serde_json::to_vec(fact)?;
+        let value = self.seal_value(serde_json::to_vec(fact)?)?;
         self.db.put_cf(&cf, key, value)?;
         Ok(())
     }
@@ -206,7 +241,7 @@ impl MemoryStoreApi for MemoryStore {
         let cf = self.cf_handle(cf::MEMORY_FACTS)?;
         let key = Self::fact_key(agent_id, fact_id);
         match self.db.get_cf(&cf, key)? {
-            Some(bytes) => serde_json::from_slice(&bytes)
+            Some(bytes) => serde_json::from_slice(&self.open_value(&bytes)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string())),
             None => Err(MemoryError::FactNotFound {
                 agent_id: agent_id.to_hex(),
@@ -229,7 +264,7 @@ impl MemoryStoreApi for MemoryStore {
             if k.as_ref() >= end.as_slice() {
                 break;
             }
-            let fact: Fact = serde_json::from_slice(&v)
+            let fact: Fact = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             if fact.key == key {
                 return Ok(Some(fact));
@@ -253,7 +288,7 @@ impl MemoryStoreApi for MemoryStore {
             if k.as_ref() >= end.as_slice() {
                 break;
             }
-            let fact: Fact = serde_json::from_slice(&v)
+            let fact: Fact = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             facts.push(fact);
         }
@@ -277,7 +312,7 @@ impl MemoryStoreApi for MemoryStore {
     fn put_event(&self, event: &AgentEvent) -> Result<(), MemoryError> {
         let cf = self.cf_handle(cf::MEMORY_EVENTS)?;
         let key = Self::event_key(event.agent_id, event.timestamp, event.event_id);
-        let value = serde_json::to_vec(event)?;
+        let value = self.seal_value(serde_json::to_vec(event)?)?;
         self.db.put_cf(&cf, key, value)?;
 
         let idx_cf = self.cf_handle(cf::MEMORY_EVENT_INDEX)?;
@@ -304,7 +339,7 @@ impl MemoryStoreApi for MemoryStore {
             if k.len() < prefix.len() || k[..prefix.len()] != *prefix.as_slice() {
                 break;
             }
-            let event: AgentEvent = serde_json::from_slice(&v)
+            let event: AgentEvent = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             events.push(event);
             if events.len() >= limit {
@@ -337,7 +372,7 @@ impl MemoryStoreApi for MemoryStore {
             if k.as_ref() >= end.as_slice() {
                 break;
             }
-            let event: AgentEvent = serde_json::from_slice(&v)
+            let event: AgentEvent = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             events.push(event);
         }
@@ -442,7 +477,7 @@ impl MemoryStoreApi for MemoryStore {
     fn put_procedure(&self, proc: &Procedure) -> Result<(), MemoryError> {
         let cf = self.cf_handle(cf::MEMORY_PROCEDURES)?;
         let key = Self::procedure_key(proc.agent_id, proc.procedure_id);
-        let value = serde_json::to_vec(proc)?;
+        let value = self.seal_value(serde_json::to_vec(proc)?)?;
         self.db.put_cf(&cf, key, value)?;
         Ok(())
     }
@@ -455,7 +490,7 @@ impl MemoryStoreApi for MemoryStore {
         let cf = self.cf_handle(cf::MEMORY_PROCEDURES)?;
         let key = Self::procedure_key(agent_id, procedure_id);
         match self.db.get_cf(&cf, key)? {
-            Some(bytes) => serde_json::from_slice(&bytes)
+            Some(bytes) => serde_json::from_slice(&self.open_value(&bytes)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string())),
             None => Err(MemoryError::ProcedureNotFound {
                 agent_id: agent_id.to_hex(),
@@ -479,7 +514,7 @@ impl MemoryStoreApi for MemoryStore {
             if k.as_ref() >= end.as_slice() {
                 break;
             }
-            let proc: Procedure = serde_json::from_slice(&v)
+            let proc: Procedure = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             procs.push(proc);
         }

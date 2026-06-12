@@ -38,6 +38,7 @@
 use crate::cf;
 use crate::error::StoreError;
 use crate::keys::{AgentMetaKey, InboxKey, KeyCodec, RecordKey};
+use crate::seal::SealCipher;
 use crate::store::ReadStore;
 use aura_core_types::AgentStatus;
 use aura_core_types::{
@@ -71,6 +72,17 @@ pub struct RocksStore {
     /// check+commit turns the only observable concurrency failure into
     /// a clean [`StoreError::SequenceMismatch`] the caller can retry.
     append_lock: Mutex<()>,
+    /// Optional value-sealing cipher (Swarm TEE phase 5).
+    ///
+    /// `Some` when the harness booted in `AURA_STATE_ENCRYPTION=sealed`
+    /// mode: every content-bearing value (record entries, inbox
+    /// transactions, runtime-capability snapshots, user tool defaults)
+    /// is AES-256-GCM sealed before the `WriteBatch` and opened after
+    /// reads. `None` is the legacy plaintext path, byte-for-byte
+    /// identical to the historical on-disk format. Keys and pure-counter
+    /// metadata (head/tail cursors, status byte, processing claims)
+    /// stay plaintext in both modes — see [`crate::seal`] module docs.
+    cipher: Option<Arc<SealCipher>>,
 }
 
 impl RocksStore {
@@ -81,8 +93,23 @@ impl RocksStore {
     /// # Errors
     /// Returns error if the database cannot be opened.
     pub fn open(path: impl AsRef<Path>, sync_writes: bool) -> Result<Self, StoreError> {
+        Self::open_sealed(path, sync_writes, None)
+    }
+
+    /// Open or create a `RocksDB` store with optional value sealing.
+    ///
+    /// When `cipher` is `Some`, content-bearing values are encrypted at
+    /// rest (sealed mode); when `None` this is exactly [`Self::open`].
+    ///
+    /// # Errors
+    /// Returns error if the database cannot be opened.
+    pub fn open_sealed(
+        path: impl AsRef<Path>,
+        sync_writes: bool,
+        cipher: Option<Arc<SealCipher>>,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        debug!(?path, "Opening RocksDB store");
+        debug!(?path, sealed = cipher.is_some(), "Opening RocksDB store");
 
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -118,7 +145,29 @@ impl RocksStore {
             sync_writes,
             processing_claim_lock: Mutex::new(()),
             append_lock: Mutex::new(()),
+            cipher,
         })
+    }
+
+    /// Seal a serialized value when sealed mode is on; identity otherwise.
+    fn seal_value(&self, plain: Vec<u8>) -> Result<Vec<u8>, StoreError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .seal(&plain)
+                .map_err(|e| StoreError::Serialization(format!("sealing value: {e}"))),
+            None => Ok(plain),
+        }
+    }
+
+    /// Open a sealed value when sealed mode is on; borrow-through otherwise.
+    fn open_value<'a>(&self, bytes: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>, StoreError> {
+        match &self.cipher {
+            Some(cipher) => cipher
+                .open(bytes)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| StoreError::Deserialization(format!("opening sealed value: {e}"))),
+            None => Ok(std::borrow::Cow::Borrowed(bytes)),
+        }
     }
 
     /// Get a column family handle.
@@ -229,7 +278,7 @@ impl RocksStore {
         let cf_record = self.cf(cf::RECORD)?;
         let cf_meta = self.cf(cf::AGENT_META)?;
 
-        let entry_bytes = serde_json::to_vec(entry)?;
+        let entry_bytes = self.seal_value(serde_json::to_vec(entry)?)?;
         let record_key = RecordKey::new(agent_id, next_seq);
         let head_seq_key = AgentMetaKey::head_seq(agent_id);
 
@@ -262,7 +311,7 @@ impl RocksStore {
         }
 
         if let Some(runtime_capabilities) = runtime_capabilities {
-            let capability_bytes = serde_json::to_vec(runtime_capabilities)?;
+            let capability_bytes = self.seal_value(serde_json::to_vec(runtime_capabilities)?)?;
             batch.put_cf(
                 &cf_runtime_capabilities,
                 Self::runtime_capability_key(agent_id),
@@ -368,7 +417,7 @@ impl ReadStore for RocksStore {
         let inbox_key = InboxKey::new(tx.agent_id, tail);
 
         // Serialize transaction
-        let tx_bytes = serde_json::to_vec(tx)?;
+        let tx_bytes = self.seal_value(serde_json::to_vec(tx)?)?;
 
         // Write batch: inbox entry + update tail
         let mut batch = WriteBatch::default();
@@ -405,6 +454,7 @@ impl ReadStore for RocksStore {
         let encoded_key = inbox_key.encode();
 
         if let Some(bytes) = self.db.get_cf(&cf_inbox, &encoded_key)? {
+            let bytes = self.open_value(&bytes)?;
             let tx: Transaction = serde_json::from_slice(&bytes)
                 .map_err(|e| StoreError::Deserialization(e.to_string()))?;
             debug!(inbox_seq = head, "Transaction dequeued");
@@ -455,6 +505,7 @@ impl ReadStore for RocksStore {
                 break;
             }
 
+            let value = self.open_value(&value)?;
             let entry = serde_json::from_slice::<RecordEntry>(&value).map_err(|e| {
                 StoreError::Deserialization(format!("record seq={}: {e}", record_key.seq))
             })?;
@@ -501,6 +552,7 @@ impl ReadStore for RocksStore {
                 break;
             }
 
+            let value = self.open_value(&value)?;
             let entry = serde_json::from_slice::<RecordEntry>(&value).map_err(|e| {
                 StoreError::Deserialization(format!("record seq={}: {e}", record_key.seq))
             })?;
@@ -522,6 +574,7 @@ impl ReadStore for RocksStore {
 
         match self.db.get_cf(&cf, key.encode())? {
             Some(bytes) => {
+                let bytes = self.open_value(&bytes)?;
                 let entry: RecordEntry = serde_json::from_slice(&bytes)
                     .map_err(|e| StoreError::Deserialization(e.to_string()))?;
                 Ok(entry)
@@ -557,6 +610,7 @@ impl ReadStore for RocksStore {
 
         match self.db.get_cf(&cf, key)? {
             Some(bytes) => {
+                let bytes = self.open_value(&bytes)?;
                 let capability_state = serde_json::from_slice(&bytes)
                     .map_err(|e| StoreError::Deserialization(e.to_string()))?;
                 Ok(Some(capability_state))
@@ -597,6 +651,7 @@ impl ReadStore for RocksStore {
         let cf = self.cf(cf::USER_TOOL_DEFAULTS)?;
         match self.db.get_cf(&cf, user_id.as_bytes())? {
             Some(bytes) => {
+                let bytes = self.open_value(&bytes)?;
                 let defaults = serde_json::from_slice::<UserToolDefaults>(&bytes)
                     .map_err(|e| StoreError::Deserialization(e.to_string()))?;
                 Ok(Some(defaults))
@@ -612,7 +667,7 @@ impl ReadStore for RocksStore {
         defaults: &UserToolDefaults,
     ) -> Result<(), StoreError> {
         let cf = self.cf(cf::USER_TOOL_DEFAULTS)?;
-        let bytes = serde_json::to_vec(defaults)?;
+        let bytes = self.seal_value(serde_json::to_vec(defaults)?)?;
         self.db
             .put_cf_opt(&cf, user_id.as_bytes(), bytes, &self.write_opts())?;
         Ok(())
@@ -761,7 +816,7 @@ impl crate::store::WriteStore for RocksStore {
 
         for (i, entry) in entries.iter().enumerate() {
             let seq = base_seq + i as u64;
-            let entry_bytes = serde_json::to_vec(entry)?;
+            let entry_bytes = self.seal_value(serde_json::to_vec(entry)?)?;
             let record_key = RecordKey::new(agent_id, seq);
             batch.put_cf(&cf_record, record_key.encode(), entry_bytes);
         }
@@ -869,7 +924,7 @@ impl RocksStore {
                     });
                 }
 
-                let entry_bytes = serde_json::to_vec(entry)?;
+                let entry_bytes = self.seal_value(serde_json::to_vec(entry)?)?;
                 let record_key = RecordKey::new(agent_id, next_seq);
                 let head_seq_key = AgentMetaKey::head_seq(agent_id);
 
