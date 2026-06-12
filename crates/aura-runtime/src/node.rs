@@ -103,7 +103,9 @@ impl Node {
         // value cipher or fails the whole startup — sealed mode never falls
         // back to plaintext. In plaintext mode (env unset) `seal_cipher` is
         // `None` and everything below behaves exactly as before.
-        let seal_cipher = crate::sealing::prepare_state_sealing(&self.config.data_dir)
+        // R2: this also runs the encrypt-in-place migration when a legacy
+        // agent's plaintext state is found at `db_path` on a sealed boot.
+        let seal_cipher = crate::sealing::prepare_state_sealing(&self.config.data_dir, &db_path)
             .await
             .context("preparing sealed state mode (refusing to serve without the state DEK)")?;
 

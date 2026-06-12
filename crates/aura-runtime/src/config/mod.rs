@@ -121,6 +121,17 @@ pub struct NodeConfig {
     /// listener is a deliberate trust decision; pair it with firewall
     /// or network-level controls.
     pub require_auth: bool,
+    /// Swarm platform internal token (`AURA_SWARM_INTERNAL_TOKEN`),
+    /// injected by the swarm scheduler into confidential pods.
+    ///
+    /// When set, the gateway's bearer middleware accepts it as a valid
+    /// bearer **in addition to** [`Self::auth_token`] (constant-time
+    /// compare, same as the node token). This is what lets the swarm
+    /// control-plane cron service authenticate its
+    /// `POST /v1/processes/:id/trigger` calls — it holds the platform
+    /// `INTERNAL_TOKEN`, not the per-node auth token. `None` for local
+    /// agents. Never log this value; `Debug` redacts it.
+    pub swarm_internal_token: Option<String>,
     /// Operator opt-in that permits effective FullAccess sessions to bypass
     /// command, binary, and shell-script allowlists.
     ///
@@ -145,6 +156,10 @@ impl std::fmt::Debug for NodeConfig {
             .field("auth_token", &"***")
             .field("require_auth", &self.require_auth)
             .field(
+                "swarm_internal_token",
+                &self.swarm_internal_token.as_ref().map(|_| "***"),
+            )
+            .field(
                 "allow_unrestricted_full_access",
                 &self.allow_unrestricted_full_access,
             )
@@ -166,6 +181,7 @@ impl Default for NodeConfig {
             aura_os_server_url: None,
             auth_token: DEFAULT_TEST_AUTH_TOKEN.to_string(),
             require_auth: false,
+            swarm_internal_token: None,
             allow_unrestricted_full_access: false,
         }
     }
@@ -267,6 +283,12 @@ impl NodeConfig {
         if let Ok(val) = std::env::var("AURA_NODE_REQUIRE_AUTH") {
             let v = val.trim();
             config.require_auth = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(val) = std::env::var("AURA_SWARM_INTERNAL_TOKEN") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                config.swarm_internal_token = Some(trimmed.to_string());
+            }
         }
         if let Ok(val) = std::env::var("AURA_ALLOW_UNRESTRICTED_FULL_ACCESS") {
             let v = val.trim();

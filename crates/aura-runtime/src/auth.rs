@@ -69,6 +69,32 @@ pub fn check_bearer(headers: &HeaderMap, expected: &str) -> Result<String, Statu
     Ok(token.to_string())
 }
 
+/// Verify a bearer header against the node token **or** an optional
+/// fallback secret (Swarm TEE R2 integration fix).
+///
+/// The fallback exists for the swarm control plane: the scheduler
+/// injects `AURA_SWARM_INTERNAL_TOKEN` into confidential pods, and the
+/// gateway-side cron service presents that same token as its bearer
+/// when firing `POST /v1/processes/:id/trigger` into the pod. The
+/// platform token is therefore a valid principal alongside the
+/// per-node auth token.
+///
+/// Both comparisons go through [`check_bearer`], so each is
+/// constant-time and an empty/unset fallback can never authenticate.
+pub fn check_bearer_any(
+    headers: &HeaderMap,
+    expected: &str,
+    fallback: Option<&str>,
+) -> Result<String, StatusCode> {
+    match check_bearer(headers, expected) {
+        Ok(token) => Ok(token),
+        Err(status) => match fallback {
+            Some(secret) => check_bearer(headers, secret).map_err(|_| status),
+            None => Err(status),
+        },
+    }
+}
+
 /// Constant-time byte-slice compare.
 ///
 /// Folds the length difference into the accumulator so timing cannot
@@ -183,6 +209,60 @@ mod tests {
             HeaderValue::from_static("Bearer expected-token"),
         );
         assert_eq!(check_bearer(&headers, EXPECTED), Ok(EXPECTED.to_string()));
+    }
+
+    #[test]
+    fn bearer_any_accepts_primary_and_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer swarm-internal-token"),
+        );
+
+        // Fallback (the swarm internal token) authenticates...
+        assert_eq!(
+            check_bearer_any(&headers, EXPECTED, Some("swarm-internal-token")),
+            Ok("swarm-internal-token".to_string())
+        );
+        // ...and the primary node token still works with a fallback set.
+        let mut node_headers = HeaderMap::new();
+        node_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer expected-token"),
+        );
+        assert_eq!(
+            check_bearer_any(&node_headers, EXPECTED, Some("swarm-internal-token")),
+            Ok(EXPECTED.to_string())
+        );
+    }
+
+    #[test]
+    fn bearer_any_rejects_wrong_token_and_empty_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer not-a-valid-secret"),
+        );
+        assert_eq!(
+            check_bearer_any(&headers, EXPECTED, Some("swarm-internal-token")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            check_bearer_any(&headers, EXPECTED, None),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+
+        // An empty fallback secret must never authenticate anything
+        // (mirrors the empty-expected rule of `check_bearer`).
+        let mut empty_headers = HeaderMap::new();
+        empty_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer "),
+        );
+        assert_eq!(
+            check_bearer_any(&empty_headers, EXPECTED, Some("")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
     }
 
     #[test]

@@ -1898,6 +1898,42 @@ async fn test_rejects_non_matching_bearer() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Swarm TEE R2 integration fix: when `AURA_SWARM_INTERNAL_TOKEN` is
+/// configured (the scheduler injects it into confidential pods), the
+/// gateway accepts it as a valid bearer on protected routes — that is
+/// the token the swarm cron service presents on
+/// `POST /v1/processes/:id/trigger`. The per-node token keeps working,
+/// and arbitrary tokens are still rejected.
+#[tokio::test]
+async fn test_accepts_swarm_internal_token_on_protected_routes() {
+    let mut state = test_router_state_with_managers();
+    state.config.swarm_internal_token = Some("platform-internal-secret".to_string());
+    let app = create_router(state);
+
+    // The swarm internal token authenticates.
+    let req = Request::builder()
+        .uri("/api/skills")
+        .header("authorization", "Bearer platform-internal-secret")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The per-node token still authenticates alongside it.
+    let req = authed_request().uri("/api/skills").body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A non-matching token is still rejected.
+    let req = Request::builder()
+        .uri("/api/skills")
+        .header("authorization", "Bearer some-other-token")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// A server whose `auth_token` is empty (misconfiguration) must not
 /// accept *any* request — otherwise attackers who guess that the
 /// server "never loaded a secret" could send `Bearer ""` and win.

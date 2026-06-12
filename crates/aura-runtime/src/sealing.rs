@@ -504,15 +504,21 @@ pub fn write_sealed_marker(data_dir: &Path, key_id: Option<&str>) -> anyhow::Res
 }
 
 /// Resolve sealed mode from the environment and, when requested, fetch the
-/// DEK (with bounded retry) and build the value cipher. Returns `None` in
-/// plaintext mode. Called by `Node::run` **before** the store is opened.
+/// DEK (with bounded retry), run the encrypt-in-place state migration if
+/// this sealed boot found plaintext state at `db_path` (Swarm TEE R2; see
+/// [`crate::state_migration`]), and build the value cipher. Returns `None`
+/// in plaintext mode. Called by `Node::run` **before** the store is opened.
 ///
 /// # Errors
 /// Fails (and the node refuses to serve) when sealed mode is requested but
-/// no DEK is obtainable within the bounded window.
-pub async fn prepare_state_sealing(data_dir: &Path) -> anyhow::Result<Option<Arc<SealCipher>>> {
+/// no DEK is obtainable within the bounded window, or when the state
+/// migration fails (plaintext state is preserved for a retry).
+pub async fn prepare_state_sealing(
+    data_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<Option<Arc<SealCipher>>> {
     let config = SealingConfig::from_env()?;
-    prepare_with_config(&config, data_dir).await
+    prepare_with_config(&config, data_dir, db_path).await
 }
 
 /// Inner body of [`prepare_state_sealing`], parameterized for tests.
@@ -522,6 +528,7 @@ pub async fn prepare_state_sealing(data_dir: &Path) -> anyhow::Result<Option<Arc
 pub async fn prepare_with_config(
     config: &SealingConfig,
     data_dir: &Path,
+    db_path: &Path,
 ) -> anyhow::Result<Option<Arc<SealCipher>>> {
     if !config.enabled {
         return Ok(None);
@@ -537,6 +544,25 @@ pub async fn prepare_with_config(
     let dek = fetch_dek_with_retry(provider.as_ref(), config.fetch_timeout).await?;
     let cipher = Arc::new(SealCipher::new(&dek));
     drop(dek);
+
+    // R2 encrypt-in-place: a legacy agent's first sealed boot finds
+    // plaintext state — convert it (atomic + crash-resumable) before
+    // the store opens. Fresh and already-sealed state dirs are no-ops.
+    // Synchronous on purpose: nothing serves until this completes.
+    let outcome = crate::state_migration::migrate_state_if_needed(
+        data_dir,
+        db_path,
+        config.key_id.as_deref(),
+        &cipher,
+    )
+    .context("encrypt-in-place state migration (plaintext state preserved; retry next boot)")?;
+    if let crate::state_migration::MigrationOutcome::Migrated(stats) = outcome {
+        info!(
+            values_sealed = stats.values_sealed,
+            values_copied = stats.values_copied,
+            "plaintext state migrated to sealed format on first sealed boot"
+        );
+    }
 
     write_sealed_marker(data_dir, config.key_id.as_deref())?;
     info!("sealed state-at-rest enabled (AES-256-GCM)");
@@ -767,7 +793,9 @@ mod tests {
         cfg.fetch_timeout = Duration::from_millis(600);
 
         let started = Instant::now();
-        let err = prepare_with_config(&cfg, dir.path()).await.unwrap_err();
+        let err = prepare_with_config(&cfg, dir.path(), &dir.path().join("db"))
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("refusing to serve"),
             "error must state the refusal: {err:#}"
@@ -786,9 +814,16 @@ mod tests {
     async fn plaintext_mode_returns_no_cipher_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SealingConfig::resolve(None, None, None, None, None).unwrap();
-        let cipher = prepare_with_config(&cfg, dir.path()).await.unwrap();
+        let cipher = prepare_with_config(&cfg, dir.path(), &dir.path().join("db"))
+            .await
+            .unwrap();
         assert!(cipher.is_none());
         assert!(!dir.path().join(SEALED_MARKER_FILENAME).exists());
+        assert!(
+            !dir.path().join("db.sealed-migrating").exists()
+                && !dir.path().join("db.plaintext-backup").exists(),
+            "plaintext mode must never start a state migration"
+        );
     }
 
     #[tokio::test]
@@ -797,7 +832,7 @@ mod tests {
         let mut cfg = sealed_config();
         cfg.key_file = Some(dir.path().join("state.key"));
 
-        let cipher = prepare_with_config(&cfg, dir.path())
+        let cipher = prepare_with_config(&cfg, dir.path(), &dir.path().join("db"))
             .await
             .unwrap()
             .expect("sealed mode must produce a cipher");

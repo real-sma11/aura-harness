@@ -19,7 +19,7 @@ use axum::{
 };
 
 use super::RouterState;
-use crate::auth::check_bearer;
+use crate::auth::check_bearer_any;
 
 /// Strongly-typed Bearer token extracted by the auth middleware.
 ///
@@ -38,18 +38,26 @@ pub(crate) struct BearerToken(pub String);
 /// The expected token is pulled from [`RouterState::config`], which was
 /// populated by `Node::run` from `AURA_NODE_AUTH_TOKEN`, a persisted
 /// `$data_dir/auth_token` file, or a freshly-minted per-launch random
-/// value.
+/// value. When the node runs as a swarm pod, the platform internal
+/// token (`AURA_SWARM_INTERNAL_TOKEN`, injected by the scheduler) is
+/// accepted as an additional valid bearer — that is what the swarm
+/// cron service presents when firing `POST /v1/processes/:id/trigger`
+/// (Swarm TEE R2 integration fix). Both checks are constant-time via
+/// [`crate::auth::check_bearer_any`].
 ///
-/// Returns `401 UNAUTHORIZED` when [`check_bearer`] rejects the
-/// request. On success the validated token is cloned into the request
-/// extensions as a [`BearerToken`] before the request is forwarded to
-/// `next`.
+/// Returns `401 UNAUTHORIZED` when neither secret matches. On success
+/// the validated token is cloned into the request extensions as a
+/// [`BearerToken`] before the request is forwarded to `next`.
 pub(crate) async fn require_bearer_mw(
     State(state): State<RouterState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let token = match check_bearer(request.headers(), &state.config.auth_token) {
+    let token = match check_bearer_any(
+        request.headers(),
+        &state.config.auth_token,
+        state.config.swarm_internal_token.as_deref(),
+    ) {
         Ok(t) => t,
         Err(status) => return status.into_response(),
     };
@@ -64,14 +72,14 @@ mod tests {
 
     // The parsing / constant-time-compare contract is exhaustively
     // exercised in `crate::auth::tests`. These tests only verify the
-    // thin axum wrapper: that the middleware delegates to `check_bearer`
-    // and surfaces its verdict as a `StatusCode`.
+    // thin axum wrapper: that the middleware delegates to
+    // `check_bearer_any` and surfaces its verdict as a `StatusCode`.
 
     #[test]
     fn rejects_missing_header_via_shared_check() {
         let headers = HeaderMap::new();
         assert_eq!(
-            check_bearer(&headers, "expected-token"),
+            check_bearer_any(&headers, "expected-token", None),
             Err(StatusCode::UNAUTHORIZED)
         );
     }
@@ -84,8 +92,29 @@ mod tests {
             HeaderValue::from_static("Bearer expected-token"),
         );
         assert_eq!(
-            check_bearer(&headers, "expected-token"),
+            check_bearer_any(&headers, "expected-token", None),
             Ok("expected-token".to_string())
+        );
+    }
+
+    /// The swarm platform internal token (`AURA_SWARM_INTERNAL_TOKEN`)
+    /// must be accepted alongside the node token — it is the bearer the
+    /// swarm cron service presents on trigger calls.
+    #[test]
+    fn accepts_swarm_internal_token_as_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer platform-internal"),
+        );
+        assert_eq!(
+            check_bearer_any(&headers, "node-token", Some("platform-internal")),
+            Ok("platform-internal".to_string())
+        );
+        // Without the fallback configured (local agent) it is rejected.
+        assert_eq!(
+            check_bearer_any(&headers, "node-token", None),
+            Err(StatusCode::UNAUTHORIZED)
         );
     }
 }

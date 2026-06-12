@@ -20,6 +20,7 @@
 
 mod error;
 mod keys;
+pub mod migrate;
 pub mod processes;
 mod record_log_bridge;
 mod rocks_store;
@@ -30,6 +31,7 @@ pub mod vault;
 pub use aura_core_types::AgentStatus;
 pub use error::StoreError;
 pub use keys::{AgentMetaKey, InboxKey, KeyCodec, MetaField, RecordKey};
+pub use migrate::{seal_db_copy, SealCopyStats, SEALED_VALUE_CFS};
 pub use processes::{
     NewProcess, ProcessError, ProcessRecord, ProcessRunRecord, ProcessRunStatus, ProcessStore,
     ProcessTriggerMeta, ProcessUpdate,
