@@ -70,6 +70,7 @@ fn test_router_state(store: Arc<dyn Store>) -> RouterState {
         skill_manager: None,
         secrets_vault: None,
         process_store: None,
+        trigger_registrar: None,
         router_url: None,
     })
 }
@@ -596,6 +597,7 @@ fn test_router_state_with_managers() -> RouterState {
         skill_manager: Some(skill_manager),
         secrets_vault: Some(secrets_vault),
         process_store: Some(process_store),
+        trigger_registrar: None,
         router_url: None,
     })
 }
@@ -1532,6 +1534,121 @@ async fn test_processes_crud_roundtrip() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Phase 8: a successful process mutation fires a best-effort push of
+/// the trigger-metadata set to the swarm gateway's internal
+/// replace-sync endpoint — with the internal bearer token, the
+/// configured agent id, and a payload of metadata only (no prompt).
+#[tokio::test]
+async fn test_process_mutation_pushes_trigger_registration() {
+    use crate::trigger_registrar::{RegistrarTarget, TriggerRegistrar};
+
+    type Captured = (String, String, String);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Captured>(8);
+
+    // Stub swarm gateway capturing (agent_id, authorization, body).
+    let stub = Router::new()
+        .route(
+            "/internal/agents/:agent_id/process-triggers",
+            axum::routing::put(
+                |State(tx): State<tokio::sync::mpsc::Sender<Captured>>,
+                 Path(agent_id): Path<String>,
+                 headers: HeaderMap,
+                 body: String| async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let _ = tx.send((agent_id, auth, body)).await;
+                    StatusCode::OK
+                },
+            ),
+        )
+        .with_state(tx);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stub_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.ok();
+    });
+
+    let mut state = test_router_state_with_managers();
+    let process_store = state.process_store.clone().unwrap();
+    state.trigger_registrar = Some(Arc::new(TriggerRegistrar::new(
+        Some(RegistrarTarget {
+            base_url: format!("http://{stub_addr}"),
+            token: "internal-secret".into(),
+            agent_id: "feedc0de".into(),
+        }),
+        process_store,
+    )));
+    let app = create_router(state);
+
+    // Mutate: create a process with an in-TEE prompt + config.
+    let body = serde_json::json!({
+        "name": "nightly-report",
+        "cron": "0 3 * * *",
+        "prompt": "IN-TEE-PROMPT: summarize my sealed notes",
+        "config": { "channel": "ops" }
+    });
+    let req = authed_request()
+        .method("POST")
+        .uri("/v1/processes")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // The push happens on a background task — await its arrival.
+    let (agent_id, auth, pushed) =
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("registration push must arrive after a mutation")
+            .expect("stub channel closed");
+
+    assert_eq!(agent_id, "feedc0de");
+    assert_eq!(auth, "Bearer internal-secret");
+
+    // The pushed body is the full desired set: metadata only.
+    let payload: serde_json::Value = serde_json::from_str(&pushed).unwrap();
+    let entries = payload.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["cron"], "0 3 * * *");
+    assert_eq!(entries[0]["enabled"], true);
+    assert!(entries[0]["process_id"].is_string());
+    assert!(
+        !pushed.contains("IN-TEE-PROMPT") && !pushed.contains("prompt"),
+        "prompt must never cross the trust boundary; pushed: {pushed}"
+    );
+    assert!(!pushed.contains("ops") && !pushed.contains("config"));
+
+    // Delete the process: the replace-sync now pushes an empty set.
+    let req = authed_request()
+        .uri("/v1/processes")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = json["processes"][0]["id"].as_str().unwrap().to_string();
+
+    let req = authed_request()
+        .method("DELETE")
+        .uri(format!("/v1/processes/{id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (_, _, pushed) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("delete must push the (now empty) desired set")
+        .expect("stub channel closed");
+    assert_eq!(pushed.trim(), "[]");
+}
+
 /// Invalid cron expressions are rejected with 400 on create and update.
 #[tokio::test]
 async fn test_processes_invalid_cron_rejected() {
@@ -1819,6 +1936,7 @@ async fn test_rejects_when_server_auth_token_empty() {
         skill_manager: None,
         secrets_vault: None,
         process_store: None,
+        trigger_registrar: None,
         router_url: None,
     });
     let app = create_router(state);
@@ -1918,6 +2036,7 @@ fn test_router_state_with_workspace() -> (RouterState, tempfile::TempDir) {
         skill_manager: None,
         secrets_vault: None,
         process_store: Some(process_store),
+        trigger_registrar: None,
         router_url: None,
     });
     (state, tmp)

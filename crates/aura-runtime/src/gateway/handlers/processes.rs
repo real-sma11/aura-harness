@@ -84,6 +84,15 @@ fn not_found() -> axum::response::Response {
         .into_response()
 }
 
+/// Phase 8: after a successful process mutation, fire a best-effort
+/// background sync of the trigger-metadata set to the swarm gateway.
+/// Never blocks or fails the user's call; no-op for local agents.
+fn notify_trigger_registrar(state: &RouterState) {
+    if let Some(registrar) = &state.trigger_registrar {
+        registrar.sync();
+    }
+}
+
 /// `GET /v1/processes` — full definitions (in-VM / authenticated proxy
 /// consumers only; nothing here is an off-VM export path).
 pub(in crate::gateway) async fn list_processes_handler(
@@ -111,11 +120,14 @@ pub(in crate::gateway) async fn create_process_handler(
         return store_unavailable();
     };
     match store.create(body) {
-        Ok(process) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "ok": true, "process": process })),
-        )
-            .into_response(),
+        Ok(process) => {
+            notify_trigger_registrar(&state);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "ok": true, "process": process })),
+            )
+                .into_response()
+        }
         Err(e) => process_error_response(&e).into_response(),
     }
 }
@@ -150,11 +162,14 @@ pub(in crate::gateway) async fn update_process_handler(
         return store_unavailable();
     };
     match store.update(&id, body) {
-        Ok(process) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "process": process })),
-        )
-            .into_response(),
+        Ok(process) => {
+            notify_trigger_registrar(&state);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "ok": true, "process": process })),
+            )
+                .into_response()
+        }
         Err(e) => process_error_response(&e).into_response(),
     }
 }
@@ -169,7 +184,10 @@ pub(in crate::gateway) async fn delete_process_handler(
         return store_unavailable();
     };
     match store.delete(&id) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Ok(true) => {
+            notify_trigger_registrar(&state);
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
         Ok(false) => not_found(),
         Err(e) => process_error_response(&e).into_response(),
     }
@@ -228,6 +246,9 @@ pub(in crate::gateway) async fn trigger_process_handler(
         Ok(run) => run,
         Err(e) => return process_error_response(&e).into_response(),
     };
+    // `start_run` advanced last_run_at / next_run_at — re-register the
+    // updated schedule with the swarm gateway (best-effort).
+    notify_trigger_registrar(&state);
 
     // Synthetic chat request — the same shape POST /v1/run (Chat)
     // consumes. Identity / workspace use node defaults; the process

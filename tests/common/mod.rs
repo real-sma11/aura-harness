@@ -214,6 +214,8 @@ impl TestServer {
             memory_manager: None,
             skill_manager: None,
             secrets_vault: None,
+            process_store: None,
+            trigger_registrar: None,
             router_url: None,
         });
         let app = create_router(state);

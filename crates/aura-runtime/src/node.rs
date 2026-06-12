@@ -244,6 +244,14 @@ impl Node {
             seal_cipher.clone(),
         ));
 
+        // Trigger-metadata registrar (Swarm TEE phase 8): pushes the
+        // exportable (process_id, cron, enabled, next_run_at) set to
+        // the swarm gateway after process mutations. Env-configured;
+        // silently inert for local agents.
+        let trigger_registrar = Arc::new(
+            crate::trigger_registrar::TriggerRegistrar::from_env(process_store.clone()),
+        );
+
         let state = RouterState::new(crate::gateway::RouterStateConfig {
             store,
             scheduler,
@@ -258,6 +266,7 @@ impl Node {
             skill_manager: Some(skill_manager),
             secrets_vault: Some(secrets_vault),
             process_store: Some(process_store),
+            trigger_registrar: Some(trigger_registrar),
             router_url,
         });
         let app = create_router(state);

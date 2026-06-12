@@ -71,6 +71,12 @@ pub struct RouterState {
     /// at rest when the node booted with a state cipher; `None` only
     /// in test fixtures that don't exercise the process routes.
     pub(crate) process_store: Option<Arc<aura_store_db::ProcessStore>>,
+    /// Best-effort trigger-metadata pusher (Swarm TEE phase 8). After
+    /// every process mutation the handlers fire a background sync of
+    /// `(process_id, cron, enabled, next_run_at)` — and nothing else —
+    /// to the swarm gateway. No-op for local agents; `None` only in
+    /// test fixtures that don't exercise registration.
+    pub(crate) trigger_registrar: Option<Arc<crate::trigger_registrar::TriggerRegistrar>>,
     /// Router URL for generation proxying (from `AURA_ROUTER_URL`).
     pub(crate) router_url: Option<String>,
     /// Bounded pool of WebSocket connection slots.
@@ -115,6 +121,7 @@ pub struct RouterStateConfig {
     pub skill_manager: Option<Arc<RwLock<aura_context_skills::SkillManager>>>,
     pub secrets_vault: Option<Arc<aura_store_db::SecretsVault>>,
     pub process_store: Option<Arc<aura_store_db::ProcessStore>>,
+    pub trigger_registrar: Option<Arc<crate::trigger_registrar::TriggerRegistrar>>,
     pub router_url: Option<String>,
 }
 
@@ -140,6 +147,7 @@ impl RouterState {
             skill_manager: cfg.skill_manager,
             secrets_vault: cfg.secrets_vault,
             process_store: cfg.process_store,
+            trigger_registrar: cfg.trigger_registrar,
             router_url: cfg.router_url,
             ws_slots: Arc::new(Semaphore::new(ws::MAX_WS_CONNS_PER_NODE)),
             chat_runs: Arc::new(DashMap::new()),
@@ -164,6 +172,7 @@ impl Clone for RouterState {
             skill_manager: self.skill_manager.clone(),
             secrets_vault: self.secrets_vault.clone(),
             process_store: self.process_store.clone(),
+            trigger_registrar: self.trigger_registrar.clone(),
             router_url: self.router_url.clone(),
             ws_slots: self.ws_slots.clone(),
             chat_runs: self.chat_runs.clone(),
