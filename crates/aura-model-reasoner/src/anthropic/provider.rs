@@ -1449,6 +1449,7 @@ fn fit_body_under_cap(body_bytes: &[u8], cap_bytes: usize) -> (Vec<u8>, usize, B
             break;
         }
         dropped += 2;
+        strip_orphan_tool_results(&mut value);
 
         let Ok(candidate) = serialize_request_body(&value) else {
             break;
@@ -1474,14 +1475,78 @@ fn fit_body_under_cap(body_bytes: &[u8], cap_bytes: usize) -> (Vec<u8>, usize, B
 /// messages dropped, which is more than any real chat history.
 const MAX_HISTORY_DROP_ITERATIONS: usize = 64;
 
+/// Strip `tool_result` blocks that violate Anthropic's positional rule:
+/// each `tool_result` in message `i` must reference a `tool_use` in
+/// message `i - 1`. Dropping the oldest message pair can remove an
+/// assistant `tool_use` while the next user message (now at the front)
+/// still carries its `tool_result`, which the API rejects with 400
+/// "messages.0.content.0: unexpected `tool_use_id` found in
+/// `tool_result` blocks". A message left with no content blocks gets a
+/// marker text block instead of being removed, so the first message
+/// keeps the `user` role and the alternation cadence is preserved.
+fn strip_orphan_tool_results(value: &mut serde_json::Value) {
+    let Some(messages) = value
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    let mut previous_tool_use_ids: Vec<String> = Vec::new();
+    for msg in messages.iter_mut() {
+        let current_tool_use_ids: Vec<String> = msg
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| {
+                        b.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                    })
+                    .filter_map(|b| {
+                        b.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if let Some(blocks) = msg
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            blocks.retain(|b| {
+                if b.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
+                    b.get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| previous_tool_use_ids.iter().any(|p| p == id))
+                } else {
+                    true
+                }
+            });
+            if blocks.is_empty() {
+                blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": "[earlier tool results were removed to fit the request size limit]"
+                }));
+            }
+        }
+
+        previous_tool_use_ids = current_tool_use_ids;
+    }
+}
+
 /// Drop the oldest pair of non-system messages from a parsed body.
 /// Returns `Err` when fewer than two non-system messages remain (the
 /// caller must fall back to collapse mode).
 ///
-/// Dropping in pairs preserves the user/assistant cadence and, more
-/// importantly, prevents stripping a `tool_use` without its matching
-/// `tool_result` (which would make the next request invalid per
-/// Anthropic's schema). System messages are immutable here.
+/// Dropping in pairs preserves the user/assistant cadence. It does NOT
+/// by itself preserve `tool_use`/`tool_result` pairing — removing an
+/// assistant message that issued tool calls strands the results in the
+/// following user message — so callers must run
+/// [`strip_orphan_tool_results`] after each drop. System messages are
+/// immutable here.
 fn drop_oldest_non_system_message_pair(value: &mut serde_json::Value) -> Result<(), ()> {
     let messages = value
         .get_mut("messages")
@@ -3636,6 +3701,87 @@ mod emergency_body_cap_tests {
             "user",
             "the last message after cap must still be the user's latest turn"
         );
+    }
+
+    /// Regression for the production 400 "messages.0.content.0:
+    /// unexpected `tool_use_id` found in `tool_result` blocks": the
+    /// pair-drop ladder removed the assistant message carrying the
+    /// `tool_use` while the following user message (now at the front)
+    /// still opened with its `tool_result`.
+    #[test]
+    fn fit_body_under_cap_never_leaves_orphan_tool_result_at_front() {
+        // Image-heavy first user turn (mirrors the real incident where
+        // two attached images pushed the body over the cap), then
+        // several tool-call rounds.
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "make the homepage look like this"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(120_000)}}
+            ]
+        })];
+        for i in 0..6 {
+            let id = format!("toolu_{i}");
+            messages.push(json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": id, "name": "get_project", "input": {}}
+                ]
+            }));
+            messages.push(json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": id, "content": "Z".repeat(3_000)}
+                ]
+            }));
+        }
+
+        let body = serde_json::to_vec(&json!({
+            "model": "aura-claude-opus-4-7",
+            "system": [{"type": "text", "text": "system prompt"}],
+            "messages": messages,
+            "max_tokens": 1024,
+            "stream": true,
+        }))
+        .unwrap();
+
+        // Tight enough to force pair drops past the image turn.
+        let cap = 20 * 1024;
+        let (capped, dropped, mode) = fit_body_under_cap(&body, cap);
+        assert!(dropped > 0, "must have dropped pairs, got mode {mode:?}");
+
+        let parsed: serde_json::Value = serde_json::from_slice(&capped).unwrap();
+        let msgs = parsed["messages"].as_array().expect("messages array");
+
+        // Anthropic's positional rule: every tool_result in message i
+        // must reference a tool_use in message i-1.
+        for (i, msg) in msgs.iter().enumerate() {
+            let Some(blocks) = msg["content"].as_array() else {
+                continue;
+            };
+            for block in blocks {
+                if block["type"].as_str() != Some("tool_result") {
+                    continue;
+                }
+                let id = block["tool_use_id"].as_str().unwrap();
+                let paired = i > 0
+                    && msgs[i - 1]["content"].as_array().is_some_and(|prev| {
+                        prev.iter().any(|b| {
+                            b["type"].as_str() == Some("tool_use")
+                                && b["id"].as_str() == Some(id)
+                        })
+                    });
+                assert!(
+                    paired,
+                    "tool_result {id} at message {i} has no tool_use in the previous message"
+                );
+            }
+        }
+
+        // The first message must stay a non-empty user message.
+        let first = msgs.first().expect("at least one message");
+        assert_eq!(first["role"].as_str(), Some("user"));
+        assert!(!first["content"].as_array().unwrap().is_empty());
     }
 
     #[test]
