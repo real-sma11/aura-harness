@@ -107,10 +107,15 @@ impl Tool for StartDevLoopTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
-        let model = args.get("model").and_then(|v| v.as_str()).map(String::from);
+        // Fall back to the caller agent's resolved model when the tool
+        // call omits `model`. The harness rejects a model-less dev-loop
+        // start, and the chat agent (which has a model) is the one
+        // invoking this — so thread its model through rather than
+        // forcing the operator to pass it explicitly.
+        let model = resolve_tool_model(&args, ctx);
 
         match self
             .controller
@@ -277,13 +282,13 @@ impl Tool for RunTaskTool {
 
     async fn execute(
         &self,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
         args: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'task_id' argument".into()))?;
-        let model = args.get("model").and_then(|v| v.as_str()).map(String::from);
+        let model = resolve_tool_model(&args, ctx);
 
         match self
             .controller
@@ -305,6 +310,27 @@ impl Tool for RunTaskTool {
             Err(e) => Ok(ToolResult::failure("run_task", e)),
         }
     }
+}
+
+/// Resolve the model for a dev-loop / task-run tool call: an explicit,
+/// non-blank `model` arg wins; otherwise fall back to the caller
+/// agent's resolved model (`ToolContext::caller_model_id`). The harness
+/// rejects a model-less start request, and the invoking chat agent
+/// already has a model, so threading it through here lets the agent
+/// start the loop without re-specifying its own model.
+fn resolve_tool_model(args: &serde_json::Value, ctx: &ToolContext) -> Option<String> {
+    args.get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            ctx.caller_model_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
 }
 
 /// Create all dev-loop control tools for a session context.
@@ -392,5 +418,40 @@ mod tests {
         let tools = devloop_control_tools(controller, "proj-1".into(), None, None);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert_eq!(names, CANONICAL_DEVLOOP_TOOL_NAMES);
+    }
+
+    fn ctx_with_caller_model(model: Option<&str>) -> ToolContext {
+        let mut ctx =
+            ToolContext::new(crate::sandbox::Sandbox::new(&std::env::temp_dir()).unwrap(), crate::ToolConfig::default());
+        ctx.caller_model_id = model.map(String::from);
+        ctx
+    }
+
+    #[test]
+    fn resolve_tool_model_prefers_explicit_arg() {
+        let ctx = ctx_with_caller_model(Some("caller-model"));
+        let args = serde_json::json!({ "model": "explicit-model" });
+        assert_eq!(
+            resolve_tool_model(&args, &ctx).as_deref(),
+            Some("explicit-model")
+        );
+    }
+
+    #[test]
+    fn resolve_tool_model_falls_back_to_caller_model() {
+        let ctx = ctx_with_caller_model(Some("caller-model"));
+        let args = serde_json::json!({});
+        assert_eq!(
+            resolve_tool_model(&args, &ctx).as_deref(),
+            Some("caller-model"),
+            "a model-less start must inherit the calling agent's model"
+        );
+    }
+
+    #[test]
+    fn resolve_tool_model_treats_blank_values_as_unset() {
+        let ctx = ctx_with_caller_model(Some("   "));
+        let args = serde_json::json!({ "model": "  " });
+        assert_eq!(resolve_tool_model(&args, &ctx), None);
     }
 }
