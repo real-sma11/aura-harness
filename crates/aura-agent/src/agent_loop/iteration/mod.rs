@@ -187,12 +187,20 @@ impl AgentLoop {
 /// [`super::context::effective_compaction_request_kind`] (the next
 /// `compact_if_needed` call uses it) and so callers don't have to
 /// thread the counter through a different shape per phase.
+///
+/// Returns `true` when leaked tool-call markup was scrubbed from the
+/// assistant text (see [`super::text_sanitize`]). The turn loop uses
+/// this to recover the "model wrote a tool call as text, so no tool
+/// ran, and the turn ended after one message" failure: the scrubbed
+/// leftover text still counts as visible output, so the never-silent
+/// no-op nudge does not fire — the caller needs the explicit signal to
+/// re-prompt instead of ending the turn.
 pub(super) fn accumulate_response(
     _config: &AgentLoopConfig,
     state: &mut LoopState,
     response: &ModelResponse,
     _iteration: usize,
-) {
+) -> bool {
     state.result.total_input_tokens += response.usage.input_tokens;
     state.result.total_output_tokens += response.usage.output_tokens;
     state.result.total_cache_creation_input_tokens += response
@@ -254,6 +262,8 @@ pub(super) fn accumulate_response(
     let estimated_context_tokens = provider_tokens.max(message_tokens);
     state.last_context_tokens_estimate = Some(estimated_context_tokens);
     state.result.estimated_context_tokens = estimated_context_tokens;
+
+    scrubbed_markup
 }
 
 // ---------------------------------------------------------------------------

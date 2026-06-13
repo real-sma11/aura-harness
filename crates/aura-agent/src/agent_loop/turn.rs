@@ -62,6 +62,25 @@ const NO_OP_TURN_NUDGE: &str = "Your previous turn ended without sending a respo
 making any changes. If the request needs action, continue and complete it now; otherwise reply to \
 the user directly.";
 
+/// Hard cap on how many "you wrote a tool call as text" nudges one
+/// turn may inject. One is enough: the model leaked tool-call markup
+/// into a text block (so [`super::text_sanitize`] scrubbed it and no
+/// tool ran), which would otherwise end the turn after a single
+/// message even though the task is unfinished. If the nudged retry
+/// *also* leaks markup the budget is spent and the turn ends rather
+/// than re-prompting forever.
+pub(super) const MAX_LEAKED_MARKUP_NUDGES: u32 = 1;
+
+/// Steering text injected when a turn is about to end because the
+/// model emitted tool-call syntax as assistant *text* instead of a
+/// native `tool_use` block. The harness scrubbed the markup before it
+/// entered history, so no tool executed — this tells the model to
+/// re-issue the call through the real tool-calling mechanism.
+const LEAKED_TOOL_MARKUP_NUDGE: &str = "Your previous message wrote tool-call syntax as plain text, \
+so no tool actually ran and the work is unfinished. Re-issue the tool call using the native \
+tool-calling mechanism — do not write tool invocations (such as <function_calls>, <invoke>, or \
+[tool_use ...]) as text.";
+
 /// Result of a single turn.
 ///
 /// Fields capture just enough context to let the outer task shell
@@ -131,6 +150,10 @@ pub(crate) async fn run_turn(
     // already spent.
     let mut turn_had_visible_output = false;
     let mut no_op_nudges_used: u32 = 0;
+    // Leaked-tool-markup recovery: how many "you wrote a tool call as
+    // text" nudges this turn has spent. The per-iteration signal is
+    // read straight off `sampling_result` in the stop branch below.
+    let mut markup_nudges_used: u32 = 0;
 
     loop {
         let iteration = usize::try_from(ctx.iteration_offset.saturating_add(sampling_count))
@@ -203,6 +226,31 @@ pub(crate) async fn run_turn(
         // fresh sampling request.
         if ctx.input_queue.is_some_and(InputQueue::has_pending) {
             continue;
+        }
+
+        // Leaked-tool-markup recovery: the model signalled stop, but
+        // the last response had tool-call markup scrubbed from its
+        // text (it wrote a tool call as prose, so nothing executed).
+        // The scrubbed leftover still counts as visible output, so the
+        // no-op nudge below would not fire — handle it explicitly here
+        // by re-prompting once to re-issue the call as a native
+        // `tool_use`, instead of ending the turn after a single
+        // message on unfinished work.
+        if sampling_result.scrubbed_tool_markup {
+            if ctx.run.agent.config.auto_continue_no_op_turns
+                && markup_nudges_used < MAX_LEAKED_MARKUP_NUDGES
+            {
+                markup_nudges_used = markup_nudges_used.saturating_add(1);
+                emit_no_op_progress(ctx.run.event_tx, "turn_tool_markup_retry");
+                apply_user_inputs_to_messages(
+                    &mut state.messages,
+                    vec![UserInput::Steer {
+                        instruction: LEAKED_TOOL_MARKUP_NUDGE.to_string(),
+                    }],
+                );
+                continue;
+            }
+            emit_no_op_progress(ctx.run.event_tx, "turn_ended_tool_markup");
         }
 
         // Never-silent + premature-`EndTurn` recovery: the model
@@ -311,18 +359,33 @@ pub(super) fn apply_user_inputs_to_messages(messages: &mut Vec<Message>, inputs:
     }
 }
 
-/// Emit a `Progress` event describing a turn that produced no
-/// user-visible output, so the client always shows *why* the stream
-/// went quiet instead of appearing to hang. `stage` is
-/// `"turn_no_action_retry"` when we are about to re-prompt and
-/// `"turn_ended_no_action"` when the turn is terminating. The WS sink
-/// forwards `Progress` verbatim and the chat client renders unknown
-/// stages as their label, so no coordinated client release is needed.
+/// Emit a `Progress` event describing a turn that ended (or is about
+/// to be re-prompted) without making real progress, so the client
+/// always shows *why* the stream went quiet instead of appearing to
+/// hang. Recognised `stage` values:
+///
+/// - `"turn_no_action_retry"` — no visible output; about to re-prompt.
+/// - `"turn_ended_no_action"` — no visible output; turn terminating.
+/// - `"turn_tool_markup_retry"` — model wrote a tool call as text;
+///   about to re-prompt to re-issue it natively.
+/// - `"turn_ended_tool_markup"` — model wrote a tool call as text and
+///   the re-prompt budget is spent; turn terminating.
+///
+/// The WS sink forwards `Progress` verbatim and the chat client
+/// renders unknown stages as their label, so no coordinated client
+/// release is needed.
 fn emit_no_op_progress(event_tx: Option<&Sender<AgentLoopEvent>>, stage: &str) {
-    let message = if stage == "turn_no_action_retry" {
-        "Model ended its turn without responding or acting — re-prompting once."
-    } else {
-        "Model ended its turn without responding or taking any action."
+    let message = match stage {
+        "turn_no_action_retry" => {
+            "Model ended its turn without responding or acting — re-prompting once."
+        }
+        "turn_tool_markup_retry" => {
+            "Model wrote a tool call as text, so nothing ran — re-prompting once to retry it."
+        }
+        "turn_ended_tool_markup" => {
+            "Model wrote a tool call as text, so nothing ran, and the retry budget is spent."
+        }
+        _ => "Model ended its turn without responding or taking any action.",
     };
     streaming::emit(
         event_tx,

@@ -71,6 +71,14 @@ pub(crate) struct SamplingRequestResult {
     /// "turn ended without action" signal (and optionally re-prompt)
     /// instead of letting a no-op turn look like a silent hang.
     pub(crate) produced_visible_output: bool,
+    /// `true` when leaked tool-call markup was scrubbed from the
+    /// assistant text this sampling request (the model wrote
+    /// `<invoke>` / `[tool_use ...>` markup as prose instead of a
+    /// native `tool_use` block, so no tool actually ran). The turn
+    /// loop reads the *last* sampling request's value to recover the
+    /// "turn ends after one message because the tool call was eaten"
+    /// failure by re-prompting once instead of ending the turn.
+    pub(crate) scrubbed_tool_markup: bool,
 }
 
 /// Whether a model response carries user-visible output: a non-empty
@@ -118,6 +126,7 @@ pub(crate) async fn run_sampling_request(
             needs_follow_up: false,
             broke_for_error: true,
             produced_visible_output: false,
+            scrubbed_tool_markup: false,
         };
     }
 
@@ -151,6 +160,7 @@ pub(crate) async fn run_sampling_request(
                 needs_follow_up: false,
                 broke_for_error: true,
                 produced_visible_output: false,
+                scrubbed_tool_markup: false,
             };
         }
     };
@@ -181,6 +191,7 @@ pub(crate) async fn run_sampling_request(
                 needs_follow_up: false,
                 broke_for_error: true,
                 produced_visible_output: false,
+                scrubbed_tool_markup: false,
             };
         }
     };
@@ -199,13 +210,15 @@ pub(crate) async fn run_sampling_request(
                 needs_follow_up: false,
                 broke_for_error: true,
                 produced_visible_output: false,
+                scrubbed_tool_markup: false,
             };
         }
     };
 
     let produced_visible_output = response_has_visible_output(&response);
 
-    iteration::accumulate_response(&run.agent.config, state, &response, iteration);
+    let scrubbed_tool_markup =
+        iteration::accumulate_response(&run.agent.config, state, &response, iteration);
     state.result.iterations = iteration + 1;
     streaming::emit_iteration_complete(run.event_tx, iteration, &response, iteration_started_at);
 
@@ -223,6 +236,7 @@ pub(crate) async fn run_sampling_request(
             needs_follow_up: false,
             broke_for_error: true,
             produced_visible_output,
+            scrubbed_tool_markup,
         };
     }
 
@@ -238,5 +252,6 @@ pub(crate) async fn run_sampling_request(
         needs_follow_up: !dispatch_says_break,
         broke_for_error: false,
         produced_visible_output,
+        scrubbed_tool_markup,
     }
 }
