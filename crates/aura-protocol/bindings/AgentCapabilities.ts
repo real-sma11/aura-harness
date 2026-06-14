@@ -24,4 +24,20 @@ installed_integrations: Array<InstalledIntegration>,
  * the harness narrows the per-turn tool surface based on each
  * user message.
  */
-intent_classifier: IntentClassifierSpec | null, };
+intent_classifier: IntentClassifierSpec | null, 
+/**
+ * Computer-use capability flag. When `true`, the harness exposes
+ * the Anthropic computer-use tool for this run so the agent can
+ * drive the real OS cursor/keyboard and read back screenshots.
+ * Off by default; strictly additive (older producers omit it and
+ * it deserializes to `false`).
+ */
+computer_use: boolean, 
+/**
+ * Base URL of the desktop computer-use executor the harness should
+ * forward `computer` actions to (e.g.
+ * `"http://127.0.0.1:<port>"`). `None` disables forwarding even
+ * when [`Self::computer_use`] is set. Additive and omitted from
+ * the wire when absent.
+ */
+computer_executor_url: string | null, };

@@ -19,4 +19,11 @@ model: string | null,
  * Zero-based council slot index for AURA Council members (ordering
  * the columns); `None` for ordinary `task` spawns.
  */
-council_index: number | null, };
+council_index: number | null, 
+/**
+ * Council combine mechanism (`synthesize` / `contrast` /
+ * `side_by_side`) shared by every member of the turn. Set on AURA
+ * Council member spawns so the UI can label the panel with the
+ * active mechanism; `None` for ordinary `task` spawns.
+ */
+council_mechanism: string | null, };
