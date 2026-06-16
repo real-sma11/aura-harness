@@ -277,3 +277,49 @@ fn test_search_code_no_truncation_signal_when_under_cap() {
     let output = String::from_utf8_lossy(&result.stdout);
     assert!(!output.to_lowercase().contains("truncat"));
 }
+
+// search_code must not silently skip source files whose extension isn't on a
+// hardcoded text allowlist — the old behavior dropped .tsx/.jsx/.vue/.scss etc.,
+// which are most of a typical web codebase (and caused real false-negatives).
+#[test]
+fn test_search_code_finds_unlisted_text_extensions() {
+    let (sandbox, dir) = create_test_sandbox();
+    fs::write(dir.path().join("Component.tsx"), "const a = needle;").unwrap();
+    fs::write(dir.path().join("widget.jsx"), "const b = needle;").unwrap();
+    fs::write(dir.path().join("styles.scss"), "/* needle */").unwrap();
+    fs::write(dir.path().join("App.vue"), "<!-- needle -->").unwrap();
+
+    let result = search_code(&sandbox, "needle", None, None, 100, 0).unwrap();
+    assert!(result.ok);
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(output.contains("Component.tsx"), "missed .tsx:\n{output}");
+    assert!(output.contains("widget.jsx"), "missed .jsx:\n{output}");
+    assert!(output.contains("styles.scss"), "missed .scss:\n{output}");
+    assert!(output.contains("App.vue"), "missed .vue:\n{output}");
+}
+
+// Binary files must still be skipped (denylist + the UTF-8 read backstop).
+#[test]
+fn test_search_code_still_skips_binary_files() {
+    let (sandbox, dir) = create_test_sandbox();
+    fs::write(dir.path().join("img.png"), "needle in png").unwrap();
+    fs::write(dir.path().join("font.woff2"), "needle in font").unwrap();
+    fs::write(dir.path().join("real.ts"), "const c = needle;").unwrap();
+
+    let result = search_code(&sandbox, "needle", None, None, 100, 0).unwrap();
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(output.contains("real.ts"));
+    assert!(!output.contains("img.png"), "should skip .png");
+    assert!(!output.contains("font.woff2"), "should skip .woff2");
+}
+
+// Classification is denylist-based and case-insensitive.
+#[test]
+fn test_is_text_file_denylist_and_case_insensitive() {
+    use std::path::Path;
+    assert!(is_text_file(Path::new("Component.tsx")));
+    assert!(is_text_file(Path::new("widget.jsx")));
+    assert!(is_text_file(Path::new("Main.RS"))); // uppercase source still text
+    assert!(!is_text_file(Path::new("photo.PNG"))); // uppercase binary still skipped
+    assert!(!is_text_file(Path::new("lib.dylib")));
+}
