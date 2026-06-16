@@ -159,7 +159,34 @@ impl Sandbox {
     /// # Errors
     /// Returns error if path doesn't exist or escapes sandbox.
     pub fn resolve_existing(&self, path: impl AsRef<Path>) -> Result<PathBuf, ToolError> {
-        let resolved = self.resolve(path.as_ref())?;
+        let resolved = match self.resolve(path.as_ref()) {
+            Ok(resolved) => resolved,
+            Err(err @ ToolError::SandboxViolation { .. }) => {
+                let candidate = if path.as_ref().is_absolute() {
+                    path.as_ref().to_path_buf()
+                } else {
+                    self.root.join(path.as_ref())
+                };
+
+                if !candidate.exists() {
+                    return Err(err);
+                }
+
+                let canonical = strip_unc_prefix(&candidate.canonicalize().map_err(|e| {
+                    ToolError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("canonicalize({}): {e}", candidate.display()),
+                    ))
+                })?);
+
+                if self.is_within_allowed(&canonical) {
+                    return Ok(canonical);
+                }
+
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
 
         if !resolved.exists() {
             return Err(ToolError::PathNotFound(path.as_ref().display().to_string()));
@@ -440,6 +467,28 @@ mod tests {
         assert!(
             resolved.is_ok(),
             "should be able to access file in extra root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_extra_roots_allow_access_through_canonical_alias() {
+        use std::os::unix::fs::symlink;
+
+        let main_dir = TempDir::new().unwrap();
+        let extra_dir = TempDir::new().unwrap();
+        let alias_dir = TempDir::new().unwrap();
+        std::fs::write(extra_dir.path().join("note.md"), "hello").unwrap();
+        let alias = alias_dir.path().join("extra");
+        symlink(extra_dir.path(), &alias).unwrap();
+
+        let sandbox =
+            Sandbox::with_extra_roots(main_dir.path(), &[extra_dir.path().to_path_buf()]).unwrap();
+
+        let resolved = sandbox.resolve_existing(alias.join("note.md"));
+        assert!(
+            resolved.is_ok(),
+            "should accept an existing extra-root path whose spelling canonicalizes inside the extra root"
         );
     }
 
