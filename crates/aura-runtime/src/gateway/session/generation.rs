@@ -24,10 +24,14 @@ const GENERATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ceiling for the initial HTTP request/response-header handshake.
 const GENERATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Maximum time we will wait for another SSE byte before treating the stream
-/// as stuck. Successful generations may run for minutes, but a healthy router
-/// should emit progress, heartbeat, or completion data within this window.
-const GENERATION_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Env override for the upstream generation SSE idle watchdog.
+const GENERATION_STREAM_IDLE_TIMEOUT_ENV: &str = "AURA_GENERATION_STREAM_IDLE_TIMEOUT_SECS";
+
+/// Default maximum time we will wait for another SSE byte before treating the
+/// stream as stuck. Successful image generations can be sparse: GPT Image
+/// streams have been observed to send early progress and then stay quiet for
+/// just over two minutes before completion.
+const DEFAULT_GENERATION_STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
 
 pub(super) struct GenerationTurn {
     pub cancel_token: CancellationToken,
@@ -280,6 +284,8 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
             return;
         }
     };
+    let stream_idle_timeout = generation_stream_idle_timeout();
+
     info!(
         %session_id,
         %request_id,
@@ -287,7 +293,7 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
         url = %url,
         body_bytes = serde_json::to_vec(body).map_or(0, |bytes| bytes.len()),
         handshake_timeout_secs = GENERATION_REQUEST_TIMEOUT.as_secs(),
-        stream_idle_timeout_secs = GENERATION_STREAM_IDLE_TIMEOUT.as_secs(),
+        stream_idle_timeout_secs = stream_idle_timeout.as_secs(),
         "Generation proxy: sending upstream request"
     );
     let send_fut = client.post(url).bearer_auth(jwt).json(body).send();
@@ -394,14 +400,14 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
                 );
                 return;
             }
-            chunk = tokio::time::timeout(GENERATION_STREAM_IDLE_TIMEOUT, byte_stream.next()) => {
+            chunk = tokio::time::timeout(stream_idle_timeout, byte_stream.next()) => {
                 match chunk {
                     Err(_) => {
                         warn!(
                             %session_id,
                             %request_id,
                             %mode,
-                            idle_timeout_secs = GENERATION_STREAM_IDLE_TIMEOUT.as_secs(),
+                            idle_timeout_secs = stream_idle_timeout.as_secs(),
                             chunk_count,
                             event_count,
                             bytes_seen,
@@ -412,7 +418,7 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
                                 code: "STREAM_IDLE_TIMEOUT".into(),
                                 message: format!(
                                     "upstream stream produced no data for {}s",
-                                    GENERATION_STREAM_IDLE_TIMEOUT.as_secs()
+                                    stream_idle_timeout.as_secs()
                                 ),
                             },
                         ));
@@ -503,6 +509,22 @@ async fn run_generation_proxy(ctx: GenerationProxyCtx<'_>) {
             }
         }
     }
+}
+
+fn generation_stream_idle_timeout() -> Duration {
+    Duration::from_secs(env_duration_secs(
+        GENERATION_STREAM_IDLE_TIMEOUT_ENV,
+        DEFAULT_GENERATION_STREAM_IDLE_TIMEOUT_SECS,
+    ))
+}
+
+fn env_duration_secs(key: &str, default_secs: u64) -> u64 {
+    parse_positive_secs(std::env::var(key).ok().as_deref()).unwrap_or(default_secs)
+}
+
+fn parse_positive_secs(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn pop_sse_frame(buffer: &mut String) -> Option<String> {
@@ -813,5 +835,19 @@ data:{"percent":42,"message":"working"}"#;
             }
             other => panic!("expected completed message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_positive_secs_accepts_trimmed_positive_values() {
+        assert_eq!(parse_positive_secs(Some("300")), Some(300));
+        assert_eq!(parse_positive_secs(Some("  450  ")), Some(450));
+    }
+
+    #[test]
+    fn parse_positive_secs_rejects_empty_zero_and_invalid_values() {
+        assert_eq!(parse_positive_secs(None), None);
+        assert_eq!(parse_positive_secs(Some("")), None);
+        assert_eq!(parse_positive_secs(Some("0")), None);
+        assert_eq!(parse_positive_secs(Some("not-a-number")), None);
     }
 }

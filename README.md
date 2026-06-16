@@ -463,6 +463,7 @@ All LLM traffic flows through the AURA router (proxy) using a per-request JWT. T
 | `AURA_DEFAULT_MODEL` | `claude-opus-4-6` (`aura_model_reasoner::ENV_FALLBACK_MODEL`) | Model identifier sent to the router **only** when the request did not pin a model itself; sessions, dev-loop runs, and task runs all carry an explicit model end-to-end. (Legacy `AURA_ANTHROPIC_MODEL` is still read as a fallback for one release.) |
 | `AURA_DEFAULT_FALLBACK_MODEL` | — | Optional secondary model used on 429/529 retries. |
 | `AURA_MODEL_TIMEOUT_MS` | `300000` | LLM request timeout (resolved by `AnthropicConfig::from_env`). |
+| `AURA_GENERATION_STREAM_IDLE_TIMEOUT_SECS` | `300` | Maximum quiet window while proxying generation SSE bytes from the router before emitting `STREAM_IDLE_TIMEOUT`. |
 | `AURA_LLM_MAX_RETRIES` | `8` | Per-model retry budget before falling back. |
 | `AURA_DISABLE_PROMPT_CACHING` | — | Set to `1`/`true`/`yes` to disable Anthropic prompt-caching directives. |
 
