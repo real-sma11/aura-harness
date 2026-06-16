@@ -66,6 +66,15 @@ fn zero_match_diagnostic(sandbox: &Sandbox, path: Option<&str>, pattern: &str) -
     msg
 }
 
+/// Marker appended when `search_code` hits the `max_results` cap, so the model
+/// knows the result set is capped (not exhaustive) and how to recover the rest.
+/// Mirrors the truncation signal `fs_read` already emits in `read.rs`.
+fn search_truncation_marker(max_results: usize) -> String {
+    format!(
+        "\n... [truncated at {max_results} matches (max_results cap); more matches may exist — refine the pattern, narrow with path/file_pattern, or raise max_results.]"
+    )
+}
+
 /// Search for patterns in code.
 ///
 /// Supports a `context_lines` parameter (0-10) that, when > 0, includes
@@ -186,9 +195,17 @@ pub fn search_code(
         );
     }
 
-    let output = results.join("\n");
-    Ok(ToolResult::success("search_code", output)
-        .with_metadata("match_count", results.len().to_string()))
+    let truncated = results.len() >= max_results;
+    let mut output = results.join("\n");
+    if truncated {
+        output.push_str(&search_truncation_marker(max_results));
+    }
+    let mut result = ToolResult::success("search_code", output)
+        .with_metadata("match_count", results.len().to_string());
+    if truncated {
+        result = result.with_metadata("truncated", "true");
+    }
+    Ok(result)
 }
 
 /// Heuristic check for text files based on extension.

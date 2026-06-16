@@ -231,3 +231,49 @@ fn test_is_text_file_known_extensions() {
     assert!(!is_text_file(Path::new("photo.jpg")));
     assert!(!is_text_file(Path::new("binary.exe")));
 }
+
+// Repro for the silent-truncation bug: when results hit `max_results`, the
+// caller is given no signal that matches were dropped, so a capped result is
+// treated as exhaustive (false-negatives). A capped search MUST flag itself.
+#[test]
+fn test_search_code_signals_truncation_when_results_capped() {
+    let (sandbox, dir) = create_test_sandbox();
+
+    // 20 matching lines, cap at 5 -> 15 matches silently dropped.
+    let content = (0..20)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.path().join("many.txt"), content).unwrap();
+
+    let result = search_code(&sandbox, "line", None, None, 5, 0).unwrap();
+    assert!(result.ok);
+    // The cap is enforced (existing behavior)...
+    assert_eq!(result.metadata.get("match_count").unwrap(), "5");
+    // ...but the caller MUST be told results were dropped.
+    assert_eq!(
+        result.metadata.get("truncated").map(String::as_str),
+        Some("true"),
+        "capped search must set truncated=\"true\" metadata"
+    );
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        output.to_lowercase().contains("truncat"),
+        "capped search output must include a truncation marker; got:\n{output}"
+    );
+}
+
+// Guard against a spurious marker: a search that does NOT hit the cap must
+// not claim truncation.
+#[test]
+fn test_search_code_no_truncation_signal_when_under_cap() {
+    let (sandbox, dir) = create_test_sandbox();
+    fs::write(dir.path().join("few.txt"), "line0\nline1\nline2").unwrap();
+
+    let result = search_code(&sandbox, "line", None, None, 100, 0).unwrap();
+    assert!(result.ok);
+    assert_eq!(result.metadata.get("match_count").unwrap(), "3");
+    assert_eq!(result.metadata.get("truncated"), None);
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(!output.to_lowercase().contains("truncat"));
+}
