@@ -205,9 +205,10 @@ fn debug_assert_tool_pairing(messages: &[Message]) {
                 continue;
             };
             let paired_with_previous = i > 0
-                && messages[i - 1].content.iter().any(
-                    |b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id),
-                );
+                && messages[i - 1]
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id));
             if !paired_with_previous {
                 warn!(
                     message_index = i,
@@ -475,9 +476,10 @@ mod tests {
                     return true;
                 };
                 i > 0
-                    && messages[i - 1].content.iter().any(
-                        |b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id),
-                    )
+                    && messages[i - 1]
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == tool_use_id))
             })
         })
     }

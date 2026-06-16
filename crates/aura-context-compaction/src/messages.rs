@@ -1267,8 +1267,14 @@ mod tests {
         compact_older_messages(&mut messages, &config);
 
         // compact_end = 5 - 2 = 3: messages[0..3] lose images.
-        assert!(!has_image(&messages[0]), "first message image must be stubbed");
-        assert!(!has_image(&messages[2]), "middle message image must be stubbed");
+        assert!(
+            !has_image(&messages[0]),
+            "first message image must be stubbed"
+        );
+        assert!(
+            !has_image(&messages[2]),
+            "middle message image must be stubbed"
+        );
         assert!(
             has_image(&messages[4]),
             "image in the preserved recent tail must survive"

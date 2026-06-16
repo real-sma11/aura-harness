@@ -98,8 +98,8 @@ impl TriggerRegistrar {
     /// registrar (debug-logged) unless the swarm gateway URL, internal
     /// token, and agent id are all present.
     pub fn from_env(store: Arc<ProcessStore>) -> Self {
-        let base_url = env_non_empty("AURA_SWARM_INTERNAL_URL")
-            .or_else(|| env_non_empty("CONTROL_PLANE_URL"));
+        let base_url =
+            env_non_empty("AURA_SWARM_INTERNAL_URL").or_else(|| env_non_empty("CONTROL_PLANE_URL"));
         let token = env_non_empty("AURA_SWARM_INTERNAL_TOKEN");
         let agent_id = env_non_empty("AGENT_ID")
             .or_else(|| env_non_empty("AURA_MACHINE_ID"))
@@ -185,7 +185,10 @@ impl TriggerRegistrar {
 
             match result {
                 Ok(resp) if resp.status().is_success() => {
-                    tracing::debug!(count = metas.len(), "registered process triggers with swarm gateway");
+                    tracing::debug!(
+                        count = metas.len(),
+                        "registered process triggers with swarm gateway"
+                    );
                     return SyncOutcome::Pushed;
                 }
                 Ok(resp) => {

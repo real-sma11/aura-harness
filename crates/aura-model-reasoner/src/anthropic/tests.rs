@@ -2273,9 +2273,10 @@ fn positional_pairing_holds(api_messages: &[ApiMessage]) -> bool {
                 return true;
             };
             i > 0
-                && api_messages[i - 1].content.iter().any(
-                    |b| matches!(b, ApiContent::ToolUse { id, .. } if id == tool_use_id),
-                )
+                && api_messages[i - 1]
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ApiContent::ToolUse { id, .. } if id == tool_use_id))
         })
     })
 }
@@ -2331,9 +2332,16 @@ fn guard_drops_non_adjacent_tool_result_but_keeps_valid_one() {
     drop_misplaced_tool_results(&mut api_messages);
 
     assert!(positional_pairing_holds(&api_messages));
-    assert_eq!(count_tool_results_with_id(&api_messages, "toolu_A").len(), 1);
+    assert_eq!(
+        count_tool_results_with_id(&api_messages, "toolu_A").len(),
+        1
+    );
     let b_survivors = count_tool_results_with_id(&api_messages, "toolu_B");
-    assert_eq!(b_survivors.len(), 1, "only the adjacent toolu_B result survives");
+    assert_eq!(
+        b_survivors.len(),
+        1,
+        "only the adjacent toolu_B result survives"
+    );
     assert_eq!(b_survivors[0].0, "valid too");
 }
 
@@ -2346,7 +2354,11 @@ fn guard_noop_on_valid_transcript() {
         },
         ApiMessage {
             role: "assistant".to_string(),
-            content: vec![text_block("on it"), tool_use("toolu_1"), tool_use("toolu_2")],
+            content: vec![
+                text_block("on it"),
+                tool_use("toolu_1"),
+                tool_use("toolu_2"),
+            ],
         },
         ApiMessage {
             role: "user".to_string(),

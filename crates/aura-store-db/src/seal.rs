@@ -190,9 +190,7 @@ mod tests {
         assert_eq!(sealed[8], SEAL_VERSION);
         assert!(SealCipher::is_sealed(&sealed));
         // Ciphertext must not contain the plaintext anywhere.
-        assert!(!sealed
-            .windows(plain.len())
-            .any(|w| w == plain.as_slice()));
+        assert!(!sealed.windows(plain.len()).any(|w| w == plain.as_slice()));
     }
 
     #[test]
@@ -200,7 +198,10 @@ mod tests {
         let cipher = test_cipher();
         let a = cipher.seal(b"same plaintext").unwrap();
         let b = cipher.seal(b"same plaintext").unwrap();
-        assert_ne!(a, b, "two seals of the same plaintext must differ (random nonce)");
+        assert_ne!(
+            a, b,
+            "two seals of the same plaintext must differ (random nonce)"
+        );
     }
 
     #[test]
@@ -256,6 +257,9 @@ mod tests {
     fn debug_does_not_leak_key() {
         let rendered = format!("{:?}", test_cipher());
         assert!(rendered.contains("aes-256-gcm"));
-        assert!(!rendered.contains('7'), "debug output must not include key bytes: {rendered}");
+        assert!(
+            !rendered.contains('7'),
+            "debug output must not include key bytes: {rendered}"
+        );
     }
 }

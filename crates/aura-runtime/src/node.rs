@@ -250,9 +250,9 @@ impl Node {
         // exportable (process_id, cron, enabled, next_run_at) set to
         // the swarm gateway after process mutations. Env-configured;
         // silently inert for local agents.
-        let trigger_registrar = Arc::new(
-            crate::trigger_registrar::TriggerRegistrar::from_env(process_store.clone()),
-        );
+        let trigger_registrar = Arc::new(crate::trigger_registrar::TriggerRegistrar::from_env(
+            process_store.clone(),
+        ));
 
         let state = RouterState::new(crate::gateway::RouterStateConfig {
             store,

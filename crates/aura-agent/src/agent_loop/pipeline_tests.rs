@@ -361,7 +361,8 @@ async fn leaked_tool_markup_triggers_one_retry() {
 /// the recovery re-sample — the turn ends after one iteration.
 #[tokio::test]
 async fn clean_end_turn_does_not_retry() {
-    let provider = MockProvider::new().with_response(MockResponse::text("all done, no tools needed"));
+    let provider =
+        MockProvider::new().with_response(MockResponse::text("all done, no tools needed"));
 
     let executor = SuccessExecutor;
     let agent = AgentLoop::new(default_config());

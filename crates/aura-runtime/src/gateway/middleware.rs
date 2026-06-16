@@ -53,9 +53,8 @@ use super::auth_mw;
 use super::handlers::files::{list_files_handler, read_file_handler, resolve_workspace_handler};
 use super::handlers::memory;
 use super::handlers::processes::{
-    create_process_handler, delete_process_handler, get_process_handler,
-    list_process_runs_handler, list_processes_handler, trigger_process_handler,
-    update_process_handler,
+    create_process_handler, delete_process_handler, get_process_handler, list_process_runs_handler,
+    list_processes_handler, trigger_process_handler, update_process_handler,
 };
 use super::handlers::run::{
     run_list_handler, run_pause_handler, run_start_handler, run_status_handler, run_stop_handler,

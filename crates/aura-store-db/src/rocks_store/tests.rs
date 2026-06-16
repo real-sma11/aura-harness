@@ -806,14 +806,21 @@ fn sealed_store_record_roundtrip_and_ciphertext_on_disk() {
     let retrieved = store.get_record_entry(agent_id, 1).unwrap();
     assert_eq!(retrieved.seq, 1);
     assert_eq!(store.scan_record(agent_id, 1, 10).unwrap().len(), 1);
-    assert_eq!(store.scan_record_descending(agent_id, 1, 10).unwrap().len(), 1);
+    assert_eq!(
+        store.scan_record_descending(agent_id, 1, 10).unwrap().len(),
+        1
+    );
 
     // On disk the value is a sealed envelope, not JSON.
     let raw = raw_record_bytes(&store, agent_id, 1);
-    assert!(SealCipher::is_sealed(&raw), "on-disk value must carry the seal magic");
+    assert!(
+        SealCipher::is_sealed(&raw),
+        "on-disk value must carry the seal magic"
+    );
     assert!(serde_json::from_slice::<RecordEntry>(&raw).is_err());
     assert!(
-        !raw.windows(b"test payload".len()).any(|w| w == b"test payload"),
+        !raw.windows(b"test payload".len())
+            .any(|w| w == b"test payload"),
         "plaintext payload must not appear in the sealed on-disk value"
     );
 }
@@ -826,7 +833,7 @@ fn sealed_store_inbox_roundtrip() {
 
     store.enqueue_tx(&tx).unwrap();
     let (token, dequeued) = store.dequeue_tx(agent_id).unwrap().unwrap();
-    assert_eq!(dequeued.tx_id(), tx.tx_id());
+    assert_eq!(dequeued.hash, tx.hash);
 
     let entry = RecordEntry::builder(1, tx).build();
     store

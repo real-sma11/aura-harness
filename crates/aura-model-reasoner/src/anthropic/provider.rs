@@ -3813,8 +3813,15 @@ mod emergency_body_cap_tests {
         let (capped, dropped, mode) = fit_body_under_cap(&body, cap);
 
         assert_eq!(mode, BodyFitMode::StubbedOlderImages, "got {mode:?}");
-        assert_eq!(dropped, 0, "no history may be dropped when stubbing suffices");
-        assert!(capped.len() <= cap, "body ({}) must fit cap ({cap})", capped.len());
+        assert_eq!(
+            dropped, 0,
+            "no history may be dropped when stubbing suffices"
+        );
+        assert!(
+            capped.len() <= cap,
+            "body ({}) must fit cap ({cap})",
+            capped.len()
+        );
 
         let parsed: serde_json::Value = serde_json::from_slice(&capped).unwrap();
         let msgs = parsed["messages"].as_array().unwrap();
@@ -3822,18 +3829,24 @@ mod emergency_body_cap_tests {
 
         let first_blocks = msgs[0]["content"].as_array().unwrap();
         assert!(
-            first_blocks.iter().all(|b| b["type"].as_str() != Some("image")),
+            first_blocks
+                .iter()
+                .all(|b| b["type"].as_str() != Some("image")),
             "older image must be stubbed out"
         );
         assert!(
-            first_blocks.iter().any(|b| b["type"].as_str() == Some("text")
-                && b["text"].as_str().unwrap().contains("make the homepage")),
+            first_blocks
+                .iter()
+                .any(|b| b["type"].as_str() == Some("text")
+                    && b["text"].as_str().unwrap().contains("make the homepage")),
             "original text of the first turn must survive"
         );
 
         let last_blocks = msgs[2]["content"].as_array().unwrap();
         assert!(
-            last_blocks.iter().any(|b| b["type"].as_str() == Some("image")),
+            last_blocks
+                .iter()
+                .any(|b| b["type"].as_str() == Some("image")),
             "the current turn's image must be preserved"
         );
     }
@@ -3903,8 +3916,7 @@ mod emergency_body_cap_tests {
                 let paired = i > 0
                     && msgs[i - 1]["content"].as_array().is_some_and(|prev| {
                         prev.iter().any(|b| {
-                            b["type"].as_str() == Some("tool_use")
-                                && b["id"].as_str() == Some(id)
+                            b["type"].as_str() == Some("tool_use") && b["id"].as_str() == Some(id)
                         })
                     });
                 assert!(

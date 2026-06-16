@@ -421,8 +421,10 @@ mod tests {
     }
 
     fn ctx_with_caller_model(model: Option<&str>) -> ToolContext {
-        let mut ctx =
-            ToolContext::new(crate::sandbox::Sandbox::new(&std::env::temp_dir()).unwrap(), crate::ToolConfig::default());
+        let mut ctx = ToolContext::new(
+            crate::sandbox::Sandbox::new(&std::env::temp_dir()).unwrap(),
+            crate::ToolConfig::default(),
+        );
         ctx.caller_model_id = model.map(String::from);
         ctx
     }

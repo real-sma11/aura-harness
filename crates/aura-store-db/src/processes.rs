@@ -892,7 +892,9 @@ mod tests {
             .1;
         assert!(SealCipher::is_sealed(&raw_run));
         let needle = b"secret-failure-detail";
-        assert!(!raw_run.windows(needle.len()).any(|w| w == needle.as_slice()));
+        assert!(!raw_run
+            .windows(needle.len())
+            .any(|w| w == needle.as_slice()));
     }
 
     #[test]
@@ -950,8 +952,7 @@ mod tests {
         // Newest-first listing: the most recent run id comes first and
         // the oldest 7 were pruned.
         assert_eq!(runs[0].run_id, *run_ids.last().unwrap());
-        let kept: std::collections::HashSet<_> =
-            runs.iter().map(|r| r.run_id.clone()).collect();
+        let kept: std::collections::HashSet<_> = runs.iter().map(|r| r.run_id.clone()).collect();
         for pruned in &run_ids[..7] {
             assert!(!kept.contains(pruned), "oldest runs must be pruned");
         }
@@ -1028,14 +1029,11 @@ mod tests {
     fn sealed_wrong_key_fails() {
         let dir = tempfile::tempdir().unwrap();
         let db = test_db(dir.path());
-        let store = ProcessStore::with_cipher(
-            Arc::clone(&db),
-            Some(Arc::new(SealCipher::new(&[1u8; 32]))),
-        );
+        let store =
+            ProcessStore::with_cipher(Arc::clone(&db), Some(Arc::new(SealCipher::new(&[1u8; 32]))));
         let created = store.create(new_process("locked")).unwrap();
 
-        let other =
-            ProcessStore::with_cipher(db, Some(Arc::new(SealCipher::new(&[2u8; 32]))));
+        let other = ProcessStore::with_cipher(db, Some(Arc::new(SealCipher::new(&[2u8; 32]))));
         assert!(other.get(&created.id).is_err());
     }
 }

@@ -654,9 +654,15 @@ mod tests {
         let fact = make_fact(agent, "secret-key", "secret-value");
 
         store.put_fact(&fact).unwrap();
-        assert_eq!(store.get_fact(agent, fact.fact_id).unwrap().key, "secret-key");
+        assert_eq!(
+            store.get_fact(agent, fact.fact_id).unwrap().key,
+            "secret-key"
+        );
         assert_eq!(store.list_facts(agent).unwrap().len(), 1);
-        assert!(store.get_fact_by_key(agent, "secret-key").unwrap().is_some());
+        assert!(store
+            .get_fact_by_key(agent, "secret-key")
+            .unwrap()
+            .is_some());
 
         // Raw on-disk bytes must be a sealed envelope, not JSON.
         let cf = store.db().cf_handle(cf::MEMORY_FACTS).unwrap();
@@ -680,7 +686,9 @@ mod tests {
         let agent = AgentId::generate();
         let now = Utc::now();
 
-        store.put_event(&make_event(agent, "did a thing", now)).unwrap();
+        store
+            .put_event(&make_event(agent, "did a thing", now))
+            .unwrap();
         assert_eq!(store.list_events(agent, 10).unwrap().len(), 1);
         assert_eq!(
             store
@@ -692,7 +700,10 @@ mod tests {
 
         let proc = make_procedure(agent, "deploy");
         store.put_procedure(&proc).unwrap();
-        assert_eq!(store.get_procedure(agent, proc.procedure_id).unwrap().name, "deploy");
+        assert_eq!(
+            store.get_procedure(agent, proc.procedure_id).unwrap().name,
+            "deploy"
+        );
         assert_eq!(store.list_procedures(agent).unwrap().len(), 1);
     }
 

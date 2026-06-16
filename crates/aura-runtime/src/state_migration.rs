@@ -214,9 +214,8 @@ pub fn migrate_state_if_needed(
     crate::sealing::write_sealed_marker(data_dir, key_id)?;
 
     // (5) Drop the plaintext only after the live sealed DB opens cleanly.
-    verify_sealed_open(db_path, cipher).context(
-        "swapped-in sealed database failed to open; plaintext backup preserved",
-    )?;
+    verify_sealed_open(db_path, cipher)
+        .context("swapped-in sealed database failed to open; plaintext backup preserved")?;
     std::fs::remove_dir_all(&backup)
         .with_context(|| format!("removing plaintext backup {}", backup.display()))?;
 
@@ -273,9 +272,11 @@ mod tests {
         // Node::run pre-creates the (empty) db dir before sealing runs.
         std::fs::create_dir_all(&db_path).unwrap();
 
-        let outcome =
-            migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher()).unwrap();
-        assert!(matches!(outcome, MigrationOutcome::NotNeeded(_)), "{outcome:?}");
+        let outcome = migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher()).unwrap();
+        assert!(
+            matches!(outcome, MigrationOutcome::NotNeeded(_)),
+            "{outcome:?}"
+        );
         assert!(!migrating_dir(&db_path).exists());
         assert!(!backup_dir(&db_path).exists());
     }
@@ -287,8 +288,7 @@ mod tests {
         build_plaintext_db(&db_path);
 
         let cipher = cipher();
-        let outcome =
-            migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
+        let outcome = migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
         let MigrationOutcome::Migrated(stats) = outcome else {
             panic!("expected migration, got {outcome:?}");
         };
@@ -297,7 +297,10 @@ mod tests {
 
         // Temp and backup are gone; the marker is written; data reads back.
         assert!(!migrating_dir(&db_path).exists());
-        assert!(!backup_dir(&db_path).exists(), "plaintext backup must be deleted");
+        assert!(
+            !backup_dir(&db_path).exists(),
+            "plaintext backup must be deleted"
+        );
         assert!(dir
             .path()
             .join(crate::sealing::SEALED_MARKER_FILENAME)
@@ -336,9 +339,11 @@ mod tests {
         std::fs::write(temp.join("000001.sst"), b"definitely not a real sst").unwrap();
 
         let cipher = cipher();
-        let outcome =
-            migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
-        assert!(matches!(outcome, MigrationOutcome::Migrated(_)), "{outcome:?}");
+        let outcome = migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
+        assert!(
+            matches!(outcome, MigrationOutcome::Migrated(_)),
+            "{outcome:?}"
+        );
         assert!(!temp.exists());
         assert_migrated_db_readable(&db_path, &cipher);
     }
@@ -355,9 +360,11 @@ mod tests {
         // marker yet.
         std::fs::rename(&db_path, backup_dir(&db_path)).unwrap();
 
-        let outcome =
-            migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
-        assert!(matches!(outcome, MigrationOutcome::Migrated(_)), "{outcome:?}");
+        let outcome = migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
+        assert!(
+            matches!(outcome, MigrationOutcome::Migrated(_)),
+            "{outcome:?}"
+        );
         assert!(!backup_dir(&db_path).exists());
         assert_migrated_db_readable(&db_path, &cipher);
     }
@@ -376,8 +383,7 @@ mod tests {
         std::fs::create_dir_all(&backup).unwrap();
         std::fs::write(backup.join("CURRENT"), b"stale plaintext leftover").unwrap();
 
-        let outcome =
-            migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
+        let outcome = migrate_state_if_needed(dir.path(), &db_path, KEY_ID, &cipher).unwrap();
         assert!(matches!(outcome, MigrationOutcome::NotNeeded(_)));
         assert!(!backup.exists(), "deferred backup cleanup must run");
         assert_migrated_db_readable(&db_path, &cipher);

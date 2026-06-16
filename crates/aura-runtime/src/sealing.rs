@@ -113,8 +113,7 @@ impl SealingConfig {
     /// swarm control-plane env ([`ENV_CONTROL_PLANE_URL`] /
     /// [`ENV_AGENT_ID`]) is present (swarm agents never run plaintext).
     pub fn from_env() -> anyhow::Result<Self> {
-        let env_present =
-            |name: &str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
+        let env_present = |name: &str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
         Self::resolve(
             std::env::var(ENV_STATE_ENCRYPTION).ok(),
             std::env::var(ENV_STATE_KEY_ID).ok(),
@@ -181,7 +180,9 @@ impl SealingConfig {
 
         Ok(Self {
             enabled,
-            key_id: key_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            key_id: key_id
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             key_file: key_file
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -303,7 +304,10 @@ impl DekProvider for CdhDekProvider {
         if !status.is_success() {
             // Do not include the body verbatim at error level paths that
             // could ever carry key material; status is enough to diagnose.
-            bail!("CDH resource request to {} returned {status}", self.resource_url);
+            bail!(
+                "CDH resource request to {} returned {status}",
+                self.resource_url
+            );
         }
 
         let body = Zeroizing::new(
@@ -651,8 +655,7 @@ mod tests {
     fn resolve_sealed_enables_and_is_case_insensitive() {
         for v in ["sealed", "SEALED", " Sealed "] {
             let cfg =
-                SealingConfig::resolve(Some(v.to_string()), None, None, None, None, false)
-                    .unwrap();
+                SealingConfig::resolve(Some(v.to_string()), None, None, None, None, false).unwrap();
             assert!(cfg.enabled, "`{v}` must enable sealed mode");
         }
     }
@@ -661,8 +664,7 @@ mod tests {
     fn resolve_plaintext_spellings_disable_without_swarm_env() {
         for v in ["plaintext", "none", ""] {
             let cfg =
-                SealingConfig::resolve(Some(v.to_string()), None, None, None, None, false)
-                    .unwrap();
+                SealingConfig::resolve(Some(v.to_string()), None, None, None, None, false).unwrap();
             assert!(!cfg.enabled);
         }
     }
@@ -671,9 +673,8 @@ mod tests {
     /// plaintext when the operator asked for encryption.
     #[test]
     fn resolve_rejects_unknown_mode() {
-        let err =
-            SealingConfig::resolve(Some("seald".to_string()), None, None, None, None, false)
-                .unwrap_err();
+        let err = SealingConfig::resolve(Some("seald".to_string()), None, None, None, None, false)
+            .unwrap_err();
         assert!(err.to_string().contains("seald"));
     }
 
@@ -719,15 +720,8 @@ mod tests {
     #[test]
     fn resolve_swarm_env_refuses_explicit_plaintext() {
         for v in ["plaintext", "none", "PLAINTEXT"] {
-            let err = SealingConfig::resolve(
-                Some(v.to_string()),
-                None,
-                None,
-                None,
-                None,
-                true,
-            )
-            .unwrap_err();
+            let err = SealingConfig::resolve(Some(v.to_string()), None, None, None, None, true)
+                .unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("never run with plaintext"),
@@ -957,7 +951,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
         assert_eq!(marker.version, aura_store_db::SEAL_VERSION);
         assert_eq!(marker.cipher, "aes-256-gcm");
-        assert_eq!(marker.key_id.as_deref(), Some("swarm/agents/abc123/state-key"));
+        assert_eq!(
+            marker.key_id.as_deref(),
+            Some("swarm/agents/abc123/state-key")
+        );
     }
 
     // ----------------------------------------------------------------

@@ -94,7 +94,11 @@ pub struct SealCopyStats {
 ///
 /// Returns an error if either database cannot be opened or a read/write
 /// fails. On error the caller discards `dst` and retries from scratch.
-pub fn seal_db_copy(src: &Path, dst: &Path, cipher: &SealCipher) -> Result<SealCopyStats, StoreError> {
+pub fn seal_db_copy(
+    src: &Path,
+    dst: &Path,
+    cipher: &SealCipher,
+) -> Result<SealCopyStats, StoreError> {
     // Enumerate the CFs the source actually has (an older database may
     // predate newer CFs) and open it read-only.
     let src_cf_names = Db::list_cf(&Options::default(), src)?;
@@ -139,9 +143,9 @@ pub fn seal_db_copy(src: &Path, dst: &Path, cipher: &SealCipher) -> Result<SealC
             let (key, value) = item?;
 
             if seal_values && !SealCipher::is_sealed(&value) {
-                let sealed = cipher
-                    .seal(&value)
-                    .map_err(|e| StoreError::Serialization(format!("sealing value during migration: {e}")))?;
+                let sealed = cipher.seal(&value).map_err(|e| {
+                    StoreError::Serialization(format!("sealing value during migration: {e}"))
+                })?;
                 batch.put_cf(&dst_cf, key, sealed);
                 stats.values_sealed += 1;
             } else {
@@ -187,12 +191,18 @@ mod tests {
         let store = RocksStore::open(path, false).unwrap();
         let db = store.db_handle();
         let record_cf = db.cf_handle(cf::RECORD).unwrap();
-        db.put_cf(&record_cf, b"agent/0001", br#"{"kind":"record","data":"secret payload"}"#)
-            .unwrap();
+        db.put_cf(
+            &record_cf,
+            b"agent/0001",
+            br#"{"kind":"record","data":"secret payload"}"#,
+        )
+        .unwrap();
         let secrets_cf = db.cf_handle(cf::SECRETS).unwrap();
-        db.put_cf(&secrets_cf, b"api-key", br#"{"value":"hunter2"}"#).unwrap();
+        db.put_cf(&secrets_cf, b"api-key", br#"{"value":"hunter2"}"#)
+            .unwrap();
         let meta_cf = db.cf_handle(cf::AGENT_META).unwrap();
-        db.put_cf(&meta_cf, b"head_seq", 7u64.to_be_bytes()).unwrap();
+        db.put_cf(&meta_cf, b"head_seq", 7u64.to_be_bytes())
+            .unwrap();
     }
 
     #[test]
@@ -213,7 +223,10 @@ mod tests {
 
         let record_cf = db.cf_handle(cf::RECORD).unwrap();
         let raw = db.get_cf(&record_cf, b"agent/0001").unwrap().unwrap();
-        assert!(SealCipher::is_sealed(&raw), "record value must be ciphertext");
+        assert!(
+            SealCipher::is_sealed(&raw),
+            "record value must be ciphertext"
+        );
         assert_eq!(
             cipher.open(&raw).unwrap(),
             br#"{"kind":"record","data":"secret payload"}"#

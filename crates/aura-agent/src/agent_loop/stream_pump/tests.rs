@@ -644,7 +644,8 @@ async fn pump_streams_thinking_incrementally_not_just_at_block_close() {
         })
         .collect();
     assert_eq!(
-        text, vec!["Done."],
+        text,
+        vec!["Done."],
         "assistant text must stream once, not be duplicated at block close: {events:?}"
     );
 }

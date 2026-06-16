@@ -58,7 +58,8 @@ pub(super) const MAX_NO_OP_TURN_NUDGES: u32 = 1;
 /// user-visible output. Kept terse and non-prescriptive: it nudges
 /// the model to either act or respond without assuming which the
 /// user wanted.
-const NO_OP_TURN_NUDGE: &str = "Your previous turn ended without sending a response to the user or \
+const NO_OP_TURN_NUDGE: &str =
+    "Your previous turn ended without sending a response to the user or \
 making any changes. If the request needs action, continue and complete it now; otherwise reply to \
 the user directly.";
 
@@ -76,7 +77,8 @@ pub(super) const MAX_LEAKED_MARKUP_NUDGES: u32 = 1;
 /// native `tool_use` block. The harness scrubbed the markup before it
 /// entered history, so no tool executed — this tells the model to
 /// re-issue the call through the real tool-calling mechanism.
-const LEAKED_TOOL_MARKUP_NUDGE: &str = "Your previous message wrote tool-call syntax as plain text, \
+const LEAKED_TOOL_MARKUP_NUDGE: &str =
+    "Your previous message wrote tool-call syntax as plain text, \
 so no tool actually ran and the work is unfinished. Re-issue the tool call using the native \
 tool-calling mechanism — do not write tool invocations (such as <function_calls>, <invoke>, or \
 [tool_use ...]) as text.";

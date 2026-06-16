@@ -1600,11 +1600,10 @@ async fn test_process_mutation_pushes_trigger_registration() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // The push happens on a background task — await its arrival.
-    let (agent_id, auth, pushed) =
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("registration push must arrive after a mutation")
-            .expect("stub channel closed");
+    let (agent_id, auth, pushed) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("registration push must arrive after a mutation")
+        .expect("stub channel closed");
 
     assert_eq!(agent_id, "feedc0de");
     assert_eq!(auth, "Bearer internal-secret");
@@ -1802,7 +1801,10 @@ async fn test_process_trigger_executes_run_and_records_history() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert_eq!(last_status, "success", "timed out waiting for run completion");
+    assert_eq!(
+        last_status, "success",
+        "timed out waiting for run completion"
+    );
 
     // Definition bookkeeping: last_run_at stamped, next_run_at fresh.
     let req = authed_request()
@@ -1920,7 +1922,10 @@ async fn test_accepts_swarm_internal_token_on_protected_routes() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // The per-node token still authenticates alongside it.
-    let req = authed_request().uri("/api/skills").body(Body::empty()).unwrap();
+    let req = authed_request()
+        .uri("/api/skills")
+        .body(Body::empty())
+        .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 

@@ -71,8 +71,8 @@ mod node;
 pub(crate) mod protocol;
 pub mod sealing;
 pub mod state_migration;
-pub mod trigger_registrar;
 pub(crate) mod tool_permissions;
+pub mod trigger_registrar;
 /// Phase C / Commit 4: legacy `crate::terminal::handle_terminal_ws`
 /// import path inside the gateway points at this re-export so the
 /// terminal-upgrade handler keeps reading naturally even though the

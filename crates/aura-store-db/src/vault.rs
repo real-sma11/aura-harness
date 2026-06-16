@@ -250,8 +250,8 @@ impl SecretsVault {
         {
             Some(bytes) => {
                 let bytes = self.open_value(&bytes)?;
-                let record: SecretRecord = serde_json::from_slice(&bytes)
-                    .map_err(|e| VaultError::Serde(e.to_string()))?;
+                let record: SecretRecord =
+                    serde_json::from_slice(&bytes).map_err(|e| VaultError::Serde(e.to_string()))?;
                 Ok(Some(record))
             }
             None => Ok(None),
@@ -409,10 +409,8 @@ mod tests {
     fn sealed_wrong_key_fails() {
         let dir = tempfile::tempdir().unwrap();
         let db = test_db(dir.path());
-        let vault = SecretsVault::with_cipher(
-            Arc::clone(&db),
-            Some(Arc::new(SealCipher::new(&[1u8; 32]))),
-        );
+        let vault =
+            SecretsVault::with_cipher(Arc::clone(&db), Some(Arc::new(SealCipher::new(&[1u8; 32]))));
         vault.put("k", "v".into(), None).unwrap();
 
         let other = SecretsVault::with_cipher(db, Some(Arc::new(SealCipher::new(&[2u8; 32]))));
