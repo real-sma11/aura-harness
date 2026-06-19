@@ -41,6 +41,7 @@ Source of truth for the tool list:
 | `list_agents`             | http     | GET `/api/agents`                     | |
 | `get_agent`               | http     | GET `/api/agents/{agent_id}`          | |
 | `assign_agent_to_project` | http     | POST `/api/agents/{agent_id}/assignments` | |
+| `list_agents_marketplace` | **implemented** (domain tool) | GET `/api/marketplace/agents` | Browses the cross-org public marketplace (distinct from org-scoped `list_agents`). Filters: `sort` (trending\|latest\|revenue\|reputation), `expertise` (exact slug), `limit` (1..=100), `offset`. Returns a flat projection re-lifted from the server's nested `MarketplaceAgent { agent, … }` wire shape. Read-only; gated on `Capability::ListAgents`. Pair the returned `agent_id` with `assign_agent_to_project` to hire. |
 | `start_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/start` | |
 | `pause_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/pause` | |
 | `stop_dev_loop`           | http     | POST `/api/projects/{project_id}/loop/stop` | |

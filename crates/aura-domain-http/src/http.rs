@@ -642,29 +642,29 @@ impl DomainApi for HttpDomainApi {
         jwt: Option<&str>,
     ) -> anyhow::Result<ListMarketplaceAgentsResponse> {
         let jwt = Self::require_jwt(jwt)?;
-        let mut url = format!("{}/api/marketplace/agents", self.project_base_url());
-        let mut sep = '?';
-        if let Some(sort) = params.sort {
-            use std::fmt::Write;
-            let _ = write!(url, "{sep}sort={sort}");
-            sep = '&';
+        // Build via `Url` so query values (notably the caller-supplied
+        // `expertise` slug, which is not charset-validated upstream) are
+        // percent-encoded rather than concatenated raw.
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/api/marketplace/agents",
+            self.project_base_url()
+        ))?;
+        {
+            let mut q = url.query_pairs_mut();
+            if let Some(sort) = params.sort {
+                q.append_pair("sort", sort);
+            }
+            if let Some(expertise) = params.expertise {
+                q.append_pair("expertise", expertise);
+            }
+            if let Some(limit) = params.limit {
+                q.append_pair("limit", &limit.to_string());
+            }
+            if let Some(offset) = params.offset {
+                q.append_pair("offset", &offset.to_string());
+            }
         }
-        if let Some(expertise) = params.expertise {
-            use std::fmt::Write;
-            let _ = write!(url, "{sep}expertise={expertise}");
-            sep = '&';
-        }
-        if let Some(limit) = params.limit {
-            use std::fmt::Write;
-            let _ = write!(url, "{sep}limit={limit}");
-            sep = '&';
-        }
-        if let Some(offset) = params.offset {
-            use std::fmt::Write;
-            let _ = write!(url, "{sep}offset={offset}");
-            let _ = sep;
-        }
-        self.api_get(&url, jwt).await
+        self.api_get(url.as_str(), jwt).await
     }
 }
 
