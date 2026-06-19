@@ -163,8 +163,11 @@ fn load_single_skill(
     source: SkillSource,
     dir_path: &Path,
 ) -> Result<Skill, SkillError> {
-    let mut file = std::fs::File::open(skill_md)?;
-    let meta = file.metadata()?;
+    let mut file = std::fs::File::open(skill_md)
+        .map_err(|err| SkillError::at_path(skill_md, SkillError::Io(err)))?;
+    let meta = file
+        .metadata()
+        .map_err(|err| SkillError::at_path(skill_md, SkillError::Io(err)))?;
     if meta.len() > MAX_SKILL_MD_BYTES {
         return Err(SkillError::TooLarge {
             path: skill_md.to_path_buf(),
@@ -175,8 +178,10 @@ fn load_single_skill(
     let mut content = String::new();
     (&mut file)
         .take(MAX_SKILL_MD_BYTES)
-        .read_to_string(&mut content)?;
-    let (frontmatter, body) = parse_skill_md(&content)?;
+        .read_to_string(&mut content)
+        .map_err(|err| SkillError::at_path(skill_md, SkillError::Io(err)))?;
+    let (frontmatter, body) =
+        parse_skill_md(&content).map_err(|err| SkillError::at_path(skill_md, err))?;
 
     Ok(Skill {
         frontmatter,
@@ -261,5 +266,31 @@ mod tests {
             }
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn invalid_skill_error_includes_skill_md_path() {
+        let tmp = TempDir::new().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        let broken_dir = skills_dir.join("broken");
+        std::fs::create_dir_all(&broken_dir).unwrap();
+        std::fs::write(
+            broken_dir.join("SKILL.md"),
+            "---\ndescription: Missing name\n---\nInstructions.",
+        )
+        .unwrap();
+
+        let loader = SkillLoader::new(SkillLoaderConfig {
+            workspace_root: Some(tmp.path().to_path_buf()),
+            ..SkillLoaderConfig::default()
+        });
+
+        let results = loader.load_all();
+        assert_eq!(results.len(), 1);
+        let err = results.into_iter().next().unwrap().unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("broken"));
+        assert!(message.contains("SKILL.md"));
+        assert!(message.contains("invalid skill name"));
     }
 }

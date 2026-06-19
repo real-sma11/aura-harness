@@ -274,32 +274,46 @@ impl TaskToolExecutor {
 
         self.emit_text(test_warning::post_task_done_starting_line(&cmd, source));
 
-        let outcome = match self.test_runner.run_tests(project_root, &cmd).await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::warn!(error = %e, cmd, "post-task_done test run failed to execute");
-                self.emit_event(AgentLoopEvent::TestSuiteWarning {
-                    passed: false,
-                    summary: format!("failed to execute `{cmd}`: {e}"),
-                    failed_tests: Vec::new(),
-                });
-                return;
+        let runner = self.test_runner.clone();
+        let project_root = project_root.to_path_buf();
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            // Do not wrap this in an outer timeout. The real command
+            // runner owns process timeout and kill semantics; dropping
+            // the future from here can abandon a child process. This
+            // task is already detached from `task_done`, so completion
+            // stays non-blocking while the runner cleans up safely.
+            let event = match runner.run_tests(&project_root, &cmd).await {
+                Ok(outcome) => {
+                    if let Some(tx) = &event_tx {
+                        let line = if outcome.passed {
+                            test_warning::post_task_done_passed_line(
+                                outcome.duration_ms,
+                                &outcome.summary,
+                            )
+                        } else {
+                            test_warning::post_task_done_failed_line(&outcome.summary)
+                        };
+                        let _ = tx.try_send(AgentLoopEvent::TextDelta(line));
+                    }
+                    AgentLoopEvent::TestSuiteWarning {
+                        passed: outcome.passed,
+                        summary: outcome.summary,
+                        failed_tests: outcome.failed_tests,
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, cmd, "post-task_done test run failed to execute");
+                    AgentLoopEvent::TestSuiteWarning {
+                        passed: false,
+                        summary: format!("failed to execute `{cmd}`: {e}"),
+                        failed_tests: Vec::new(),
+                    }
+                }
+            };
+            if let Some(tx) = event_tx {
+                let _ = tx.try_send(event);
             }
-        };
-
-        if outcome.passed {
-            self.emit_text(test_warning::post_task_done_passed_line(
-                outcome.duration_ms,
-                &outcome.summary,
-            ));
-        } else {
-            self.emit_text(test_warning::post_task_done_failed_line(&outcome.summary));
-        }
-
-        self.emit_event(AgentLoopEvent::TestSuiteWarning {
-            passed: outcome.passed,
-            summary: outcome.summary,
-            failed_tests: outcome.failed_tests,
         });
     }
 

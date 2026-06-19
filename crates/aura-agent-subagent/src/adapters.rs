@@ -169,3 +169,42 @@ pub fn legacy_permissions_to_modes(legacy: &AgentPermissions) -> Permissions {
         capabilities: legacy.capabilities.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SubagentRegistry;
+    use aura_core_types::{AgentScope, Capability};
+
+    #[test]
+    fn explore_subagent_retains_parent_invoke_process_for_verification() {
+        let registry = SubagentRegistry::bundled();
+        let kind = registry.get("explore").unwrap();
+        let parent = AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![
+                Capability::SpawnAgent,
+                Capability::ReadAgent,
+                Capability::InvokeProcess,
+            ],
+        };
+
+        let narrowed = narrow_permissions(&parent, kind);
+
+        assert_eq!(narrowed.scope, parent.scope);
+        assert!(
+            narrowed
+                .capabilities
+                .iter()
+                .any(|capability| *capability == Capability::InvokeProcess),
+            "explore subagents need InvokeProcess to run verification commands"
+        );
+        assert!(
+            !narrowed
+                .capabilities
+                .iter()
+                .any(|capability| *capability == Capability::SpawnAgent),
+            "subagents must not inherit spawn unless the kind explicitly allows it"
+        );
+    }
+}

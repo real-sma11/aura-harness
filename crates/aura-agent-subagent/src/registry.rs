@@ -114,7 +114,7 @@ fn general_purpose() -> SubagentKindSpec {
             "delete_file".into(),
             "run_command".into(),
         ],
-        allowed_capabilities: vec![Capability::ReadAgent],
+        allowed_capabilities: vec![Capability::ReadAgent, Capability::InvokeProcess],
         readonly: false,
         default_model: None,
         budget: SubagentBudget {
@@ -129,7 +129,7 @@ fn explore() -> SubagentKindSpec {
     readonly_kind(
         "explore",
         "Read-only codebase exploration subagent.",
-        "Explore the codebase using read/search tools only. Return relevant files, symbols, and conclusions.",
+            "Explore the codebase using read/search tools and safe verification commands only. Return relevant files, symbols, and conclusions.",
     )
 }
 
@@ -153,7 +153,7 @@ fn shell() -> SubagentKindSpec {
             .chain(std::iter::once("run_command"))
             .map(str::to_string)
             .collect(),
-        allowed_capabilities: Vec::new(),
+        allowed_capabilities: vec![Capability::InvokeProcess],
         readonly: false,
         default_model: None,
         budget: SubagentBudget {
@@ -169,8 +169,13 @@ fn readonly_kind(name: &str, description: &str, system_prompt: &str) -> Subagent
         name: name.into(),
         description: description.into(),
         system_prompt: system_prompt.into(),
-        allowed_tools: READ_TOOLS.iter().map(|tool| (*tool).to_string()).collect(),
-        allowed_capabilities: Vec::new(),
+        allowed_tools: READ_TOOLS
+            .iter()
+            .copied()
+            .chain(std::iter::once("run_command"))
+            .map(str::to_string)
+            .collect(),
+        allowed_capabilities: vec![Capability::InvokeProcess],
         readonly: true,
         default_model: None,
         budget: SubagentBudget {
@@ -240,17 +245,41 @@ mod tests {
     }
 
     #[test]
-    fn readonly_kinds_have_no_mutating_tools() {
+    fn readonly_kinds_have_no_file_mutation_tools() {
         let registry = SubagentRegistry::bundled();
         for name in ["explore", "code_reviewer"] {
             let kind = registry.get(name).unwrap();
             assert!(kind.readonly);
-            for denied in ["write_file", "edit_file", "delete_file", "run_command"] {
+            for denied in ["write_file", "edit_file", "delete_file"] {
                 assert!(
                     !kind.allowed_tools.iter().any(|tool| tool == denied),
                     "{name} unexpectedly allows {denied}"
                 );
             }
+            assert!(kind.allowed_tools.iter().any(|tool| tool == "run_command"));
+            assert!(
+                kind.allowed_capabilities
+                    .iter()
+                    .any(|capability| *capability == Capability::InvokeProcess),
+                "{name} must retain InvokeProcess for verification commands"
+            );
+        }
+    }
+
+    #[test]
+    fn run_command_kinds_request_invoke_process_capability() {
+        let registry = SubagentRegistry::bundled();
+        for kind in registry.all() {
+            if !kind.allowed_tools.iter().any(|tool| tool == "run_command") {
+                continue;
+            }
+            assert!(
+                kind.allowed_capabilities
+                    .iter()
+                    .any(|capability| *capability == Capability::InvokeProcess),
+                "{} exposes run_command without InvokeProcess",
+                kind.name
+            );
         }
     }
 }

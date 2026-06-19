@@ -1,5 +1,6 @@
 //! Error types for the skill system.
 
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// All errors that can occur in skill parsing, loading, activation, or registry ops.
@@ -25,6 +26,14 @@ pub enum SkillError {
     #[error("yaml error: {0}")]
     Yaml(#[from] serde_yaml::Error),
 
+    /// Failure while loading a specific SKILL.md file.
+    #[error("failed to load {}: {source}", path.display())]
+    Load {
+        path: PathBuf,
+        #[source]
+        source: Box<SkillError>,
+    },
+
     /// Failure during skill activation (argument substitution, rendering, etc.).
     #[error("activation error: {0}")]
     Activation(String),
@@ -40,13 +49,22 @@ pub enum SkillError {
     /// A `SKILL.md` file exceeded the maximum allowed size (Wave 5 / T4).
     #[error("skill too large: {path} is {actual} bytes, limit {limit} bytes")]
     TooLarge {
-        path: std::path::PathBuf,
+        path: PathBuf,
         actual: u64,
         limit: u64,
     },
 }
 
 impl SkillError {
+    /// Attach a filesystem path to an error raised while reading or parsing a skill file.
+    #[must_use]
+    pub fn at_path(path: &Path, source: Self) -> Self {
+        Self::Load {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }
+    }
+
     /// Returns `true` when this error indicates a missing entity.
     #[must_use]
     pub fn is_not_found(&self) -> bool {

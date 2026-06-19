@@ -85,6 +85,20 @@ impl TaskTestRunner for MockTestRunner {
     }
 }
 
+#[derive(Debug, Default)]
+struct HangingTestRunner;
+
+#[async_trait::async_trait]
+impl TaskTestRunner for HangingTestRunner {
+    async fn run_tests(
+        &self,
+        _project_root: &std::path::Path,
+        _command: &str,
+    ) -> anyhow::Result<TestSuiteOutcome> {
+        std::future::pending::<anyhow::Result<TestSuiteOutcome>>().await
+    }
+}
+
 fn make_executor_with_runner(runner: Arc<dyn TaskTestRunner>) -> TaskToolExecutor {
     TaskToolExecutor {
         inner: Arc::new(NoOpInner),
@@ -660,6 +674,29 @@ async fn seed_with_file_op(executor: &TaskToolExecutor) {
     sr.record_read("src/main.rs");
 }
 
+async fn recv_test_warning(
+    rx: &mut tokio::sync::mpsc::Receiver<AgentLoopEvent>,
+) -> (bool, String, Vec<String>) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(event) = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("expected TestSuiteWarning event before timeout")
+        else {
+            panic!("event channel closed before TestSuiteWarning");
+        };
+        if let AgentLoopEvent::TestSuiteWarning {
+            passed,
+            summary,
+            failed_tests,
+        } = event
+        {
+            return (passed, summary, failed_tests);
+        }
+    }
+}
+
 #[tokio::test]
 async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
     // Codex parity replacement for the deleted retry/exhaustion suite:
@@ -684,33 +721,37 @@ async fn task_done_emits_warning_when_tests_fail_but_does_not_retry() {
         results[0].stop_loop,
         "successful task_done must stop the loop"
     );
+    let (passed, summary, failed_tests) = recv_test_warning(&mut rx).await;
     assert_eq!(
         *runner.calls.lock().await,
         1,
         "the suite must run exactly once — no retry budget after Codex parity"
     );
-
-    let mut warning_events = 0;
-    while let Ok(event) = rx.try_recv() {
-        if let AgentLoopEvent::TestSuiteWarning {
-            passed,
-            summary,
-            failed_tests,
-        } = event
-        {
-            warning_events += 1;
-            assert!(!passed, "warning must reflect the failing run");
-            assert!(
-                summary.contains("9 passed"),
-                "warning summary must carry the runner outcome: {summary}"
-            );
-            assert_eq!(failed_tests, vec!["my_crate::tests::it_works".to_string()]);
-        }
-    }
-    assert_eq!(
-        warning_events, 1,
-        "exactly one TestSuiteWarning must be emitted for a single failed run"
+    assert!(!passed, "warning must reflect the failing run");
+    assert!(
+        summary.contains("9 passed"),
+        "warning summary must carry the runner outcome: {summary}"
     );
+    assert_eq!(failed_tests, vec!["my_crate::tests::it_works".to_string()]);
+}
+
+#[tokio::test]
+async fn task_done_does_not_hang_when_best_effort_test_run_stalls() {
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentLoopEvent>(8);
+    let mut executor = make_executor_with_runner(Arc::new(HangingTestRunner));
+    executor.event_tx = Some(tx);
+    seed_with_file_op(&executor).await;
+
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        executor.execute(&[task_done_call("done")]),
+    )
+    .await
+    .expect("advisory post-task_done tests must not hang completion");
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    assert!(results[0].stop_loop);
 }
 
 #[test]
