@@ -40,6 +40,7 @@ Source of truth for the tool list:
 | `get_project_stats`       | http     | GET `/api/projects/{project_id}/stats` | |
 | `list_agents`             | http     | GET `/api/agents`                     | |
 | `get_agent`               | http     | GET `/api/agents/{agent_id}`          | |
+| `list_agents_marketplace` | **implemented** (domain tool) | GET `/api/marketplace/agents` | Browses the cross-org public marketplace (distinct from org-scoped `list_agents`). Filters: `sort` (trending\|latest\|revenue\|reputation), `expertise` (exact slug), `limit` (1..=100), `offset`. Returns a flat projection re-lifted from the server's nested `MarketplaceAgent { agent, … }` wire shape. Read-only; gated on `Capability::ListAgents`. Pair the returned `agent_id` with `assign_agent_to_project` to hire. |
 | `assign_agent_to_project` | **implemented** (domain tool) | POST `/api/projects/{project_id}/agents` | Hires an existing template `agent_id` into the current project. Pre-flights against `list_project_agents` for duplicate detection; returns `error_code="already_assigned"` with the existing `agent_instance_id` when the template is already present. Gated on `Capability::SpawnAgent` (kernel policy + catalog visibility). Endpoint is the same one the marketplace **Hire** modal calls. |
 | `start_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/start` | |
 | `pause_dev_loop`          | http     | POST `/api/projects/{project_id}/loop/pause` | |
