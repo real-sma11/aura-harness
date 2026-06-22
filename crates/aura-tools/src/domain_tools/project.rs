@@ -36,11 +36,17 @@ pub async fn update_project(api: &dyn DomainApi, project_id: &str, input: &Value
 
 /// Assign an existing template agent (by `agent_id`) to a project.
 ///
-/// Pre-flights with `list_project_agents` to detect duplicates and returns a
-/// structured `already_assigned` envelope (carrying the existing
-/// `agent_instance_id`) so the LLM can recover by re-using the existing
-/// instance instead of re-hiring. On success the new `AgentInstanceDescriptor`
-/// is returned under the `instance` key.
+/// Pre-flights with `list_project_agents` to detect duplicates:
+/// * If the agent is already attached but its instance was **archived** (a
+///   soft, server-persisted hide), it is reactivated (`Archived -> Idle`) and
+///   returned under `instance` with `reactivated: true` — re-hiring an archived
+///   agent brings it back rather than erroring.
+/// * If it is already attached and active, returns a structured
+///   `already_assigned` envelope (carrying the existing `agent_instance_id`) so
+///   the LLM can re-use the existing instance instead of re-hiring.
+///
+/// On a fresh assign the new `AgentInstanceDescriptor` is returned under the
+/// `instance` key.
 ///
 /// `project_id` is resolved by the executor (session-level fallback when the
 /// LLM omits it from the call args) — same shape as every other project-scoped
@@ -64,6 +70,29 @@ pub async fn assign_agent_to_project(
     match api.list_project_agents(project_id, jwt.as_deref()).await {
         Ok(existing) => {
             if let Some(dup) = existing.iter().find(|inst| inst.agent_id == agent_id) {
+                // Already attached. If that instance was archived (a soft,
+                // server-persisted hide), reactivate it (Archived -> Idle)
+                // instead of dead-ending — re-hiring an archived agent should
+                // bring it back rather than error.
+                if dup.status.eq_ignore_ascii_case("archived") {
+                    return match api
+                        .update_project_agent_status(&dup.id, project_id, "idle", jwt.as_deref())
+                        .await
+                    {
+                        Ok(instance) => {
+                            domain_ok(json!({ "instance": instance, "reactivated": true }))
+                        }
+                        Err(e) => domain_err_with_code(
+                            "reactivate_failed",
+                            e,
+                            Some(json!({
+                                "agent_instance_id": dup.id,
+                                "agent_id": dup.agent_id,
+                                "project_id": dup.project_id,
+                            })),
+                        ),
+                    };
+                }
                 return domain_err_with_code(
                     "already_assigned",
                     format!(
@@ -188,6 +217,23 @@ mod tests {
                 Some(Err(msg)) => anyhow::bail!(msg),
                 None => anyhow::bail!("create_project_agent called but no result configured"),
             }
+        }
+        async fn update_project_agent_status(
+            &self,
+            agent_instance_id: &str,
+            project_id: &str,
+            status: &str,
+            _jwt: Option<&str>,
+        ) -> anyhow::Result<AgentInstanceDescriptor> {
+            // Echo the requested status back on the addressed instance so the
+            // reactivation path can assert the Archived -> Idle flip.
+            Ok(AgentInstanceDescriptor {
+                id: agent_instance_id.to_string(),
+                agent_id: String::new(),
+                project_id: project_id.to_string(),
+                name: String::new(),
+                status: status.to_string(),
+            })
         }
 
         // -- everything else bails to catch accidental routing ----------------
@@ -387,6 +433,30 @@ mod tests {
         );
         assert_eq!(env["agent_id"], json!("tmpl-x"));
         assert_eq!(env["project_id"], json!("proj-1"));
+    }
+
+    #[tokio::test]
+    async fn assign_agent_reactivates_archived_duplicate() {
+        // Template already attached, but its instance is archived. Re-hiring
+        // must reactivate it (Archived -> Idle) and succeed, not return
+        // already_assigned.
+        let archived = AgentInstanceDescriptor {
+            id: "inst-arch".into(),
+            agent_id: "tmpl-x".into(),
+            project_id: "proj-1".into(),
+            name: "Agent inst-arch".into(),
+            status: "archived".into(),
+        };
+        let api = AssignMockApi::with_existing(vec![archived]);
+        let raw = assign_agent_to_project(&api, "proj-1", &json!({ "agent_id": "tmpl-x" })).await;
+        let env = parse(&raw);
+        assert_eq!(env["ok"], json!(true), "archived duplicate must reactivate, not error");
+        assert_eq!(env["reactivated"], json!(true));
+        assert_eq!(env["instance"]["agent_instance_id"], json!("inst-arch"));
+        assert_eq!(
+            env["instance"]["status"], json!("idle"),
+            "reactivation must flip the archived instance back to idle"
+        );
     }
 
     #[tokio::test]

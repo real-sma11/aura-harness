@@ -494,6 +494,20 @@ pub trait DomainApi: Send + Sync {
             "create_project_agent not implemented for this DomainApi"
         ))
     }
+    /// Update an existing project-agent instance's status (e.g. flip an
+    /// archived instance back to `idle`). Used by `assign_agent_to_project`
+    /// to reactivate an archived agent on re-hire instead of erroring.
+    async fn update_project_agent_status(
+        &self,
+        _agent_instance_id: &str,
+        _project_id: &str,
+        _status: &str,
+        _jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        Err(anyhow::anyhow!(
+            "update_project_agent_status not implemented for this DomainApi"
+        ))
+    }
 
     // Storage: logs — JWT auth via /api/ routes
     async fn create_log(

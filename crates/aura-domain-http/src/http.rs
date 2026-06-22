@@ -492,6 +492,22 @@ impl DomainApi for HttpDomainApi {
         self.api_post(&url, &body, jwt).await
     }
 
+    async fn update_project_agent_status(
+        &self,
+        agent_instance_id: &str,
+        project_id: &str,
+        status: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        let jwt = Self::require_jwt(jwt)?;
+        let url = format!(
+            "{}/api/projects/{project_id}/agents/{agent_instance_id}",
+            self.project_base_url()
+        );
+        let body = serde_json::json!({ "status": status });
+        self.api_put(&url, &body, jwt).await
+    }
+
     // -- Storage: logs (JWT /api/) --------------------------------------------
 
     async fn create_log(

@@ -207,6 +207,17 @@ impl DomainApi for JwtDomainApi {
             .create_project_agent(project_id, agent_id, self.jwt_or(jwt))
             .await
     }
+    async fn update_project_agent_status(
+        &self,
+        agent_instance_id: &str,
+        project_id: &str,
+        status: &str,
+        jwt: Option<&str>,
+    ) -> anyhow::Result<AgentInstanceDescriptor> {
+        self.inner
+            .update_project_agent_status(agent_instance_id, project_id, status, self.jwt_or(jwt))
+            .await
+    }
     async fn create_log(
         &self,
         project_id: &str,
