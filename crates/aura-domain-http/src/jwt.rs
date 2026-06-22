@@ -14,8 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
     CreateSessionParams, DomainApi, ListMarketplaceAgentsParams, ListMarketplaceAgentsResponse,
-    MessageDescriptor, ProjectDescriptor, ProjectUpdate,
-    SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
+    MessageDescriptor, ProjectDescriptor, ProjectUpdate, SaveMessageParams, SessionDescriptor,
+    SpecDescriptor, TaskDescriptor, TaskUpdate,
 };
 
 /// Wraps an inner [`DomainApi`] and stamps a captured JWT onto every

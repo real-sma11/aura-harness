@@ -10,8 +10,8 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use aura_tools::domain_tools::{
     CreateSessionParams, DomainApi, ListMarketplaceAgentsParams, ListMarketplaceAgentsResponse,
-    MessageDescriptor, ProjectDescriptor, ProjectUpdate,
-    SaveMessageParams, SessionDescriptor, SpecDescriptor, TaskDescriptor, TaskUpdate,
+    MessageDescriptor, ProjectDescriptor, ProjectUpdate, SaveMessageParams, SessionDescriptor,
+    SpecDescriptor, TaskDescriptor, TaskUpdate,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
