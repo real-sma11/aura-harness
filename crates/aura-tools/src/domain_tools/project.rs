@@ -450,11 +450,16 @@ mod tests {
         let api = AssignMockApi::with_existing(vec![archived]);
         let raw = assign_agent_to_project(&api, "proj-1", &json!({ "agent_id": "tmpl-x" })).await;
         let env = parse(&raw);
-        assert_eq!(env["ok"], json!(true), "archived duplicate must reactivate, not error");
+        assert_eq!(
+            env["ok"],
+            json!(true),
+            "archived duplicate must reactivate, not error"
+        );
         assert_eq!(env["reactivated"], json!(true));
         assert_eq!(env["instance"]["agent_instance_id"], json!("inst-arch"));
         assert_eq!(
-            env["instance"]["status"], json!("idle"),
+            env["instance"]["status"],
+            json!("idle"),
             "reactivation must flip the archived instance back to idle"
         );
     }
