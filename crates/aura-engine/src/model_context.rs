@@ -30,6 +30,9 @@ pub fn context_window_for_model(model: &str) -> u64 {
         m if m.contains("-o4") || m.starts_with("o4") => 200_000,
         m if m.contains("deepseek") => 1_000_000,
         m if m.contains("kimi") => 262_144,
+        // GLM 5.2 ships a 1M window (earlier GLM tiers were ~200K, which the
+        // default below already covers).
+        m if m.contains("glm-5.2") || m.contains("glm-5p2") || m.contains("glm-5-2") => 1_000_000,
         _ => 200_000,
     }
 }
@@ -96,6 +99,14 @@ mod tests {
         assert_eq!(context_window_for_model("deepseek-v4-pro"), 1_000_000);
         assert_eq!(context_window_for_model("aura-kimi-k2-5"), 262_144);
         assert_eq!(context_window_for_model("aura-kimi-k2-6"), 262_144);
+        assert_eq!(context_window_for_model("aura-kimi-k2-7-code"), 262_144);
+        // GLM 5.2 has a 1M window; earlier GLM tiers fall to the safe default.
+        assert_eq!(context_window_for_model("aura-glm-5-2"), 1_000_000);
+        assert_eq!(
+            context_window_for_model("accounts/fireworks/models/glm-5p2"),
+            1_000_000
+        );
+        assert_eq!(context_window_for_model("aura-glm-5-1"), 200_000);
     }
 
     #[test]
