@@ -182,7 +182,11 @@ mod tests {
         });
         let out = brave_search_results(&response, "news", &json!({ "query": "aura os" })).unwrap();
         let results = out["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1, "news results must parse from top-level `results`");
+        assert_eq!(
+            results.len(),
+            1,
+            "news results must parse from top-level `results`"
+        );
         assert_eq!(results[0]["title"], "Headline");
         assert_eq!(results[0]["url"], "https://news.example/x");
         assert_eq!(results[0]["source"], "Example");
