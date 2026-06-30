@@ -82,8 +82,18 @@ pub(super) fn brave_search_results(
     args: &Value,
 ) -> Result<Value, ToolError> {
     let query = required_string(args, &["query", "q"])?;
+    // Brave nests *web* results under `web.results`, but the News Search API
+    // returns its results at the top-level `results` array (envelope
+    // `type: "news"`, with no `news` wrapper object). Use a vertical-aware
+    // pointer — `/{vertical}/results` is correct for web, but news would
+    // silently parse as empty under that path.
+    let results_pointer = if vertical == "news" {
+        "/results".to_string()
+    } else {
+        format!("/{vertical}/results")
+    };
     let items = response
-        .pointer(&format!("/{vertical}/results"))
+        .pointer(&results_pointer)
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
@@ -130,4 +140,56 @@ fn project_fields(source: &Value, fields: &[TrustedIntegrationResultField]) -> V
             .unwrap_or(Value::Null);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::brave_search_results;
+    use serde_json::json;
+
+    #[test]
+    fn web_results_parse_from_nested_web_object() {
+        // Brave web responses nest results under `web.results`.
+        let response = json!({
+            "web": {
+                "results": [
+                    { "title": "AURA", "url": "https://aura.ai", "description": "desc", "age": "1 day" }
+                ]
+            },
+            "query": { "more_results_available": true }
+        });
+        let out = brave_search_results(&response, "web", &json!({ "query": "aura os" })).unwrap();
+        assert_eq!(out["query"], "aura os");
+        assert_eq!(out["more_results_available"], true);
+        let results = out["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "AURA");
+        assert_eq!(results[0]["url"], "https://aura.ai");
+    }
+
+    #[test]
+    fn news_results_parse_from_top_level_results() {
+        // Regression guard: Brave's News API returns results at the TOP-LEVEL
+        // `results` array (no `news` wrapper). Before the vertical-aware
+        // pointer fix, the news vertical looked up `/news/results`, found
+        // nothing, and silently returned an empty list.
+        let response = json!({
+            "type": "news",
+            "results": [
+                { "title": "Headline", "url": "https://news.example/x", "description": "snippet", "age": "2 hours", "source": "Example" }
+            ],
+            "query": { "more_results_available": false }
+        });
+        let out = brave_search_results(&response, "news", &json!({ "query": "aura os" })).unwrap();
+        let results = out["results"].as_array().unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "news results must parse from top-level `results`"
+        );
+        assert_eq!(results[0]["title"], "Headline");
+        assert_eq!(results[0]["url"], "https://news.example/x");
+        assert_eq!(results[0]["source"], "Example");
+        assert_eq!(out["more_results_available"], false);
+    }
 }
