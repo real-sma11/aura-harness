@@ -12,6 +12,7 @@ pub fn context_window_for_model(model: &str) -> u64 {
     match model {
         m if m.contains("opus-4") => 1_000_000,
         m if m.contains("sonnet-4") => 1_000_000,
+        m if m.contains("sonnet-5") => 1_000_000,
         m if m.contains("haiku-4") => 200_000,
         m if m.starts_with("claude") => 200_000,
         m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_000_000,
@@ -49,6 +50,7 @@ mod tests {
             context_window_for_model("aura-claude-sonnet-4-6"),
             1_000_000
         );
+        assert_eq!(context_window_for_model("aura-claude-sonnet-5"), 1_000_000);
         assert_eq!(context_window_for_model("aura-claude-haiku-4-5"), 200_000);
     }
 
@@ -56,6 +58,7 @@ mod tests {
     fn anthropic_bare_names() {
         assert_eq!(context_window_for_model("claude-opus-4-6"), 1_000_000);
         assert_eq!(context_window_for_model("claude-sonnet-4-6"), 1_000_000);
+        assert_eq!(context_window_for_model("claude-sonnet-5"), 1_000_000);
         assert_eq!(context_window_for_model("claude-haiku-4-5"), 200_000);
         assert_eq!(context_window_for_model("claude-3-5-sonnet"), 200_000);
     }
