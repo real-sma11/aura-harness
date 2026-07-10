@@ -28,13 +28,8 @@ pub(in crate::gateway) async fn run_start_handler(
     State(state): State<RouterState>,
     Json(req): Json<RuntimeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let auth_token = req.auth_jwt.clone().or_else(|| {
-        headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(String::from)
-    });
+    let auth_token =
+        resolve_run_auth_token(req.auth_jwt.clone(), &headers, state.config.require_auth);
 
     match req.r#type {
         RuntimeRequestType::Chat { .. } => start_chat_run(state, req, auth_token).await,
@@ -44,6 +39,23 @@ pub(in crate::gateway) async fn run_start_handler(
             start_council_run_handler(state, req, auth_token).await
         }
     }
+}
+
+fn resolve_run_auth_token(
+    body_auth_jwt: Option<String>,
+    headers: &HeaderMap,
+    require_auth: bool,
+) -> Option<String> {
+    body_auth_jwt.or_else(|| {
+        if require_auth {
+            return None;
+        }
+        headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(String::from)
+    })
 }
 
 async fn start_chat_run(
@@ -317,6 +329,45 @@ fn bad_request(message: &str) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({"error": message})),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_run_auth_token;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn headers_with_bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn run_auth_prefers_body_jwt() {
+        let headers = headers_with_bearer("transport-or-legacy-jwt");
+        assert_eq!(
+            resolve_run_auth_token(Some("user-jwt".to_string()), &headers, true).as_deref(),
+            Some("user-jwt")
+        );
+    }
+
+    #[test]
+    fn run_auth_ignores_transport_bearer_when_router_auth_is_required() {
+        let headers = headers_with_bearer("node-transport-secret");
+        assert_eq!(resolve_run_auth_token(None, &headers, true), None);
+    }
+
+    #[test]
+    fn run_auth_accepts_bearer_fallback_when_router_auth_is_disabled() {
+        let headers = headers_with_bearer("legacy-user-jwt");
+        assert_eq!(
+            resolve_run_auth_token(None, &headers, false).as_deref(),
+            Some("legacy-user-jwt")
+        );
+    }
 }
 
 fn run_start_error_response(e: String) -> (StatusCode, Json<serde_json::Value>) {

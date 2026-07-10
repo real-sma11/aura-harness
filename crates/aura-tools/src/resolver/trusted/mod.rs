@@ -312,6 +312,34 @@ impl ToolResolver {
             "linear_create_issue" => self.linear_create_issue(provider, integration, args).await,
             "slack_list_channels" => self.slack_list_channels(provider, integration).await,
             "slack_post_message" => self.slack_post_message(provider, integration, args).await,
+            "notion_search_pages" => self.notion_search_pages(provider, integration, args).await,
+            "notion_fetch_page" => self.notion_fetch_page(provider, integration, args).await,
+            "notion_get_block_children" => {
+                self.notion_get_block_children(provider, integration, args)
+                    .await
+            }
+            "notion_append_block_children" => {
+                self.notion_append_block_children(provider, integration, args)
+                    .await
+            }
+            "notion_create_page" => self.notion_create_page(provider, integration, args).await,
+            "notion_update_page" => self.notion_update_page(provider, integration, args).await,
+            "notion_update_page_markdown" => {
+                self.notion_update_page_markdown(provider, integration, args)
+                    .await
+            }
+            "notion_query_data_source" => {
+                self.notion_query_data_source(provider, integration, args)
+                    .await
+            }
+            "notion_create_database" => {
+                self.notion_create_database(provider, integration, args)
+                    .await
+            }
+            "notion_create_data_source" => {
+                self.notion_create_data_source(provider, integration, args)
+                    .await
+            }
             "brave_search_web" => self.brave_search(provider, integration, args, "web").await,
             "brave_search_news" => self.brave_search(provider, integration, args, "news").await,
             "resend_list_domains" => self.resend_list_domains(provider, integration).await,

@@ -93,6 +93,23 @@ docker run -p 8080:8080 aura
 
 The image runs `aura run --ui none` as a non-root user, exposes `:8080`, and defaults `AURA_DATA_DIR=/data`. See [`Dockerfile`](Dockerfile) for the full recipe.
 
+For Render image deployments, use [`Dockerfile.render`](Dockerfile.render).
+It binds to `0.0.0.0:10000`, exposes `/health`, and is published by the
+`Publish GHCR image` workflow as `ghcr.io/cypher-asi/aura-harness:<tag>`.
+Hosted, non-loopback services should require bearer auth:
+
+```sh
+AURA_LISTEN_ADDR=0.0.0.0:10000
+AURA_NODE_REQUIRE_AUTH=1
+AURA_NODE_AUTH_TOKEN=<shared-secret>
+AURA_OS_SERVER_URL=https://YOUR-AURA-OS-SERVICE.onrender.com
+```
+
+Pair that with `LOCAL_HARNESS_URL=https://YOUR-HARNESS-SERVICE.onrender.com`
+and `LOCAL_HARNESS_AUTH_TOKEN=<shared-secret>` on aura-os. The shared secret
+authenticates only the transport hop; user/model auth still travels separately
+inside `RuntimeRequest.auth_jwt`.
+
 ## Binaries
 
 This workspace ships two binaries:

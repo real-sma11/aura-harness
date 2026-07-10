@@ -12,5 +12,6 @@ mod brave;
 mod github;
 mod google;
 mod linear;
+mod notion;
 mod resend;
 mod slack;
