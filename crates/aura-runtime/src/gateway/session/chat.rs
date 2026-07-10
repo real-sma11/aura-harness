@@ -720,7 +720,16 @@ async fn prepare_turn_context(
     }
     if let Some(ref mm) = ctx.memory_manager {
         let mem_id = session.memory_agent_id();
-        mm.prepare_context(mem_id, &mut config.system_prompt).await;
+        mm.prepare_context_with_query(
+            mem_id,
+            &mut config.system_prompt,
+            aura_context_memory::MemoryQueryContext {
+                text: msg.content.clone(),
+                active_skills: active_skill_names.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
         config
             .observers
             .push(aura_engine::memory_observer::MemoryTurnObserver::new(
@@ -728,6 +737,7 @@ async fn prepare_turn_context(
                 mem_id,
                 session.auth_token.clone(),
                 active_skill_names,
+                Some(session.session_id.clone()),
             ));
     }
 

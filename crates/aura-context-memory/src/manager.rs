@@ -5,16 +5,21 @@ use crate::error::MemoryError;
 use crate::extraction::ConversationTurn;
 use crate::procedures::{ProcedureConfig, ProcedureExtractor, StepSequence};
 use crate::refinement::{LlmRefiner, RefinerConfig};
-use crate::retrieval::{MemoryRetriever, RetrievalConfig};
+use crate::retrieval::{MemoryQueryContext, MemoryRetriever, RetrievalConfig};
 use crate::store::{MemoryStore, MemoryStoreApi};
 use crate::turn_summary::TurnSummary;
-use crate::types::{MemoryPacket, Procedure};
+use crate::types::{
+    AgentContinuityConfig, MemoryPacket, MemoryRetrievalTrace, MemoryStatus, MemoryWritePolicy,
+    Procedure,
+};
 use crate::write_pipeline::{MemoryWritePipeline, WriteConfig, WriteReport};
 use aura_core_types::AgentId;
 use aura_core_types::ProcedureId;
 use aura_model_reasoner::ModelProvider;
 use rocksdb::{DBWithThreadMode, MultiThreaded};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::{collections::HashMap, time::Duration};
 
 /// Top-level memory facade owning the store, retriever, write pipeline,
 /// procedure extractor, and consolidator.
@@ -24,6 +29,7 @@ pub struct MemoryManager {
     pipeline: MemoryWritePipeline,
     procedure_extractor: ProcedureExtractor,
     consolidator: MemoryConsolidator,
+    latest_traces: Mutex<HashMap<AgentId, MemoryRetrievalTrace>>,
 }
 
 impl MemoryManager {
@@ -86,6 +92,7 @@ impl MemoryManager {
             pipeline,
             procedure_extractor,
             consolidator,
+            latest_traces: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,6 +102,40 @@ impl MemoryManager {
     /// Returns error on store read failure.
     pub async fn retrieve(&self, agent_id: AgentId) -> Result<MemoryPacket, MemoryError> {
         self.retriever.retrieve(agent_id).await
+    }
+
+    /// Load persisted Agent Continuity controls for an agent.
+    pub async fn continuity_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentContinuityConfig, MemoryError> {
+        let store = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || store.get_continuity_config(agent_id))
+            .await
+            .map_err(|e| MemoryError::BlockingTaskFailed(e.to_string()))?
+    }
+
+    /// Persist Agent Continuity controls for an agent.
+    pub async fn save_continuity_config(
+        &self,
+        agent_id: AgentId,
+        config: AgentContinuityConfig,
+    ) -> Result<AgentContinuityConfig, MemoryError> {
+        let store = Arc::clone(&self.store);
+        let saved = config.clone();
+        tokio::task::spawn_blocking(move || store.put_continuity_config(agent_id, &config))
+            .await
+            .map_err(|e| MemoryError::BlockingTaskFailed(e.to_string()))??;
+        Ok(saved)
+    }
+
+    #[must_use]
+    pub fn latest_retrieval_trace(&self, agent_id: AgentId) -> Option<MemoryRetrievalTrace> {
+        self.latest_traces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&agent_id)
+            .cloned()
     }
 
     /// Ingest a finished turn through the write pipeline.
@@ -119,12 +160,46 @@ impl MemoryManager {
     /// `aura-agent` — callers in `aura-runtime` pass
     /// `&mut config.system_prompt` explicitly.
     pub async fn prepare_context(&self, agent_id: AgentId, system_prompt: &mut String) {
+        self.prepare_context_with_query(agent_id, system_prompt, MemoryQueryContext::default())
+            .await;
+    }
+
+    /// Query-aware context preparation used by interactive turns.
+    pub async fn prepare_context_with_query(
+        &self,
+        agent_id: AgentId,
+        system_prompt: &mut String,
+        mut query: MemoryQueryContext,
+    ) {
         if let Some(idx) = system_prompt.find("\n<agent_memory>") {
             system_prompt.truncate(idx);
         }
 
-        match self.retrieve(agent_id).await {
+        let continuity = match self.continuity_config(agent_id).await {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%error, ?agent_id, "Failed to load Agent Continuity config");
+                AgentContinuityConfig::default()
+            }
+        };
+        if !continuity.use_memory {
+            return;
+        }
+        query.allow_user_scope = continuity.allow_user_scope;
+        query.allow_workspace_scope = continuity.allow_workspace_scope;
+
+        match self
+            .retriever
+            .retrieve_with_query(agent_id, query, continuity.retrieval_mode)
+            .await
+        {
             Ok(packet) => {
+                if let Some(trace) = packet.trace.clone() {
+                    self.latest_traces
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(agent_id, trace);
+                }
                 let block = packet.format_for_prompt();
                 if !block.is_empty() {
                     system_prompt.push_str(&block);
@@ -182,10 +257,73 @@ impl MemoryManager {
         auth_token: Option<String>,
         active_skills: &[String],
     ) -> Result<WriteReport, MemoryError> {
+        self.process_result_with_source(agent_id, summary, auth_token, active_skills, None)
+            .await
+    }
+
+    pub async fn process_result_with_source(
+        &self,
+        agent_id: AgentId,
+        summary: &TurnSummary,
+        auth_token: Option<String>,
+        active_skills: &[String],
+        source_session_id: Option<&str>,
+    ) -> Result<WriteReport, MemoryError> {
+        let continuity = self.continuity_config(agent_id).await?;
+        if !continuity.generate_memory || continuity.write_policy == MemoryWritePolicy::ExplicitOnly
+        {
+            return Ok(WriteReport::default());
+        }
+        let initial_status = if continuity.write_policy == MemoryWritePolicy::Approval {
+            MemoryStatus::Pending
+        } else {
+            MemoryStatus::Active
+        };
         let turn = ConversationTurn::from_messages(&summary.messages, &summary.total_text);
         self.pipeline
-            .ingest_with_context(agent_id, summary, turn.as_ref(), auth_token, active_skills)
+            .ingest_with_provenance(
+                agent_id,
+                summary,
+                turn.as_ref(),
+                auth_token,
+                active_skills,
+                source_session_id,
+                initial_status,
+            )
             .await
+    }
+
+    /// Enqueue memory extraction after a turn without extending response
+    /// completion latency. The task is best-effort and bounded by a timeout.
+    pub fn process_result_in_background(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        summary: TurnSummary,
+        auth_token: Option<String>,
+        active_skills: Vec<String>,
+        source_session_id: Option<String>,
+    ) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(45),
+                manager.process_result_with_source(
+                    agent_id,
+                    &summary,
+                    auth_token,
+                    &active_skills,
+                    source_session_id.as_deref(),
+                ),
+            )
+            .await;
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, ?agent_id, "Background memory ingestion failed")
+                }
+                Err(_) => tracing::warn!(?agent_id, "Background memory ingestion timed out"),
+            }
+        });
     }
 
     /// Run post-session consolidation (forget, compress, evolve) for an agent.

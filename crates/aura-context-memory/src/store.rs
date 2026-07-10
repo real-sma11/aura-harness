@@ -21,7 +21,7 @@
 //! they are applied atomically — no partial state is observable on failure.
 
 use crate::error::MemoryError;
-use crate::types::{AgentEvent, Fact, Procedure};
+use crate::types::{AgentContinuityConfig, AgentEvent, Fact, MemoryStatus, Procedure};
 use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
 use aura_store_db::cf;
 use aura_store_db::SealCipher;
@@ -36,6 +36,16 @@ use std::sync::Arc;
 /// All operations are blocking — callers on async runtimes should wrap
 /// calls in `tokio::task::spawn_blocking`.
 pub trait MemoryStoreApi: Send + Sync {
+    fn get_continuity_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentContinuityConfig, MemoryError>;
+    fn put_continuity_config(
+        &self,
+        agent_id: AgentId,
+        config: &AgentContinuityConfig,
+    ) -> Result<(), MemoryError>;
+
     fn put_fact(&self, fact: &Fact) -> Result<(), MemoryError>;
     fn get_fact(&self, agent_id: AgentId, fact_id: FactId) -> Result<Fact, MemoryError>;
     fn get_fact_by_key(&self, agent_id: AgentId, key: &str) -> Result<Option<Fact>, MemoryError>;
@@ -229,6 +239,29 @@ impl MemoryStore {
 }
 
 impl MemoryStoreApi for MemoryStore {
+    fn get_continuity_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<AgentContinuityConfig, MemoryError> {
+        let cf = self.cf_handle(cf::MEMORY_CONFIG)?;
+        match self.db.get_cf(&cf, agent_id.as_bytes())? {
+            Some(bytes) => serde_json::from_slice(&self.open_value(&bytes)?)
+                .map_err(|e| MemoryError::Deserialization(e.to_string())),
+            None => Ok(AgentContinuityConfig::default()),
+        }
+    }
+
+    fn put_continuity_config(
+        &self,
+        agent_id: AgentId,
+        config: &AgentContinuityConfig,
+    ) -> Result<(), MemoryError> {
+        let cf = self.cf_handle(cf::MEMORY_CONFIG)?;
+        let value = self.seal_value(serde_json::to_vec(config)?)?;
+        self.db.put_cf(&cf, agent_id.as_bytes(), value)?;
+        Ok(())
+    }
+
     fn put_fact(&self, fact: &Fact) -> Result<(), MemoryError> {
         let cf = self.cf_handle(cf::MEMORY_FACTS)?;
         let key = Self::fact_key(fact.agent_id, fact.fact_id);
@@ -259,6 +292,7 @@ impl MemoryStoreApi for MemoryStore {
             IteratorMode::From(&prefix, rocksdb::Direction::Forward),
         );
 
+        let mut fallback = None;
         for item in iter {
             let (k, v) = item?;
             if k.as_ref() >= end.as_slice() {
@@ -267,10 +301,13 @@ impl MemoryStoreApi for MemoryStore {
             let fact: Fact = serde_json::from_slice(&self.open_value(&v)?)
                 .map_err(|e| MemoryError::Deserialization(e.to_string()))?;
             if fact.key == key {
-                return Ok(Some(fact));
+                if fact.continuity.status == MemoryStatus::Active {
+                    return Ok(Some(fact));
+                }
+                fallback = Some(fact);
             }
         }
-        Ok(None)
+        Ok(fallback)
     }
 
     fn list_facts(&self, agent_id: AgentId) -> Result<Vec<Fact>, MemoryError> {
@@ -583,6 +620,7 @@ mod tests {
             ColumnFamilyDescriptor::new(cf::MEMORY_EVENTS, Options::default()),
             ColumnFamilyDescriptor::new(cf::MEMORY_PROCEDURES, Options::default()),
             ColumnFamilyDescriptor::new(cf::MEMORY_EVENT_INDEX, Options::default()),
+            ColumnFamilyDescriptor::new(cf::MEMORY_CONFIG, Options::default()),
         ];
         Arc::new(DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, dir, cfs).unwrap())
     }
@@ -601,6 +639,7 @@ mod tests {
             last_accessed: now,
             created_at: now,
             updated_at: now,
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 
@@ -615,6 +654,7 @@ mod tests {
             access_count: 0,
             last_accessed: ts,
             timestamp: ts,
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 
@@ -634,6 +674,7 @@ mod tests {
             updated_at: now,
             skill_name: None,
             skill_relevance: None,
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 
@@ -727,5 +768,43 @@ mod tests {
             .1;
         assert_eq!(raw.to_vec(), serde_json::to_vec(&fact).unwrap());
         assert!(!SealCipher::is_sealed(&raw));
+    }
+
+    #[test]
+    fn continuity_config_is_agent_scoped_persisted_and_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = sealed_store(dir.path());
+        let configured_agent = AgentId::generate();
+        let untouched_agent = AgentId::generate();
+        let config = AgentContinuityConfig {
+            use_memory: false,
+            generate_memory: true,
+            write_policy: crate::types::MemoryWritePolicy::Approval,
+            retrieval_mode: crate::types::MemoryRetrievalMode::QueryAware,
+            allow_user_scope: false,
+            allow_workspace_scope: false,
+        };
+
+        store
+            .put_continuity_config(configured_agent, &config)
+            .unwrap();
+
+        assert_eq!(
+            store.get_continuity_config(configured_agent).unwrap(),
+            config
+        );
+        assert_eq!(
+            store.get_continuity_config(untouched_agent).unwrap(),
+            AgentContinuityConfig::default()
+        );
+
+        let cf = store.db().cf_handle(cf::MEMORY_CONFIG).unwrap();
+        let raw = store
+            .db()
+            .get_cf(&cf, configured_agent.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(SealCipher::is_sealed(&raw));
+        assert!(!raw.windows(b"approval".len()).any(|w| w == b"approval"));
     }
 }

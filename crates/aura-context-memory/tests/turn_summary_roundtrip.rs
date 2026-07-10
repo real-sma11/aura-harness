@@ -19,8 +19,8 @@
 use std::sync::{Arc, Mutex};
 
 use aura_context_memory::{
-    AgentEvent, Fact, LlmRefiner, MemoryStats, MemoryStoreApi, MemoryWritePipeline, Procedure,
-    RefinerConfig, TurnSummary, WriteConfig,
+    AgentEvent, ConversationTurn, Fact, LlmRefiner, MemoryStats, MemoryStatus, MemoryStoreApi,
+    MemoryWritePipeline, Procedure, RefinerConfig, TurnSummary, WriteConfig,
 };
 use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
 use aura_model_reasoner::{MockProvider, MockResponse, ModelProvider};
@@ -37,6 +37,21 @@ struct FakeStore {
 }
 
 impl MemoryStoreApi for FakeStore {
+    fn get_continuity_config(
+        &self,
+        _agent_id: AgentId,
+    ) -> Result<aura_context_memory::AgentContinuityConfig, aura_context_memory::MemoryError> {
+        Ok(aura_context_memory::AgentContinuityConfig::default())
+    }
+
+    fn put_continuity_config(
+        &self,
+        _agent_id: AgentId,
+        _config: &aura_context_memory::AgentContinuityConfig,
+    ) -> Result<(), aura_context_memory::MemoryError> {
+        Ok(())
+    }
+
     fn put_fact(&self, fact: &Fact) -> Result<(), aura_context_memory::MemoryError> {
         let mut facts = self.facts.lock().expect("facts lock");
         if let Some(existing) = facts.iter_mut().find(|f| f.fact_id == fact.fact_id) {
@@ -244,6 +259,16 @@ fn pipeline_with_silent_llm() -> (Arc<FakeStore>, MemoryWritePipeline) {
     (store, pipeline)
 }
 
+fn pipeline_with_llm_response(response: &str) -> (Arc<FakeStore>, MemoryWritePipeline) {
+    let store: Arc<FakeStore> = Arc::new(FakeStore::default());
+    let provider: Arc<dyn ModelProvider + Send + Sync> =
+        Arc::new(MockProvider::new().with_default_response(MockResponse::text(response)));
+    let refiner = LlmRefiner::new(provider, RefinerConfig::default());
+    let store_api: Arc<dyn MemoryStoreApi> = store.clone();
+    let pipeline = MemoryWritePipeline::new(store_api, refiner, WriteConfig::default());
+    (store, pipeline)
+}
+
 #[tokio::test]
 async fn turn_summary_with_no_iterations_produces_empty_report() {
     let (store, pipeline) = pipeline_with_silent_llm();
@@ -299,6 +324,104 @@ async fn turn_summary_with_outcome_event_produces_one_event() {
         events[0].summary.contains("completed"),
         "expected completed outcome label, got: {}",
         events[0].summary,
+    );
+}
+
+#[tokio::test]
+async fn approval_writes_pending_memory_with_provenance() {
+    let (store, pipeline) = pipeline_with_silent_llm();
+    let agent_id = AgentId::generate();
+    let summary = TurnSummary {
+        total_text: "the test command is cargo nextest run".to_string(),
+        ..TurnSummary::default()
+    };
+
+    let report = pipeline
+        .ingest_with_provenance(
+            agent_id,
+            &summary,
+            None,
+            None,
+            &[],
+            Some("session-approval-1"),
+            MemoryStatus::Pending,
+        )
+        .await
+        .expect("ingest pending memory");
+
+    assert_eq!(report.facts_written, 1);
+    let fact = store.list_facts(agent_id).expect("list facts").remove(0);
+    assert_eq!(fact.continuity.status, MemoryStatus::Pending);
+    assert_eq!(
+        fact.continuity.provenance.session_id.as_deref(),
+        Some("session-approval-1")
+    );
+    assert!(fact
+        .continuity
+        .provenance
+        .extractor_model
+        .as_deref()
+        .is_some_and(|model| !model.is_empty()));
+    assert_eq!(
+        fact.continuity.provenance.excerpt.as_deref(),
+        Some("cargo nextest run")
+    );
+}
+
+#[tokio::test]
+async fn sensitive_llm_candidate_is_dropped_before_storage() {
+    let (store, pipeline) = pipeline_with_llm_response(
+        "FACT key=\"api_key\" value=\"sk-test-secret\" confidence=0.99 importance=0.9",
+    );
+    let agent_id = AgentId::generate();
+    let turn = ConversationTurn {
+        user_message: "Remember my API key".to_string(),
+        assistant_text: "I can help configure the integration".to_string(),
+    };
+
+    let report = pipeline
+        .ingest(agent_id, &TurnSummary::default(), Some(&turn))
+        .await
+        .expect("ingest sensitive candidate");
+
+    assert_eq!(report.sensitive_dropped, 1);
+    assert_eq!(report.facts_written, 0);
+    assert!(store.list_facts(agent_id).expect("list facts").is_empty());
+}
+
+#[tokio::test]
+async fn corrected_fact_preserves_supersession_history() {
+    let (store, pipeline) = pipeline_with_silent_llm();
+    let agent_id = AgentId::generate();
+
+    for value in ["React", "Vue"] {
+        pipeline
+            .ingest(
+                agent_id,
+                &TurnSummary {
+                    total_text: format!("the project uses {value}"),
+                    ..TurnSummary::default()
+                },
+                None,
+            )
+            .await
+            .expect("ingest technology fact");
+    }
+
+    let facts = store.list_facts(agent_id).expect("list facts");
+    assert_eq!(facts.len(), 2);
+    let active = facts
+        .iter()
+        .find(|fact| fact.continuity.status == MemoryStatus::Active)
+        .expect("active replacement");
+    let superseded = facts
+        .iter()
+        .find(|fact| fact.continuity.status == MemoryStatus::Superseded)
+        .expect("superseded history");
+    assert_eq!(active.value, serde_json::json!("Vue"));
+    assert_eq!(
+        superseded.continuity.superseded_by,
+        Some(active.fact_id.to_hex())
     );
 }
 

@@ -210,6 +210,14 @@ pub fn create_router(state: RouterState) -> Router {
         .route("/memory/:agent_id/snapshot", get(memory::snapshot))
         .route("/memory/:agent_id/wipe", post(memory::wipe))
         .route("/memory/:agent_id/stats", get(memory::stats))
+        .route(
+            "/memory/:agent_id/continuity",
+            get(memory::get_continuity_config).put(memory::update_continuity_config),
+        )
+        .route(
+            "/memory/:agent_id/retrieval/latest",
+            get(memory::latest_retrieval_trace),
+        )
         .route("/memory/:agent_id/consolidate", post(memory::consolidate))
         // Memory aliases (aura-os proxy sends /api/agents/:id/memory/...)
         .route(
@@ -253,6 +261,14 @@ pub fn create_router(state: RouterState) -> Router {
                 .delete(memory::delete_procedure),
         )
         .route("/api/agents/:agent_id/memory/stats", get(memory::stats))
+        .route(
+            "/api/agents/:agent_id/memory/continuity",
+            get(memory::get_continuity_config).put(memory::update_continuity_config),
+        )
+        .route(
+            "/api/agents/:agent_id/memory/retrieval/latest",
+            get(memory::latest_retrieval_trace),
+        )
         .route(
             "/api/agents/:agent_id/memory/consolidate",
             post(memory::consolidate),

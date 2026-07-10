@@ -35,15 +35,22 @@ mod turn_summary;
 mod types;
 mod write_pipeline;
 
+#[cfg(test)]
+mod retriever_tests;
+
 pub use consolidation::{ConsolidationConfig, ConsolidationReport, MemoryConsolidator};
 pub use error::MemoryError;
 pub use extraction::ConversationTurn;
 pub use manager::MemoryManager;
 pub use procedures::{compute_skill_relevance, ProcedureConfig, ProcedureExtractor, StepSequence};
 pub use refinement::{LlmRefiner, RefinerConfig};
-pub use retrieval::{MemoryRetriever, RetrievalConfig};
+pub use retrieval::{MemoryQueryContext, MemoryRetriever, RetrievalConfig};
 pub use salience::{estimate_tokens, score_event, score_fact, score_procedure};
 pub use store::{MemoryStats, MemoryStore, MemoryStoreApi};
 pub use turn_summary::TurnSummary;
-pub use types::{AgentEvent, Fact, FactSource, MemoryCandidate, MemoryPacket, Procedure};
+pub use types::{
+    AgentContinuityConfig, AgentEvent, Fact, FactSource, MemoryCandidate, MemoryContinuity,
+    MemoryPacket, MemoryProvenance, MemoryRetrievalMode, MemoryRetrievalTrace, MemoryScope,
+    MemorySelection, MemorySensitivity, MemoryStatus, MemoryWritePolicy, Procedure,
+};
 pub use write_pipeline::{MemoryWritePipeline, WriteConfig, WriteReport};

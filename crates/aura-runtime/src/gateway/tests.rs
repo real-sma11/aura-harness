@@ -715,6 +715,80 @@ async fn test_memory_delete_fact() {
     assert!(facts.is_empty());
 }
 
+#[tokio::test]
+async fn test_memory_continuity_config_roundtrip_and_empty_trace() {
+    let state = test_router_state_with_managers();
+    let agent_id = AgentId::generate();
+    let app = create_router(state);
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let default_config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(default_config["use_memory"], true);
+    assert_eq!(default_config["retrieval_mode"], "query_aware");
+
+    let config = serde_json::json!({
+        "use_memory": true,
+        "generate_memory": true,
+        "write_policy": "approval",
+        "retrieval_mode": "query_aware",
+        "allow_user_scope": false,
+        "allow_workspace_scope": false
+    });
+    let req = authed_request()
+        .method("PUT")
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&config).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let persisted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(persisted["write_policy"], "approval");
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/retrieval/latest",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::Value::Null
+    );
+}
+
 // ============================================================================
 // Memory Events
 // ============================================================================
@@ -1202,6 +1276,9 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("GET", "/memory/deadbeef/snapshot"),
     ("POST", "/memory/deadbeef/wipe"),
     ("GET", "/memory/deadbeef/stats"),
+    ("GET", "/memory/deadbeef/continuity"),
+    ("PUT", "/memory/deadbeef/continuity"),
+    ("GET", "/memory/deadbeef/retrieval/latest"),
     ("POST", "/memory/deadbeef/consolidate"),
     // Memory aliases
     ("GET", "/api/agents/deadbeef/memory"),
@@ -1222,6 +1299,9 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/agents/deadbeef/memory/procedures/some-id"),
     ("DELETE", "/api/agents/deadbeef/memory/procedures/some-id"),
     ("GET", "/api/agents/deadbeef/memory/stats"),
+    ("GET", "/api/agents/deadbeef/memory/continuity"),
+    ("PUT", "/api/agents/deadbeef/memory/continuity"),
+    ("GET", "/api/agents/deadbeef/memory/retrieval/latest"),
     ("POST", "/api/agents/deadbeef/memory/consolidate"),
     // Skills
     ("GET", "/api/skills"),

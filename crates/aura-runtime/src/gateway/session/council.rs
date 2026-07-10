@@ -46,7 +46,8 @@ use aura_core_types::{
 };
 use aura_fleet_subagent::FleetSubagentDispatcher;
 use aura_protocol::{
-    ConversationMessage, CouncilMechanism, CouncilMember, RuntimeRequest, RuntimeRequestType,
+    ConversationMessage, CouncilMechanism, CouncilMember, CouncilMemberRole, RuntimeRequest,
+    RuntimeRequestType,
 };
 use aura_tools::SubagentDispatchHook;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +69,27 @@ const DEFAULT_COUNCIL_MAX_MEMBERS: usize = 4;
 /// is the full multi-step agent loop (read/write/run tools), so a member
 /// answers the query like a real agent rather than a read-only explorer.
 const COUNCIL_MEMBER_KIND: &str = "general_purpose";
+
+/// Hermes-style advisor contract for Second Opinion references. This is
+/// carried as a child system-prompt addendum and paired with an empty
+/// `override_tool_subset`, so the runtime policy and prompt agree: the
+/// reference model advises only; it is not the acting/final agent.
+const SECOND_OPINION_REFERENCE_ADVISOR_PROMPT: &str = "\
+Second Opinion advisor contract. This addendum overrides any generic subagent wording above.\n\n\
+You are a reference advisor in Aura Second Opinion. You are NOT the acting/final agent and you do \
+NOT execute anything: no tools are available to you, and you must not claim to have read files, run \
+commands, browsed, edited code, or inspected external state unless that evidence is explicitly \
+included in the prompt. Do not apologize for lack of access.\n\n\
+Give private guidance for the final model. Base every claim on the provided conversation and user \
+request. Separate known facts from assumptions. Flag unsupported claims, missing context, likely \
+risks, disagreements, and concrete next steps. Return advice only; do not answer as if you are the \
+user-facing assistant.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CouncilRunKind {
+    Council,
+    SecondOpinion,
+}
 
 /// Parent-derived inputs the coordinator needs to build each member's
 /// [`SubagentDispatchRequest`]. Snapshotted from the prepared
@@ -93,6 +115,7 @@ struct CouncilCoordinator {
     handle: Arc<ChatRunHandle>,
     members: Vec<CouncilMember>,
     mechanism: CouncilMechanism,
+    run_kind: CouncilRunKind,
     query: String,
     run_id: String,
     shutdown: CancellationToken,
@@ -136,10 +159,13 @@ pub(crate) async fn start_council_run(
         });
     }
     let members = truncate_members(members, council_max_members());
+    let run_kind = classify_council_members(&members)?;
     let query = latest_user_query(&conversation_messages);
 
-    // The PARENT run hosts the synthesizer: prepare it with members[0]'s
-    // model so the synthesis turn runs on the first model.
+    // The PARENT run hosts the synthesizer/final model: prepare it with
+    // members[0]'s model so the synthesis/final turn runs on the first
+    // model. For Second Opinion, slot 0 is validated as the aggregator
+    // and reference slots are advisory-only children.
     let synth_model = members[0].model.clone();
     let registry = ctx.chat_runs.clone();
 
@@ -189,6 +215,7 @@ pub(crate) async fn start_council_run(
         run_id = %run_id,
         member_count = members.len(),
         mechanism = mechanism.as_wire(),
+        run_kind = ?run_kind,
         "AURA Council run started"
     );
 
@@ -196,6 +223,7 @@ pub(crate) async fn start_council_run(
         handle,
         members,
         mechanism,
+        run_kind,
         query,
         run_id: run_id.clone(),
         shutdown,
@@ -213,6 +241,7 @@ async fn run_council_coordinator(coordinator: CouncilCoordinator) {
         handle,
         members,
         mechanism,
+        run_kind,
         query,
         run_id,
         shutdown,
@@ -229,16 +258,20 @@ async fn run_council_coordinator(coordinator: CouncilCoordinator) {
         return;
     }
 
-    let answers = dispatch_members(&handle, &members, &query, &run_id, &shutdown, &params).await;
+    let answers = dispatch_members(
+        &handle, &members, run_kind, &query, &run_id, &shutdown, &params,
+    )
+    .await;
     if shutdown.is_cancelled() {
         return;
     }
 
-    // Inject the synthesis turn. The synthesizer's normal text turn is
-    // the combined answer the UI renders below the council panel. The
-    // mechanism selects HOW the members' answers are combined
-    // (integrate / contrast / present side by side).
-    let prompt = build_synthesis_prompt(&query, &answers, mechanism);
+    // Inject the final turn. The parent model's normal text turn is the
+    // combined/final answer the UI renders below the panel.
+    let prompt = match run_kind {
+        CouncilRunKind::Council => build_synthesis_prompt(&query, &answers, mechanism),
+        CouncilRunKind::SecondOpinion => build_second_opinion_prompt(&query, &answers),
+    };
     if handle
         .commands
         .send(InboundMessage::UserMessage(UserMessage {
@@ -273,6 +306,7 @@ struct MemberAnswer {
 async fn dispatch_members(
     handle: &Arc<ChatRunHandle>,
     members: &[CouncilMember],
+    run_kind: CouncilRunKind,
     query: &str,
     run_id: &str,
     shutdown: &CancellationToken,
@@ -301,53 +335,133 @@ async fn dispatch_members(
     info!(
         run_id = %run_id,
         member_count = members.len(),
+        run_kind = ?run_kind,
         "AURA Council: dispatching members"
     );
 
-    let dispatches = members.iter().enumerate().map(|(index, member)| {
-        let hook = hook.clone();
-        let model_label = member.model.id.clone().unwrap_or_default();
-        let request = SubagentDispatchRequest {
-            parent_agent_id: params.parent_agent_id,
-            subagent_type: COUNCIL_MEMBER_KIND.to_string(),
-            prompt: query.to_string(),
-            originating_user_id: Some(params.originating_user_id.clone()),
-            // Members hang directly off the parent (depth 1).
-            parent_chain: vec![params.parent_agent_id],
-            model_override: member.model.id.clone(),
-            system_prompt_addendum: None,
-            parent_permissions: params.parent_permissions.clone(),
-            parent_tool_permissions: params.parent_tool_permissions.clone(),
-            user_tool_defaults: params.user_tool_defaults.clone(),
-            // No dedupe key: each member is a distinct dispatch.
-            tool_call_id: None,
-            parent_mode: None,
-            parent_kernel_mode: None,
-            parent_model_id: Some(params.parent_model_id.clone()),
-            override_mode: None,
-            override_permissions: None,
-            override_tool_subset: None,
-            override_isolation_id: None,
-            override_budget: None,
-            // Wait: block until the member finishes; the hook still emits
-            // the spawn frame up-front so all columns appear immediately.
-            spawn_mode: None,
-            council_index: Some(u32::try_from(index).unwrap_or(u32::MAX)),
-            council_parent_tool_use_id: Some(group_id.clone()),
-        };
-        async move {
-            let outcome = hook.dispatch(request).await;
-            MemberAnswer {
-                index,
-                model_label,
-                outcome,
+    let dispatches = members
+        .iter()
+        .enumerate()
+        .filter(|(index, member)| should_dispatch_member(run_kind, *index, member))
+        .map(|(index, member)| {
+            let hook = hook.clone();
+            let model_label = member.model.id.clone().unwrap_or_default();
+            let request = SubagentDispatchRequest {
+                parent_agent_id: params.parent_agent_id,
+                subagent_type: COUNCIL_MEMBER_KIND.to_string(),
+                prompt: member_prompt(run_kind, query),
+                originating_user_id: Some(params.originating_user_id.clone()),
+                // Members hang directly off the parent (depth 1).
+                parent_chain: vec![params.parent_agent_id],
+                model_override: member.model.id.clone(),
+                system_prompt_addendum: member_system_prompt_addendum(run_kind),
+                parent_permissions: params.parent_permissions.clone(),
+                parent_tool_permissions: params.parent_tool_permissions.clone(),
+                user_tool_defaults: params.user_tool_defaults.clone(),
+                // No dedupe key: each member is a distinct dispatch.
+                tool_call_id: None,
+                parent_mode: None,
+                parent_kernel_mode: None,
+                parent_model_id: Some(params.parent_model_id.clone()),
+                override_mode: None,
+                override_permissions: None,
+                override_tool_subset: member_tool_subset(run_kind),
+                override_isolation_id: None,
+                override_budget: None,
+                // Wait: block until the member finishes; the hook still emits
+                // the spawn frame up-front so all columns appear immediately.
+                spawn_mode: None,
+                council_index: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                council_parent_tool_use_id: Some(group_id.clone()),
+            };
+            async move {
+                let outcome = hook.dispatch(request).await;
+                MemberAnswer {
+                    index,
+                    model_label,
+                    outcome,
+                }
             }
-        }
-    });
+        });
 
     let mut answers = futures_util::future::join_all(dispatches).await;
     answers.sort_by_key(|a| a.index);
     answers
+}
+
+fn classify_council_members(members: &[CouncilMember]) -> Result<CouncilRunKind, ChatRequestError> {
+    let role_count = members.iter().filter(|m| m.role.is_some()).count();
+    if role_count == 0 {
+        return Ok(CouncilRunKind::Council);
+    }
+    if members.first().and_then(|m| m.role) != Some(CouncilMemberRole::Aggregator) {
+        return Err(ChatRequestError {
+            code: "invalid_second_opinion_request",
+            message: "Second Opinion requires member 0 to have role `aggregator`".to_string(),
+        });
+    }
+    if members.len() < 2 {
+        return Err(ChatRequestError {
+            code: "second_opinion_no_references",
+            message: "Second Opinion requires at least one reference member".to_string(),
+        });
+    }
+    for (index, member) in members.iter().enumerate().skip(1) {
+        if member.role != Some(CouncilMemberRole::Reference) {
+            return Err(ChatRequestError {
+                code: "invalid_second_opinion_request",
+                message: format!("Second Opinion member {index} must have role `reference`"),
+            });
+        }
+    }
+    Ok(CouncilRunKind::SecondOpinion)
+}
+
+fn should_dispatch_member(run_kind: CouncilRunKind, index: usize, member: &CouncilMember) -> bool {
+    match run_kind {
+        CouncilRunKind::Council => true,
+        CouncilRunKind::SecondOpinion => {
+            index > 0 && member.role == Some(CouncilMemberRole::Reference)
+        }
+    }
+}
+
+fn member_prompt(run_kind: CouncilRunKind, query: &str) -> String {
+    match run_kind {
+        CouncilRunKind::Council => query.to_string(),
+        CouncilRunKind::SecondOpinion => build_reference_advisor_prompt(query),
+    }
+}
+
+fn member_system_prompt_addendum(run_kind: CouncilRunKind) -> Option<String> {
+    match run_kind {
+        CouncilRunKind::Council => None,
+        CouncilRunKind::SecondOpinion => Some(SECOND_OPINION_REFERENCE_ADVISOR_PROMPT.to_string()),
+    }
+}
+
+fn member_tool_subset(run_kind: CouncilRunKind) -> Option<Vec<String>> {
+    match run_kind {
+        CouncilRunKind::Council => None,
+        CouncilRunKind::SecondOpinion => Some(Vec::new()),
+    }
+}
+
+fn build_reference_advisor_prompt(query: &str) -> String {
+    format!(
+        "\
+## Second Opinion reference task\n\n\
+You are reviewing the user's request for the final Aura model. Give private advice only.\n\n\
+## User request\n\n\
+{}\n\n\
+## Factual rubric\n\n\
+- Ground claims in the request above.\n\
+- Mark assumptions explicitly.\n\
+- Flag missing evidence and likely risks.\n\
+- Recommend concrete next steps for the final model.\n\
+- Do not claim to have used tools or inspected external state.",
+        query.trim()
+    )
 }
 
 /// Build the final combine turn: embed the user's question and each
@@ -405,6 +519,73 @@ fn build_synthesis_prompt(
 
     prompt.push_str(mechanism_instruction(mechanism));
     prompt
+}
+
+/// Build the final Second Opinion turn. Reference outputs are private
+/// guidance, not authoritative facts. Unlike the ordinary Council
+/// synthesizer prompt, this does not forbid tool use; the final model
+/// remains the acting agent and can verify facts when the request calls
+/// for it.
+fn build_second_opinion_prompt(query: &str, answers: &[MemberAnswer]) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are the final model in Aura Second Opinion. Reference advisor model(s) reviewed the \
+         same user request and produced private guidance below.\n\n\
+         Treat reference guidance as advisory, not as ground truth. Your answer must be based on \
+         facts present in the conversation, tool results you actually inspect, or explicit user \
+         input. If references conflict or make unsupported claims, resolve the conflict using \
+         evidence or say what is uncertain. You may call tools if verification or task completion \
+         requires it; otherwise answer directly.\n\n",
+    );
+
+    prompt.push_str("## User request\n\n");
+    prompt.push_str(query.trim());
+
+    prompt.push_str("\n\n## Reference advisor guidance\n");
+    for answer in answers {
+        let label = if answer.model_label.is_empty() {
+            "(default model)".to_string()
+        } else {
+            answer.model_label.clone()
+        };
+        prompt.push_str(&format!("\n### Reference {} — `{label}`\n\n", answer.index));
+        append_member_outcome(&mut prompt, answer, "reference");
+    }
+
+    prompt.push_str(
+        "\n## Final response rubric\n\n\
+         Write the user-facing answer. Use the references to improve coverage and catch mistakes, \
+         but do not cite reference claims as facts unless they are supported by the visible \
+         conversation or verified evidence. Be explicit about uncertainty and concrete next steps.",
+    );
+    prompt
+}
+
+fn append_member_outcome(prompt: &mut String, answer: &MemberAnswer, label: &str) {
+    match &answer.outcome {
+        Ok(result) => match &result.exit {
+            SubagentExit::Completed => {
+                let body = result.final_message.trim();
+                if body.is_empty() {
+                    prompt.push_str(&format!("({label} returned an empty answer)\n"));
+                } else {
+                    prompt.push_str(body);
+                    prompt.push('\n');
+                }
+            }
+            SubagentExit::Failed { reason } => {
+                prompt.push_str(&format!("({label} failed: {reason})\n"));
+            }
+            SubagentExit::Cancelled => prompt.push_str(&format!("({label} was cancelled)\n")),
+            SubagentExit::Timeout => prompt.push_str(&format!("({label} timed out)\n")),
+            SubagentExit::Rejected { reason } => {
+                prompt.push_str(&format!("({label} rejected: {reason})\n"));
+            }
+        },
+        Err(err) => {
+            prompt.push_str(&format!("({label} dispatch error: {err})\n"));
+        }
+    }
 }
 
 /// One-line framing for the chosen mechanism, dropped into the prompt
@@ -523,6 +704,26 @@ mod tests {
                     id: Some((*id).to_string()),
                     ..ModelSelection::default()
                 },
+                role: None,
+            })
+            .collect()
+    }
+
+    fn second_opinion_members(model_ids: &[&str]) -> Vec<CouncilMember> {
+        model_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| CouncilMember {
+                id: i.to_string(),
+                model: ModelSelection {
+                    id: Some((*id).to_string()),
+                    ..ModelSelection::default()
+                },
+                role: Some(if i == 0 {
+                    CouncilMemberRole::Aggregator
+                } else {
+                    CouncilMemberRole::Reference
+                }),
             })
             .collect()
     }
@@ -562,6 +763,77 @@ mod tests {
         ];
         assert_eq!(latest_user_query(&messages), "latest question");
         assert_eq!(latest_user_query(&[]), "");
+    }
+
+    #[test]
+    fn classify_members_detects_second_opinion_only_with_complete_roles() {
+        let council = test_members(&["final", "ref"]);
+        assert_eq!(
+            classify_council_members(&council).expect("plain council"),
+            CouncilRunKind::Council
+        );
+
+        let second_opinion = second_opinion_members(&["final", "ref-a", "ref-b"]);
+        assert_eq!(
+            classify_council_members(&second_opinion).expect("second opinion"),
+            CouncilRunKind::SecondOpinion
+        );
+
+        let mut missing_reference_role = second_opinion_members(&["final", "ref"]);
+        missing_reference_role[1].role = None;
+        let err = classify_council_members(&missing_reference_role)
+            .expect_err("partial roles must fail closed");
+        assert_eq!(err.code, "invalid_second_opinion_request");
+
+        let aggregator_only = vec![CouncilMember {
+            id: "0".into(),
+            model: ModelSelection {
+                id: Some("final".into()),
+                ..ModelSelection::default()
+            },
+            role: Some(CouncilMemberRole::Aggregator),
+        }];
+        let err = classify_council_members(&aggregator_only).expect_err("references are required");
+        assert_eq!(err.code, "second_opinion_no_references");
+    }
+
+    #[test]
+    fn second_opinion_dispatches_references_only_with_no_tools() {
+        let members = second_opinion_members(&["final", "kimi", "deepseek"]);
+        let dispatched: Vec<usize> = members
+            .iter()
+            .enumerate()
+            .filter(|(index, member)| {
+                should_dispatch_member(CouncilRunKind::SecondOpinion, *index, member)
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        assert_eq!(
+            dispatched,
+            vec![1, 2],
+            "aggregator slot 0 must not run as a reference child"
+        );
+        assert_eq!(
+            member_tool_subset(CouncilRunKind::SecondOpinion),
+            Some(vec![])
+        );
+        let addendum =
+            member_system_prompt_addendum(CouncilRunKind::SecondOpinion).expect("advisor addendum");
+        assert!(addendum.contains("NOT the acting/final agent"));
+        assert!(addendum.contains("no tools are available"));
+        assert!(addendum.contains("Separate known facts from assumptions"));
+    }
+
+    #[test]
+    fn second_opinion_reference_prompt_uses_factual_rubric() {
+        let prompt = member_prompt(CouncilRunKind::SecondOpinion, "review this migration");
+
+        assert!(prompt.contains("Second Opinion reference task"));
+        assert!(prompt.contains("review this migration"));
+        assert!(prompt.contains("Ground claims in the request above"));
+        assert!(prompt.contains("Mark assumptions explicitly"));
+        assert!(prompt.contains("Do not claim to have used tools"));
     }
 
     fn completed_answer(index: usize, model: &str, body: &str) -> MemberAnswer {
@@ -626,6 +898,31 @@ mod tests {
         assert!(
             prompt.contains("depth exceeded"),
             "rejected member reason is surfaced: {prompt}"
+        );
+    }
+
+    #[test]
+    fn second_opinion_final_prompt_treats_references_as_private_guidance() {
+        let answers = vec![
+            completed_answer(1, "kimi", "Likely issue is stale cache."),
+            MemberAnswer {
+                index: 2,
+                model_label: "deepseek".into(),
+                outcome: Err("network timeout".into()),
+            },
+        ];
+        let prompt = build_second_opinion_prompt("Why is CI failing?", &answers);
+
+        assert!(prompt.contains("final model in Aura Second Opinion"));
+        assert!(prompt.contains("private guidance"));
+        assert!(prompt.contains("advisory, not as ground truth"));
+        assert!(prompt.contains("facts present in the conversation"));
+        assert!(prompt.contains("You may call tools if verification"));
+        assert!(prompt.contains("Likely issue is stale cache."));
+        assert!(prompt.contains("reference dispatch error: network timeout"));
+        assert!(
+            !prompt.contains("Do NOT call any tools"),
+            "Second Opinion final model should retain acting-agent ability to verify"
         );
     }
 

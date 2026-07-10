@@ -5,6 +5,7 @@
 //! does not have to walk through several hundred lines of HTTP
 //! plumbing to find the type definitions.
 
+use aura_context_memory::MemoryContinuity;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -18,6 +19,18 @@ pub(in crate::gateway) struct CreateFactBody {
     pub source: Option<String>,
     #[serde(default = "default_importance")]
     pub importance: f32,
+    #[serde(default)]
+    pub continuity: Option<MemoryContinuity>,
+}
+
+#[derive(Deserialize)]
+pub(in crate::gateway) struct UpdateFactBody {
+    pub key: Option<String>,
+    pub value: Option<serde_json::Value>,
+    pub confidence: Option<f32>,
+    pub source: Option<String>,
+    pub importance: Option<f32>,
+    pub continuity: Option<MemoryContinuity>,
 }
 
 pub(in crate::gateway) fn default_confidence() -> f32 {
@@ -36,6 +49,8 @@ pub(in crate::gateway) struct CreateEventBody {
     pub metadata: serde_json::Value,
     #[serde(default = "default_importance")]
     pub importance: f32,
+    #[serde(default)]
+    pub continuity: Option<MemoryContinuity>,
 }
 
 #[derive(Deserialize)]
@@ -61,16 +76,18 @@ pub(in crate::gateway) struct CreateProcedureBody {
     pub skill_name: Option<String>,
     #[serde(default)]
     pub skill_relevance: Option<f32>,
+    #[serde(default)]
+    pub continuity: Option<MemoryContinuity>,
 }
 
 #[derive(Deserialize)]
 pub(in crate::gateway) struct UpdateProcedureBody {
-    pub name: String,
-    pub trigger: String,
-    #[serde(default)]
-    pub steps: Vec<String>,
-    #[serde(default)]
-    pub context_constraints: serde_json::Value,
+    pub name: Option<String>,
+    pub trigger: Option<String>,
+    pub steps: Option<Vec<String>>,
+    pub context_constraints: Option<serde_json::Value>,
     pub skill_name: Option<String>,
     pub skill_relevance: Option<f32>,
+    pub success_rate: Option<f32>,
+    pub continuity: Option<MemoryContinuity>,
 }

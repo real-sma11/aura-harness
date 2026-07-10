@@ -147,10 +147,15 @@ impl ChildRunner for RuntimeChildRunner {
             .user_tool_defaults
             .clone()
             .unwrap_or_else(UserToolDefaults::full_access);
+        let allowed_tools = ctx
+            .spec
+            .tool_subset
+            .as_deref()
+            .unwrap_or(&kind.allowed_tools);
         let child_tool_permissions = narrowed_tool_permissions(
             ctx.spec.parent_tool_permissions.as_ref(),
             &user_defaults,
-            &kind,
+            allowed_tools,
         );
         let preassigned_id = ctx.preassigned_agent_id;
         let child_spec = aura_agent_kernel::ChildAgentSpec {
@@ -333,10 +338,10 @@ impl ChildRunner for RuntimeChildRunner {
 fn narrowed_tool_permissions(
     parent_tool_permissions: Option<&AgentToolPermissions>,
     user_tool_defaults: &UserToolDefaults,
-    kind: &SubagentKindSpec,
+    allowed_tools: &[String],
 ) -> AgentToolPermissions {
     let mut per_tool = BTreeMap::new();
-    for tool in &kind.allowed_tools {
+    for tool in allowed_tools {
         let parent_state =
             resolve_effective_permission(user_tool_defaults, parent_tool_permissions, tool);
         per_tool.insert(tool.clone(), parent_state);
@@ -408,7 +413,7 @@ mod tests {
         let user = UserToolDefaults::full_access();
         let registry = SubagentRegistry::bundled();
         let kind = registry.get("explore").unwrap();
-        let tool_permissions = narrowed_tool_permissions(None, &user, kind);
+        let tool_permissions = narrowed_tool_permissions(None, &user, &kind.allowed_tools);
         let policy = policy_for(AgentPermissions::empty(), tool_permissions, &user);
         assert_eq!(
             resolve_effective_permission(
@@ -425,6 +430,30 @@ mod tests {
                 "read_file",
             ),
             ToolState::Allow
+        );
+    }
+
+    #[test]
+    fn explicit_empty_tool_subset_denies_every_tool() {
+        let user = UserToolDefaults::full_access();
+        let tool_permissions = narrowed_tool_permissions(None, &user, &[]);
+        let policy = policy_for(AgentPermissions::empty(), tool_permissions, &user);
+
+        assert_eq!(
+            resolve_effective_permission(
+                &policy.user_default,
+                policy.agent_override.as_ref(),
+                "read_file",
+            ),
+            ToolState::Deny
+        );
+        assert_eq!(
+            resolve_effective_permission(
+                &policy.user_default,
+                policy.agent_override.as_ref(),
+                "run_command",
+            ),
+            ToolState::Deny
         );
     }
 

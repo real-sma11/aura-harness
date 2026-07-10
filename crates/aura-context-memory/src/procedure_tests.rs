@@ -18,6 +18,7 @@ fn test_db(dir: &std::path::Path) -> Arc<DBWithThreadMode<MultiThreaded>> {
         ColumnFamilyDescriptor::new("memory_events", Options::default()),
         ColumnFamilyDescriptor::new("memory_procedures", Options::default()),
         ColumnFamilyDescriptor::new("memory_event_index", Options::default()),
+        ColumnFamilyDescriptor::new("memory_config", Options::default()),
         ColumnFamilyDescriptor::new("agent_skills", Options::default()),
     ];
     Arc::new(DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, dir, cfs).unwrap())

@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "recall-test-command",
+      "query": "Which test command should I run for this project?",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["test-command"],
+      "records": [
+        { "kind": "fact", "id": "test-command", "key": "test_command", "value": "cargo nextest run", "importance": 0.55, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "fact", "id": "favorite-color", "key": "favorite_color", "value": "cobalt blue", "importance": 1.0, "confidence": 0.99, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "fact", "id": "team-timezone", "key": "team_timezone", "value": "America/New_York", "importance": 0.8, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "recall-build-command",
+      "query": "Build the release binary with our build command",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["build-command"],
+      "records": [
+        { "kind": "fact", "id": "build-command", "key": "build_command", "value": "cargo build --release", "importance": 0.6, "confidence": 0.94, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "fact", "id": "editor-theme", "key": "editor_theme", "value": "solarized", "importance": 0.95, "confidence": 0.98, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "recall-deploy-procedure",
+      "query": "Deploy the service with the release workflow",
+      "active_skills": ["deploy"],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["deploy-release"],
+      "records": [
+        { "kind": "procedure", "id": "deploy-release", "key": "release_deploy", "value": "", "trigger": "deploy the service", "steps": ["build release", "run smoke tests", "publish"], "skill_name": "deploy", "importance": 0.7, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "procedure", "id": "sync-notes", "key": "sync_notes", "value": "", "trigger": "archive notes", "steps": ["export", "upload"], "skill_name": "notes", "importance": 0.9, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "active-skill-boost",
+      "query": "Run my knowledge capture workflow",
+      "active_skills": ["notion"],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["notion-capture"],
+      "records": [
+        { "kind": "procedure", "id": "notion-capture", "key": "knowledge_capture", "value": "", "trigger": "capture research", "steps": ["summarize", "create page", "tag source"], "skill_name": "notion", "importance": 0.5, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "procedure", "id": "calendar-review", "key": "calendar_review", "value": "", "trigger": "weekly review", "steps": ["list meetings", "summarize"], "skill_name": "calendar", "importance": 0.9, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "approval-and-sensitive-safety",
+      "query": "What is the customer region, pricing plan, and API key?",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["customer-region"],
+      "records": [
+        { "kind": "fact", "id": "customer-region", "key": "customer_region", "value": "eu-west", "importance": 0.7, "confidence": 0.96, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "fact", "id": "pending-pricing", "key": "pricing_plan", "value": "unverified enterprise", "importance": 1.0, "confidence": 0.99, "status": "pending", "sensitivity": "normal", "scope": "agent", "pinned": true },
+        { "kind": "fact", "id": "sensitive-api-key", "key": "api_key", "value": "sk-test-secret", "importance": 1.0, "confidence": 0.99, "status": "active", "sensitivity": "sensitive", "scope": "agent", "pinned": true }
+      ]
+    },
+    {
+      "id": "supersession-correctness",
+      "query": "Which frontend framework does the project use?",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["framework-current"],
+      "records": [
+        { "kind": "fact", "id": "framework-old", "key": "frontend_framework", "value": "React", "importance": 1.0, "confidence": 0.99, "status": "superseded", "sensitivity": "normal", "scope": "agent", "pinned": true },
+        { "kind": "fact", "id": "framework-current", "key": "frontend_framework", "value": "Svelte", "importance": 0.6, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "agent-scope-isolation",
+      "query": "Use the build command and my response preference",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["isolated-build"],
+      "records": [
+        { "kind": "fact", "id": "isolated-build", "key": "build_command", "value": "pnpm build", "importance": 0.6, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
+        { "kind": "fact", "id": "user-response-preference", "key": "response_preference", "value": "concise", "importance": 0.9, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "user", "pinned": false }
+      ]
+    },
+    {
+      "id": "user-scope-opt-in",
+      "query": "Apply my response preference",
+      "active_skills": [],
+      "allow_user_scope": true,
+      "allow_workspace_scope": false,
+      "expected_ids": ["shared-response-preference"],
+      "records": [
+        { "kind": "fact", "id": "shared-response-preference", "key": "response_preference", "value": "concise", "importance": 0.8, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "user", "pinned": false },
+        { "kind": "fact", "id": "unrelated-language", "key": "preferred_language", "value": "Spanish", "importance": 0.95, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "workspace-scope-opt-in",
+      "query": "Follow the workspace release policy",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": true,
+      "expected_ids": ["workspace-release-policy"],
+      "records": [
+        { "kind": "fact", "id": "workspace-release-policy", "key": "release_policy", "value": "two approvals required", "importance": 0.9, "confidence": 0.98, "status": "active", "sensitivity": "normal", "scope": "workspace", "pinned": false },
+        { "kind": "fact", "id": "personal-snack", "key": "favorite_snack", "value": "almonds", "importance": 1.0, "confidence": 0.99, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    },
+    {
+      "id": "pinned-durable-context",
+      "query": "Start a new task",
+      "active_skills": [],
+      "allow_user_scope": false,
+      "allow_workspace_scope": false,
+      "expected_ids": ["pinned-constraint"],
+      "records": [
+        { "kind": "fact", "id": "pinned-constraint", "key": "critical_constraint", "value": "never deploy on Friday", "importance": 0.9, "confidence": 0.99, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": true },
+        { "kind": "fact", "id": "old-task", "key": "previous_task", "value": "update screenshots", "importance": 0.95, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
+      ]
+    }
+  ]
+}

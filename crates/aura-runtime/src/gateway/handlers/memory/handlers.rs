@@ -5,7 +5,7 @@
 //! `aura_context_memory` domain types and dispatch to
 //! [`aura_context_memory::MemoryStoreApi`].
 
-use aura_context_memory::{AgentEvent, Fact, FactSource, MemoryStoreApi, Procedure};
+use aura_context_memory::{AgentEvent, Fact, FactSource, MemoryStatus, MemoryStoreApi, Procedure};
 use aura_core_types::{AgentEventId, FactId, ProcedureId};
 use axum::{
     extract::{Path, Query, State},
@@ -19,7 +19,7 @@ use crate::gateway::RouterState;
 
 use super::wire::{
     BulkDeleteEventsBody, CreateEventBody, CreateFactBody, CreateProcedureBody,
-    ProcedureListParams, UpdateProcedureBody,
+    ProcedureListParams, UpdateFactBody, UpdateProcedureBody,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<serde_json::Value>)>;
@@ -166,6 +166,7 @@ pub(in crate::gateway) async fn create_fact(
         last_accessed: now,
         created_at: now,
         updated_at: now,
+        continuity: body.continuity.unwrap_or_default(),
     };
     store.put_fact(&fact).map_err(store_err)?;
     Ok(Json(fact))
@@ -174,17 +175,43 @@ pub(in crate::gateway) async fn create_fact(
 pub(in crate::gateway) async fn update_fact(
     State(state): State<RouterState>,
     Path((agent_hex, fact_hex)): Path<(String, String)>,
-    Json(body): Json<CreateFactBody>,
+    Json(body): Json<UpdateFactBody>,
 ) -> ApiResult<Fact> {
     let store = memory_store(&state)?;
     let agent_id = parse_agent_id(&agent_hex)?;
     let fact_id = parse_fact_id(&fact_hex)?;
     let mut fact = store.get_fact(agent_id, fact_id).map_err(store_err)?;
-    fact.key = body.key;
-    fact.value = body.value;
-    fact.confidence = body.confidence;
-    fact.importance = body.importance;
+    if let Some(key) = body.key {
+        fact.key = key;
+    }
+    if let Some(value) = body.value {
+        fact.value = value;
+    }
+    if let Some(confidence) = body.confidence {
+        fact.confidence = confidence;
+    }
+    if let Some(importance) = body.importance {
+        fact.importance = importance;
+    }
     fact.updated_at = Utc::now();
+    if let Some(continuity) = body.continuity {
+        if fact.continuity.status == MemoryStatus::Pending
+            && continuity.status == MemoryStatus::Active
+        {
+            for mut previous in store.list_facts(agent_id).map_err(store_err)? {
+                if previous.fact_id != fact.fact_id
+                    && previous.key == fact.key
+                    && previous.continuity.status == MemoryStatus::Active
+                {
+                    previous.continuity.status = MemoryStatus::Superseded;
+                    previous.continuity.superseded_by = Some(fact.fact_id.to_hex());
+                    previous.updated_at = Utc::now();
+                    store.put_fact(&previous).map_err(store_err)?;
+                }
+            }
+        }
+        fact.continuity = continuity;
+    }
     if let Some(ref s) = body.source {
         fact.source = match s.as_str() {
             "user_provided" => FactSource::UserProvided,
@@ -241,6 +268,7 @@ pub(in crate::gateway) async fn create_event(
         access_count: 0,
         last_accessed: now,
         timestamp: now,
+        continuity: body.continuity.unwrap_or_default(),
     };
     store.put_event(&event).map_err(store_err)?;
     Ok(Json(event))
@@ -328,6 +356,7 @@ pub(in crate::gateway) async fn create_procedure(
         updated_at: now,
         skill_name: body.skill_name,
         skill_relevance: body.skill_relevance,
+        continuity: body.continuity.unwrap_or_default(),
     };
     store.put_procedure(&proc).map_err(store_err)?;
     Ok(Json(proc))
@@ -342,15 +371,29 @@ pub(in crate::gateway) async fn update_procedure(
     let agent_id = parse_agent_id(&agent_hex)?;
     let proc_id = parse_procedure_id(&proc_hex)?;
     let mut proc = store.get_procedure(agent_id, proc_id).map_err(store_err)?;
-    proc.name = body.name;
-    proc.trigger = body.trigger;
-    proc.steps = body.steps;
-    proc.context_constraints = body.context_constraints;
+    if let Some(name) = body.name {
+        proc.name = name;
+    }
+    if let Some(trigger) = body.trigger {
+        proc.trigger = trigger;
+    }
+    if let Some(steps) = body.steps {
+        proc.steps = steps;
+    }
+    if let Some(context_constraints) = body.context_constraints {
+        proc.context_constraints = context_constraints;
+    }
     if body.skill_name.is_some() || body.skill_relevance.is_some() {
         proc.skill_name = body.skill_name;
         proc.skill_relevance = body.skill_relevance;
     }
+    if let Some(success_rate) = body.success_rate {
+        proc.success_rate = success_rate;
+    }
     proc.updated_at = Utc::now();
+    if let Some(continuity) = body.continuity {
+        proc.continuity = continuity;
+    }
     store.put_procedure(&proc).map_err(store_err)?;
     Ok(Json(proc))
 }
@@ -385,6 +428,7 @@ pub(in crate::gateway) async fn snapshot(
         facts,
         events,
         procedures,
+        trace: None,
     }))
 }
 
@@ -405,6 +449,69 @@ pub(in crate::gateway) async fn stats(
     let store = memory_store(&state)?;
     let agent_id = parse_agent_id(&agent_hex)?;
     store.stats(agent_id).map(Json).map_err(store_err)
+}
+
+// ============================================================================
+// Agent Continuity controls and evidence
+// ============================================================================
+
+pub(in crate::gateway) async fn get_continuity_config(
+    State(state): State<RouterState>,
+    Path(agent_hex): Path<String>,
+) -> ApiResult<aura_context_memory::AgentContinuityConfig> {
+    let agent_id = parse_agent_id(&agent_hex)?;
+    let manager = state.memory_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "memory system not configured" })),
+        )
+    })?;
+    manager
+        .continuity_config(agent_id)
+        .await
+        .map(Json)
+        .map_err(store_err)
+}
+
+pub(in crate::gateway) async fn update_continuity_config(
+    State(state): State<RouterState>,
+    Path(agent_hex): Path<String>,
+    Json(config): Json<aura_context_memory::AgentContinuityConfig>,
+) -> ApiResult<aura_context_memory::AgentContinuityConfig> {
+    let agent_id = parse_agent_id(&agent_hex)?;
+    let manager = state.memory_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "memory system not configured" })),
+        )
+    })?;
+    manager
+        .save_continuity_config(agent_id, config)
+        .await
+        .map(Json)
+        .map_err(store_err)
+}
+
+pub(in crate::gateway) async fn latest_retrieval_trace(
+    State(state): State<RouterState>,
+    Path(agent_hex): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let agent_id = parse_agent_id(&agent_hex)?;
+    let manager = state.memory_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "memory system not configured" })),
+        )
+    })?;
+    Ok(Json(match manager.latest_retrieval_trace(agent_id) {
+        Some(trace) => serde_json::to_value(trace).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+        })?,
+        None => serde_json::Value::Null,
+    }))
 }
 
 // ============================================================================

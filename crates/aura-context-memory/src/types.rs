@@ -5,6 +5,117 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
+/// Visibility boundary for a memory. Agent scope is the backward-compatible
+/// default; broader scopes are reserved for explicit, policy-checked sharing.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    #[default]
+    Agent,
+    User,
+    Workspace,
+}
+
+/// Lifecycle state for a memory record.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStatus {
+    #[default]
+    Active,
+    Pending,
+    Rejected,
+    Superseded,
+}
+
+/// Coarse sensitivity label used by automatic-write policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySensitivity {
+    #[default]
+    Normal,
+    Sensitive,
+}
+
+/// Local evidence explaining where a memory came from. Evidence never leaves
+/// the memory store through product analytics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_model: Option<String>,
+}
+
+/// Backward-compatible metadata shared by every memory type.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryContinuity {
+    #[serde(default)]
+    pub scope: MemoryScope,
+    #[serde(default)]
+    pub status: MemoryStatus,
+    #[serde(default)]
+    pub sensitivity: MemorySensitivity,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub provenance: MemoryProvenance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWritePolicy {
+    #[default]
+    Automatic,
+    Approval,
+    ExplicitOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRetrievalMode {
+    Salience,
+    #[default]
+    QueryAware,
+}
+
+/// Persisted, per-agent controls for the Agent Continuity system.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentContinuityConfig {
+    #[serde(default = "default_true")]
+    pub use_memory: bool,
+    #[serde(default = "default_true")]
+    pub generate_memory: bool,
+    #[serde(default)]
+    pub write_policy: MemoryWritePolicy,
+    #[serde(default)]
+    pub retrieval_mode: MemoryRetrievalMode,
+    #[serde(default)]
+    pub allow_user_scope: bool,
+    #[serde(default)]
+    pub allow_workspace_scope: bool,
+}
+
+impl Default for AgentContinuityConfig {
+    fn default() -> Self {
+        Self {
+            use_memory: true,
+            generate_memory: true,
+            write_policy: MemoryWritePolicy::Automatic,
+            retrieval_mode: MemoryRetrievalMode::QueryAware,
+            allow_user_scope: false,
+            allow_workspace_scope: false,
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub fact_id: FactId,
@@ -18,6 +129,8 @@ pub struct Fact {
     pub last_accessed: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub continuity: MemoryContinuity,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +162,8 @@ pub struct AgentEvent {
     pub access_count: u32,
     pub last_accessed: DateTime<Utc>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub continuity: MemoryContinuity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +185,8 @@ pub struct Procedure {
     /// How relevant this procedure is to the associated skill (0.0–1.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_relevance: Option<f32>,
+    #[serde(default)]
+    pub continuity: MemoryContinuity,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +194,27 @@ pub struct MemoryPacket {
     pub facts: Vec<Fact>,
     pub events: Vec<AgentEvent>,
     pub procedures: Vec<Procedure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<MemoryRetrievalTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemorySelection {
+    pub memory_id: String,
+    pub kind: String,
+    pub score: f32,
+    pub relevance: f32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MemoryRetrievalTrace {
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub estimated_tokens: usize,
+    pub duration_ms: u64,
+    pub query_aware: bool,
+    pub selections: Vec<MemorySelection>,
 }
 
 impl MemoryPacket {
@@ -91,7 +229,9 @@ impl MemoryPacket {
             return String::new();
         }
 
-        let mut out = String::from("\n<agent_memory>\n");
+        let mut out = String::from(
+            "\n<agent_memory>\nOnly use memories that are relevant to the current request. Memory IDs are local provenance references.\n",
+        );
 
         if !self.facts.is_empty() {
             out.push_str("<facts>\n");
@@ -102,8 +242,12 @@ impl MemoryPacket {
                 };
                 let _ = writeln!(
                     out,
-                    "- {}: {} (confidence: {:.2})",
-                    fact.key, val, fact.confidence
+                    "- [memory:{}] {}: {} (confidence: {:.2}, scope: {:?})",
+                    fact.fact_id.to_hex(),
+                    fact.key,
+                    val,
+                    fact.confidence,
+                    fact.continuity.scope
                 );
             }
             out.push_str("</facts>\n");
@@ -114,7 +258,8 @@ impl MemoryPacket {
             for event in &self.events {
                 let _ = writeln!(
                     out,
-                    "- [{}] {}: {}",
+                    "- [memory:{}] [{}] {}: {}",
+                    event.event_id.to_hex(),
                     event.timestamp.format("%Y-%m-%d"),
                     event.event_type,
                     event.summary
@@ -134,7 +279,8 @@ impl MemoryPacket {
                     .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "- \"{}\": {} (success: {:.0}%){skill_tag}",
+                    "- [memory:{}] \"{}\": {} (success: {:.0}%){skill_tag}",
+                    proc.procedure_id.to_hex(),
                     proc.name,
                     steps,
                     proc.success_rate * 100.0
@@ -203,6 +349,7 @@ mod tests {
             last_accessed: now,
             created_at: now,
             updated_at: now,
+            continuity: MemoryContinuity::default(),
         }
     }
 
@@ -218,6 +365,7 @@ mod tests {
             access_count: 0,
             last_accessed: now,
             timestamp: now,
+            continuity: MemoryContinuity::default(),
         }
     }
 
@@ -237,6 +385,7 @@ mod tests {
             updated_at: now,
             skill_name: None,
             skill_relevance: None,
+            continuity: MemoryContinuity::default(),
         }
     }
 
@@ -309,6 +458,7 @@ mod tests {
             last_accessed: now,
             created_at: now,
             updated_at: now,
+            continuity: MemoryContinuity::default(),
         };
         let p = MemoryPacket {
             facts: vec![fact],
@@ -324,6 +474,7 @@ mod tests {
             facts: vec![make_fact("k", "v")],
             events: vec![make_event("task_run", "did stuff")],
             procedures: vec![make_procedure("deploy", vec!["build", "push"])],
+            trace: None,
         };
         let out = p.format_for_prompt();
         assert!(out.contains("<facts>"));

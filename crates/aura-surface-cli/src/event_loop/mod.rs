@@ -72,6 +72,7 @@ pub async fn run_event_loop(ctx: EventLoopContext<'_>) -> anyhow::Result<()> {
                 agent_id,
                 None,
                 Vec::new(),
+                None,
             ),
         );
     }

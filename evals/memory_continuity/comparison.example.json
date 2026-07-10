@@ -1,0 +1,17 @@
+{
+  "agent": "example-agent-adapter",
+  "runs": [
+    {
+      "scenario_id": "recall-test-command",
+      "recalled_ids": ["test-command", "favorite-color"],
+      "estimated_tokens": 64,
+      "duration_ms": 12
+    },
+    {
+      "scenario_id": "approval-and-sensitive-safety",
+      "recalled_ids": ["customer-region", "sensitive-api-key"],
+      "estimated_tokens": 80,
+      "duration_ms": 15
+    }
+  ]
+}

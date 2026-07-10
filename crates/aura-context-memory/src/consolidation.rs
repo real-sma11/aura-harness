@@ -268,6 +268,7 @@ impl MemoryConsolidator {
                     access_count: 0,
                     last_accessed: now,
                     timestamp: now,
+                    continuity: crate::types::MemoryContinuity::default(),
                 };
                 s.put_event(&event)?;
             }
@@ -503,6 +504,7 @@ fn apply_evolution(
                     last_accessed: now,
                     created_at: now,
                     updated_at: now,
+                    continuity: crate::types::MemoryContinuity::default(),
                 };
                 store.put_fact(&fact)?;
                 insights += 1;

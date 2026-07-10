@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use aura_agent::{AgentLoopResult, TurnObserver};
 use aura_context_memory::{MemoryManager, TurnSummary};
 use aura_core_types::AgentId;
-use tracing::warn;
 
 /// Build a layer-neutral [`TurnSummary`] from an
 /// [`AgentLoopResult`].
@@ -63,6 +62,7 @@ pub struct MemoryTurnObserver {
     agent_id: AgentId,
     auth_token: Option<String>,
     active_skills: Vec<String>,
+    source_session_id: Option<String>,
 }
 
 impl MemoryTurnObserver {
@@ -84,12 +84,14 @@ impl MemoryTurnObserver {
         agent_id: AgentId,
         auth_token: Option<String>,
         active_skills: Vec<String>,
+        source_session_id: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             manager,
             agent_id,
             auth_token,
             active_skills,
+            source_session_id,
         })
     }
 }
@@ -98,25 +100,12 @@ impl MemoryTurnObserver {
 impl TurnObserver for MemoryTurnObserver {
     async fn on_turn_complete(&self, result: &AgentLoopResult) {
         let summary = turn_summary_from_result(result);
-        if let Err(e) = self
-            .manager
-            .process_result_with_context(
-                self.agent_id,
-                &summary,
-                self.auth_token.clone(),
-                &self.active_skills,
-            )
-            .await
-        {
-            // Best-effort: a failed memory write must not abort the
-            // conversation. The `agent_id` field lets operators grep
-            // for a flapping ingest pipeline in the structured-log
-            // stream.
-            warn!(
-                error = %e,
-                agent_id = ?self.agent_id,
-                "Memory ingestion failed after turn"
-            );
-        }
+        self.manager.process_result_in_background(
+            self.agent_id,
+            summary,
+            self.auth_token.clone(),
+            self.active_skills.clone(),
+            self.source_session_id.clone(),
+        );
     }
 }

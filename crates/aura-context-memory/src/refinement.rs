@@ -41,6 +41,11 @@ impl Default for RefinerConfig {
 }
 
 impl LlmRefiner {
+    #[must_use]
+    pub fn model_name(&self) -> &str {
+        &self.config.model
+    }
+
     /// Construct a refiner that routes all refinement / extraction
     /// completions through `provider`.
     ///
