@@ -2,7 +2,7 @@
 
 use crate::error::MemoryError;
 use crate::extraction::{ConversationTurn, HeuristicExtractor};
-use crate::refinement::LlmRefiner;
+use crate::refinement::{LlmRefiner, RefinementRequestContext};
 use crate::store::MemoryStoreApi;
 use crate::turn_summary::TurnSummary;
 use crate::types::{
@@ -122,6 +122,31 @@ impl MemoryWritePipeline {
         source_session_id: Option<&str>,
         initial_status: MemoryStatus,
     ) -> Result<WriteReport, MemoryError> {
+        self.ingest_with_provenance_and_request_context(
+            agent_id,
+            summary,
+            turn,
+            RefinementRequestContext {
+                auth_token,
+                ..Default::default()
+            },
+            active_skills,
+            source_session_id,
+            initial_status,
+        )
+        .await
+    }
+
+    pub async fn ingest_with_provenance_and_request_context(
+        &self,
+        agent_id: AgentId,
+        summary: &TurnSummary,
+        turn: Option<&ConversationTurn>,
+        request_context: RefinementRequestContext,
+        active_skills: &[String],
+        source_session_id: Option<&str>,
+        initial_status: MemoryStatus,
+    ) -> Result<WriteReport, MemoryError> {
         let mut report = WriteReport::default();
 
         // Stage 1: Heuristic extraction (free, no LLM)
@@ -136,7 +161,12 @@ impl MemoryWritePipeline {
         // Stage 2: LLM extraction + refinement in one call
         let refined = self
             .refiner
-            .extract_and_refine_with_skills(candidates, turn, auth_token, active_skills)
+            .extract_and_refine_with_skills_and_context(
+                candidates,
+                turn,
+                request_context,
+                active_skills,
+            )
             .await?;
         report.candidates_refined = refined.len();
 

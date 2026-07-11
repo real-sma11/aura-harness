@@ -4,7 +4,7 @@ use crate::consolidation::{ConsolidationConfig, ConsolidationReport, MemoryConso
 use crate::error::MemoryError;
 use crate::extraction::ConversationTurn;
 use crate::procedures::{ProcedureConfig, ProcedureExtractor, StepSequence};
-use crate::refinement::{LlmRefiner, RefinerConfig};
+use crate::refinement::{LlmRefiner, RefinementRequestContext, RefinerConfig};
 use crate::retrieval::{MemoryQueryContext, MemoryRetriever, RetrievalConfig};
 use crate::store::{MemoryStore, MemoryStoreApi};
 use crate::turn_summary::TurnSummary;
@@ -269,6 +269,27 @@ impl MemoryManager {
         active_skills: &[String],
         source_session_id: Option<&str>,
     ) -> Result<WriteReport, MemoryError> {
+        self.process_result_with_source_and_request_context(
+            agent_id,
+            summary,
+            RefinementRequestContext {
+                auth_token,
+                ..Default::default()
+            },
+            active_skills,
+            source_session_id,
+        )
+        .await
+    }
+
+    pub async fn process_result_with_source_and_request_context(
+        &self,
+        agent_id: AgentId,
+        summary: &TurnSummary,
+        request_context: RefinementRequestContext,
+        active_skills: &[String],
+        source_session_id: Option<&str>,
+    ) -> Result<WriteReport, MemoryError> {
         let continuity = self.continuity_config(agent_id).await?;
         if !continuity.generate_memory || continuity.write_policy == MemoryWritePolicy::ExplicitOnly
         {
@@ -281,11 +302,11 @@ impl MemoryManager {
         };
         let turn = ConversationTurn::from_messages(&summary.messages, &summary.total_text);
         self.pipeline
-            .ingest_with_provenance(
+            .ingest_with_provenance_and_request_context(
                 agent_id,
                 summary,
                 turn.as_ref(),
-                auth_token,
+                request_context,
                 active_skills,
                 source_session_id,
                 initial_status,
@@ -303,14 +324,34 @@ impl MemoryManager {
         active_skills: Vec<String>,
         source_session_id: Option<String>,
     ) {
+        self.process_result_in_background_with_request_context(
+            agent_id,
+            summary,
+            RefinementRequestContext {
+                auth_token,
+                ..Default::default()
+            },
+            active_skills,
+            source_session_id,
+        );
+    }
+
+    pub fn process_result_in_background_with_request_context(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        summary: TurnSummary,
+        request_context: RefinementRequestContext,
+        active_skills: Vec<String>,
+        source_session_id: Option<String>,
+    ) {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(45),
-                manager.process_result_with_source(
+                manager.process_result_with_source_and_request_context(
                     agent_id,
                     &summary,
-                    auth_token,
+                    request_context,
                     &active_skills,
                     source_session_id.as_deref(),
                 ),

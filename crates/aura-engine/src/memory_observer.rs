@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aura_agent::{AgentLoopResult, TurnObserver};
-use aura_context_memory::{MemoryManager, TurnSummary};
+use aura_context_memory::{MemoryManager, RefinementRequestContext, TurnSummary};
 use aura_core_types::AgentId;
 
 /// Build a layer-neutral [`TurnSummary`] from an
@@ -60,7 +60,7 @@ pub fn turn_summary_from_result(result: &AgentLoopResult) -> TurnSummary {
 pub struct MemoryTurnObserver {
     manager: Arc<MemoryManager>,
     agent_id: AgentId,
-    auth_token: Option<String>,
+    request_context: RefinementRequestContext,
     active_skills: Vec<String>,
     source_session_id: Option<String>,
 }
@@ -86,10 +86,32 @@ impl MemoryTurnObserver {
         active_skills: Vec<String>,
         source_session_id: Option<String>,
     ) -> Arc<Self> {
+        Self::new_with_request_context(
+            manager,
+            agent_id,
+            RefinementRequestContext {
+                auth_token,
+                ..Default::default()
+            },
+            active_skills,
+            source_session_id,
+        )
+    }
+
+    /// Build an observer that preserves the originating Aura routing identity
+    /// on auxiliary memory-extraction model calls.
+    #[must_use]
+    pub fn new_with_request_context(
+        manager: Arc<MemoryManager>,
+        agent_id: AgentId,
+        request_context: RefinementRequestContext,
+        active_skills: Vec<String>,
+        source_session_id: Option<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             manager,
             agent_id,
-            auth_token,
+            request_context,
             active_skills,
             source_session_id,
         })
@@ -100,12 +122,13 @@ impl MemoryTurnObserver {
 impl TurnObserver for MemoryTurnObserver {
     async fn on_turn_complete(&self, result: &AgentLoopResult) {
         let summary = turn_summary_from_result(result);
-        self.manager.process_result_in_background(
-            self.agent_id,
-            summary,
-            self.auth_token.clone(),
-            self.active_skills.clone(),
-            self.source_session_id.clone(),
-        );
+        self.manager
+            .process_result_in_background_with_request_context(
+                self.agent_id,
+                summary,
+                self.request_context.clone(),
+                self.active_skills.clone(),
+                self.source_session_id.clone(),
+            );
     }
 }

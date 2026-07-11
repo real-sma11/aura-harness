@@ -31,6 +31,21 @@ pub struct RefinerConfig {
     pub auth_token: Option<String>,
 }
 
+/// Per-turn routing identity for memory extraction requests.
+///
+/// Memory refinement is an auxiliary model call, but it still belongs to the
+/// originating Aura request for authorization, billing, and observability.
+/// Keeping this context per call avoids leaking one session's identity into
+/// another when the shared memory manager handles concurrent agents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefinementRequestContext {
+    pub auth_token: Option<String>,
+    pub aura_project_id: Option<String>,
+    pub aura_agent_id: Option<String>,
+    pub aura_session_id: Option<String>,
+    pub aura_org_id: Option<String>,
+}
+
 impl Default for RefinerConfig {
     fn default() -> Self {
         Self {
@@ -84,19 +99,31 @@ impl LlmRefiner {
         auth_token_override: Option<String>,
         active_skills: &[String],
     ) -> Result<Vec<RefinedCandidate>, MemoryError> {
+        self.extract_and_refine_with_skills_and_context(
+            candidates,
+            turn,
+            RefinementRequestContext {
+                auth_token: auth_token_override,
+                ..Default::default()
+            },
+            active_skills,
+        )
+        .await
+    }
+
+    pub async fn extract_and_refine_with_skills_and_context(
+        &self,
+        candidates: Vec<MemoryCandidate>,
+        turn: Option<&ConversationTurn>,
+        request_context: RefinementRequestContext,
+        active_skills: &[String],
+    ) -> Result<Vec<RefinedCandidate>, MemoryError> {
         if candidates.is_empty() && turn.is_none() {
             return Ok(Vec::new());
         }
 
         let prompt = Self::build_extraction_prompt(&candidates, turn, active_skills);
-
-        let effective_token = auth_token_override.or_else(|| self.config.auth_token.clone());
-        let request = ModelRequest::builder(&self.config.model, EXTRACTOR_SYSTEM_PROMPT)
-            .messages(vec![Message::user(prompt)])
-            .max_tokens(1024)
-            .auth_token(effective_token)
-            .try_build()
-            .map_err(|e| MemoryError::Provider(e.to_string()))?;
+        let request = self.build_request(prompt, request_context)?;
 
         let response = self
             .provider
@@ -106,6 +133,26 @@ impl LlmRefiner {
 
         let response_text = response.message.text_content();
         Ok(Self::parse_response(&response_text, &candidates))
+    }
+
+    fn build_request(
+        &self,
+        prompt: String,
+        request_context: RefinementRequestContext,
+    ) -> Result<ModelRequest, MemoryError> {
+        let effective_token = request_context
+            .auth_token
+            .or_else(|| self.config.auth_token.clone());
+        ModelRequest::builder(&self.config.model, EXTRACTOR_SYSTEM_PROMPT)
+            .messages(vec![Message::user(prompt)])
+            .max_tokens(1024)
+            .auth_token(effective_token)
+            .aura_project_id(request_context.aura_project_id)
+            .aura_agent_id(request_context.aura_agent_id)
+            .aura_session_id(request_context.aura_session_id)
+            .aura_org_id(request_context.aura_org_id)
+            .try_build()
+            .map_err(|e| MemoryError::Provider(e.to_string()))
     }
 
     /// Backward-compatible entry point that only refines existing candidates
@@ -394,6 +441,7 @@ Be selective. Only extract items that would be useful across future sessions.";
 mod tests {
     use super::*;
     use crate::types::{CandidateType, MemoryCandidate};
+    use aura_model_reasoner::MockProvider;
 
     fn make_candidate(key: &str) -> MemoryCandidate {
         MemoryCandidate {
@@ -519,6 +567,29 @@ mod tests {
         let prompt = LlmRefiner::build_extraction_prompt(&candidates, None, &[]);
         assert!(prompt.contains("test_key"));
         assert!(prompt.contains("KEEP|DROP"));
+    }
+
+    #[test]
+    fn refinement_request_preserves_aura_routing_context() {
+        let refiner = LlmRefiner::new(Arc::new(MockProvider::new()), RefinerConfig::default());
+        let request = refiner
+            .build_request(
+                "extract memory".to_string(),
+                RefinementRequestContext {
+                    auth_token: Some("jwt".to_string()),
+                    aura_project_id: Some("project-123".to_string()),
+                    aura_agent_id: Some("agent-123".to_string()),
+                    aura_session_id: Some("session-123".to_string()),
+                    aura_org_id: Some("org-123".to_string()),
+                },
+            )
+            .expect("request should build");
+
+        assert_eq!(request.auth_token.as_deref(), Some("jwt"));
+        assert_eq!(request.aura_project_id.as_deref(), Some("project-123"));
+        assert_eq!(request.aura_agent_id.as_deref(), Some("agent-123"));
+        assert_eq!(request.aura_session_id.as_deref(), Some("session-123"));
+        assert_eq!(request.aura_org_id.as_deref(), Some("org-123"));
     }
 
     #[test]

@@ -730,15 +730,21 @@ async fn prepare_turn_context(
             },
         )
         .await;
-        config
-            .observers
-            .push(aura_engine::memory_observer::MemoryTurnObserver::new(
+        config.observers.push(
+            aura_engine::memory_observer::MemoryTurnObserver::new_with_request_context(
                 Arc::clone(mm),
                 mem_id,
-                session.auth_token.clone(),
+                aura_context_memory::RefinementRequestContext {
+                    auth_token: session.auth_token.clone(),
+                    aura_project_id: session.project_id.clone(),
+                    aura_agent_id: session.aura_agent_id.clone(),
+                    aura_session_id: session.aura_session_id.clone(),
+                    aura_org_id: session.aura_org_id.clone(),
+                },
                 active_skill_names,
                 Some(session.session_id.clone()),
-            ));
+            ),
+        );
     }
 
     let tools = session.tool_definitions.clone();

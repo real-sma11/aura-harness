@@ -43,7 +43,7 @@ pub use error::MemoryError;
 pub use extraction::ConversationTurn;
 pub use manager::MemoryManager;
 pub use procedures::{compute_skill_relevance, ProcedureConfig, ProcedureExtractor, StepSequence};
-pub use refinement::{LlmRefiner, RefinerConfig};
+pub use refinement::{LlmRefiner, RefinementRequestContext, RefinerConfig};
 pub use retrieval::{MemoryQueryContext, MemoryRetriever, RetrievalConfig};
 pub use salience::{estimate_tokens, score_event, score_fact, score_procedure};
 pub use store::{MemoryStats, MemoryStore, MemoryStoreApi};
