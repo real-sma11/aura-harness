@@ -1,11 +1,12 @@
 //! Query-aware retrieval of memory for system-prompt injection.
 
 use crate::error::MemoryError;
+use crate::safety::unsafe_for_prompt;
 use crate::salience;
 use crate::store::MemoryStoreApi;
 use crate::types::{
-    AgentEvent, Fact, MemoryPacket, MemoryRetrievalMode, MemoryRetrievalTrace, MemoryScope,
-    MemorySelection, MemorySensitivity, MemoryStatus, Procedure,
+    AgentEvent, Fact, MemoryAccessContext, MemoryPacket, MemoryRetrievalMode, MemoryRetrievalTrace,
+    MemoryScope, MemorySelection, MemorySensitivity, MemoryStatus, Procedure,
 };
 use aura_core_types::AgentId;
 use chrono::Utc;
@@ -19,7 +20,8 @@ pub struct MemoryQueryContext {
     pub text: String,
     pub active_skills: Vec<String>,
     pub allow_user_scope: bool,
-    pub allow_workspace_scope: bool,
+    pub allow_project_scope: bool,
+    pub access: MemoryAccessContext,
 }
 
 /// Retrieves and ranks agent memory for system-prompt injection.
@@ -88,17 +90,35 @@ impl MemoryRetriever {
                 .map(|skill| skill.to_ascii_lowercase())
                 .collect();
 
-            let mut facts = store.list_facts(agent_id)?;
-            let mut events =
-                store.list_events(agent_id, config.max_events.saturating_mul(10).max(50))?;
-            let mut procedures = store.list_procedures(agent_id)?;
+            let partitions = query.access.readable_partitions(
+                agent_id,
+                query.allow_user_scope,
+                query.allow_project_scope,
+            );
+            let mut facts = Vec::new();
+            let mut events = Vec::new();
+            let mut procedures = Vec::new();
+            for partition in partitions {
+                facts.extend(store.list_facts(partition)?);
+                events.extend(
+                    store.list_events(partition, config.max_events.saturating_mul(10).max(50))?,
+                );
+                procedures.extend(store.list_procedures(partition)?);
+            }
             let candidate_count = facts.len() + events.len() + procedures.len();
 
             facts.retain(|fact| {
-                fact.confidence >= config.min_confidence && eligible(&fact.continuity, &query)
+                fact.confidence >= config.min_confidence
+                    && eligible(&fact.continuity, &query)
+                    && !unsafe_for_prompt(&fact_text(fact))
             });
-            events.retain(|event| eligible(&event.continuity, &query));
-            procedures.retain(|procedure| eligible(&procedure.continuity, &query));
+            events.retain(|event| {
+                eligible(&event.continuity, &query) && !unsafe_for_prompt(&event_text(event))
+            });
+            procedures.retain(|procedure| {
+                eligible(&procedure.continuity, &query)
+                    && !unsafe_for_prompt(&procedure_text(procedure))
+            });
 
             let mut scored_facts: Vec<_> = facts
                 .into_iter()
@@ -189,6 +209,7 @@ impl MemoryRetriever {
                 salience::estimate_fact_tokens,
                 "fact",
                 |fact| fact.fact_id.to_hex(),
+                |fact| fact.continuity.scope,
                 &mut selections,
             );
             let events = select_budgeted(
@@ -197,6 +218,7 @@ impl MemoryRetriever {
                 salience::estimate_event_tokens,
                 "event",
                 |event| event.event_id.to_hex(),
+                |event| event.continuity.scope,
                 &mut selections,
             );
             let procedures = select_budgeted(
@@ -205,6 +227,7 @@ impl MemoryRetriever {
                 salience::estimate_procedure_tokens,
                 "procedure",
                 |procedure| procedure.procedure_id.to_hex(),
+                |procedure| procedure.continuity.scope,
                 &mut selections,
             );
 
@@ -240,7 +263,7 @@ fn eligible(continuity: &crate::types::MemoryContinuity, query: &MemoryQueryCont
         && match continuity.scope {
             MemoryScope::Agent => true,
             MemoryScope::User => query.allow_user_scope,
-            MemoryScope::Workspace => query.allow_workspace_scope,
+            MemoryScope::Project => query.allow_project_scope,
         }
 }
 
@@ -254,6 +277,7 @@ fn select_budgeted<T>(
     estimator: fn(&T) -> usize,
     kind: &str,
     id: fn(&T) -> String,
+    scope_of: fn(&T) -> MemoryScope,
     selections: &mut Vec<MemorySelection>,
 ) -> Vec<T> {
     let mut result = Vec::new();
@@ -273,6 +297,7 @@ fn select_budgeted<T>(
             } else {
                 "durable_salience".to_string()
             },
+            scope: scope_of(&item),
         });
         result.push(item);
     }
@@ -297,6 +322,7 @@ fn procedure_text(procedure: &Procedure) -> String {
     )
 }
 
+#[allow(clippy::cast_precision_loss)] // token sets are bounded far below f32's exact integer range
 fn lexical_relevance(query: &HashSet<String>, document: &str) -> f32 {
     if query.is_empty() {
         return 0.0;

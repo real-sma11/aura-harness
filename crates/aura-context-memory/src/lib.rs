@@ -29,6 +29,7 @@ mod manager;
 mod procedures;
 mod refinement;
 mod retrieval;
+mod safety;
 mod salience;
 mod store;
 mod turn_summary;
@@ -49,8 +50,8 @@ pub use salience::{estimate_tokens, score_event, score_fact, score_procedure};
 pub use store::{MemoryStats, MemoryStore, MemoryStoreApi};
 pub use turn_summary::TurnSummary;
 pub use types::{
-    AgentContinuityConfig, AgentEvent, Fact, FactSource, MemoryCandidate, MemoryContinuity,
-    MemoryPacket, MemoryProvenance, MemoryRetrievalMode, MemoryRetrievalTrace, MemoryScope,
-    MemorySelection, MemorySensitivity, MemoryStatus, MemoryWritePolicy, Procedure,
+    AgentContinuityConfig, AgentEvent, Fact, FactSource, MemoryAccessContext, MemoryCandidate,
+    MemoryContinuity, MemoryPacket, MemoryProvenance, MemoryRetrievalMode, MemoryRetrievalTrace,
+    MemoryScope, MemorySelection, MemorySensitivity, MemoryStatus, MemoryWritePolicy, Procedure,
 };
 pub use write_pipeline::{MemoryWritePipeline, WriteConfig, WriteReport};

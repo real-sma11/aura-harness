@@ -782,7 +782,7 @@ mod tests {
             write_policy: crate::types::MemoryWritePolicy::Approval,
             retrieval_mode: crate::types::MemoryRetrievalMode::QueryAware,
             allow_user_scope: false,
-            allow_workspace_scope: false,
+            allow_project_scope: false,
         };
 
         store

@@ -17,6 +17,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 rocksdb = { workspace = true }
 tokio = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

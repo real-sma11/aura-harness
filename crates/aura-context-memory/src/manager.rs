@@ -130,11 +130,11 @@ impl MemoryManager {
     }
 
     #[must_use]
-    pub fn latest_retrieval_trace(&self, agent_id: AgentId) -> Option<MemoryRetrievalTrace> {
+    pub fn latest_retrieval_trace(&self, partition_id: AgentId) -> Option<MemoryRetrievalTrace> {
         self.latest_traces
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&agent_id)
+            .get(&partition_id)
             .cloned()
     }
 
@@ -186,7 +186,13 @@ impl MemoryManager {
             return;
         }
         query.allow_user_scope = continuity.allow_user_scope;
-        query.allow_workspace_scope = continuity.allow_workspace_scope;
+        query.allow_project_scope = continuity.allow_project_scope;
+        // Retrieval evidence is private to the same project-agent partition as
+        // the agent's memory. This prevents memory IDs and recall counts from a
+        // different project surfacing through the diagnostics endpoint.
+        let trace_partition = query
+            .access
+            .storage_id(agent_id, crate::types::MemoryScope::Agent);
 
         match self
             .retriever
@@ -198,7 +204,7 @@ impl MemoryManager {
                     self.latest_traces
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(agent_id, trace);
+                        .insert(trace_partition, trace);
                 }
                 let block = packet.format_for_prompt();
                 if !block.is_empty() {
@@ -360,7 +366,7 @@ impl MemoryManager {
             match result {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
-                    tracing::warn!(%error, ?agent_id, "Background memory ingestion failed")
+                    tracing::warn!(%error, ?agent_id, "Background memory ingestion failed");
                 }
                 Err(_) => tracing::warn!(?agent_id, "Background memory ingestion timed out"),
             }

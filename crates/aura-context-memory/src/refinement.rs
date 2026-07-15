@@ -5,7 +5,7 @@
 
 use crate::error::MemoryError;
 use crate::extraction::ConversationTurn;
-use crate::types::{CandidateType, MemoryCandidate, RefinedCandidate};
+use crate::types::{CandidateType, MemoryCandidate, MemoryScope, RefinedCandidate};
 use aura_model_reasoner::{Message, ModelProvider, ModelRequest};
 use std::fmt::Write;
 use std::sync::Arc;
@@ -44,6 +44,9 @@ pub struct RefinementRequestContext {
     pub aura_agent_id: Option<String>,
     pub aura_session_id: Option<String>,
     pub aura_org_id: Option<String>,
+    /// Stable end-user identity used only for local memory partitioning and
+    /// provenance. It is not forwarded to the model provider.
+    pub user_id: Option<String>,
 }
 
 impl Default for RefinerConfig {
@@ -221,18 +224,18 @@ impl LlmRefiner {
         if !candidates.is_empty() {
             prompt.push_str(
                 "For each pre-extracted candidate, respond with one line:\n\
-                 N. KEEP|DROP key=\"refined_key\" confidence=0.X importance=0.X\n\n",
+                 N. KEEP|DROP key=\"refined_key\" scope=agent|project|user confidence=0.X importance=0.X\n\n",
             );
         }
 
         prompt.push_str(
             "If the conversation contains facts worth remembering long-term, \
              output additional lines:\n\
-             FACT key=\"snake_case_key\" value=\"the fact\" confidence=0.X importance=0.X\n\n\
+             FACT key=\"snake_case_key\" value=\"the fact\" scope=agent|project|user confidence=0.X importance=0.X\n\n\
              If the user states a standing instruction, workflow preference, or \
              \"always do X when Y\" rule, output:\n\
              PROCEDURE name=\"snake_case_name\" trigger=\"when this happens\" \
-             steps=\"step1;step2\" skill=\"skill_name_or_none\" \
+             steps=\"step1;step2\" skill=\"skill_name_or_none\" scope=agent|project|user \
              confidence=0.X importance=0.X\n\n\
              If there are no new facts or procedures to extract, output nothing extra.",
         );
@@ -283,6 +286,7 @@ impl LlmRefiner {
                 .unwrap_or(candidates[idx].preliminary_importance);
             let key = extract_quoted(rest, "key=")
                 .unwrap_or_else(|| candidates[idx].key.clone().unwrap_or_default());
+            let scope = extract_scope(rest);
 
             seen_indices.push(idx);
             refined.push(RefinedCandidate {
@@ -293,6 +297,7 @@ impl LlmRefiner {
                 confidence,
                 importance,
                 keep,
+                scope,
                 trigger: None,
                 steps: None,
                 skill_name: None,
@@ -310,6 +315,7 @@ impl LlmRefiner {
                     confidence: c.preliminary_confidence,
                     importance: c.preliminary_importance,
                     keep: true,
+                    scope: MemoryScope::Agent,
                     trigger: None,
                     steps: None,
                     skill_name: None,
@@ -326,6 +332,7 @@ fn parse_fact_line(line: &str) -> Option<RefinedCandidate> {
     let value = extract_quoted(line, "value=")?;
     let confidence = extract_float(line, "confidence=").unwrap_or(0.8);
     let importance = extract_float(line, "importance=").unwrap_or(0.5);
+    let scope = extract_scope(line);
 
     Some(RefinedCandidate {
         candidate_type: CandidateType::Fact,
@@ -335,6 +342,7 @@ fn parse_fact_line(line: &str) -> Option<RefinedCandidate> {
         confidence,
         importance,
         keep: true,
+        scope,
         trigger: None,
         steps: None,
         skill_name: None,
@@ -348,6 +356,7 @@ fn parse_procedure_line(line: &str) -> Option<RefinedCandidate> {
     let skill = extract_quoted(line, "skill=").unwrap_or_else(|| "none".to_string());
     let confidence = extract_float(line, "confidence=").unwrap_or(0.8);
     let importance = extract_float(line, "importance=").unwrap_or(0.7);
+    let scope = extract_scope(line);
 
     let steps: Vec<String> = steps_raw
         .split(';')
@@ -369,10 +378,32 @@ fn parse_procedure_line(line: &str) -> Option<RefinedCandidate> {
         confidence,
         importance,
         keep: true,
+        scope,
         trigger: Some(trigger),
         steps: Some(steps),
         skill_name,
     })
+}
+
+fn extract_scope(text: &str) -> MemoryScope {
+    match extract_unquoted(text, "scope=")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "user" | "personal" => MemoryScope::User,
+        "project" | "workspace" | "shared" => MemoryScope::Project,
+        _ => MemoryScope::Agent,
+    }
+}
+
+fn extract_unquoted(text: &str, prefix: &str) -> Option<String> {
+    let start = text.find(prefix)? + prefix.len();
+    let rest = &text[start..];
+    let end = rest
+        .find(|character: char| character.is_whitespace())
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim_matches(['"', '\'']).to_string())
 }
 
 fn extract_float(text: &str, prefix: &str) -> Option<f32> {
@@ -429,10 +460,17 @@ What NOT to extract:
 - Greetings or conversational filler
 - Information already covered by a pre-extracted candidate
 
+Choose exactly one scope for every kept item:
+- user: identity, communication style, or preference that should follow the user everywhere
+- project: a project decision, requirement, convention, dependency, or reusable procedure that every agent on this project should know
+- agent: context useful only to this agent's role inside the current project
+
+Never mark secrets, credentials, private keys, access tokens, or speculative assumptions as project or user memory.
+
 Output format — one line per item:
-- For pre-extracted candidates: N. KEEP|DROP key=\"refined_key\" confidence=0.X importance=0.X
-- For newly extracted facts: FACT key=\"snake_case_key\" value=\"concise fact\" confidence=0.X importance=0.X
-- For procedures: PROCEDURE name=\"snake_case_name\" trigger=\"when condition\" steps=\"step1;step2\" skill=\"skill_name_or_none\" confidence=0.X importance=0.X
+- For pre-extracted candidates: N. KEEP|DROP key=\"refined_key\" scope=agent|project|user confidence=0.X importance=0.X
+- For newly extracted facts: FACT key=\"snake_case_key\" value=\"concise fact\" scope=agent|project|user confidence=0.X importance=0.X
+- For procedures: PROCEDURE name=\"snake_case_name\" trigger=\"when condition\" steps=\"step1;step2\" skill=\"skill_name_or_none\" scope=agent|project|user confidence=0.X importance=0.X
 
 For PROCEDURE: set skill= to the relevant active skill name if one applies, \
 otherwise use \"none\". Steps are semicolon-separated.
@@ -583,6 +621,7 @@ mod tests {
                     aura_agent_id: Some("agent-123".to_string()),
                     aura_session_id: Some("session-123".to_string()),
                     aura_org_id: Some("org-123".to_string()),
+                    user_id: Some("user-123".to_string()),
                 },
             )
             .expect("request should build");

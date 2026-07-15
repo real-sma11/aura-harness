@@ -1,13 +1,17 @@
 //! Deterministic Agent Continuity benchmark and cross-agent report adapter.
 
+// Scenario and selection counts are deliberately tiny and exactly representable
+// as f64; the casts keep the emitted report schema straightforward.
+#![allow(clippy::cast_precision_loss)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aura_context_memory::{
-    Fact, FactSource, MemoryContinuity, MemoryProvenance, MemoryQueryContext, MemoryRetrievalMode,
-    MemoryRetriever, MemoryScope, MemorySensitivity, MemoryStatus, MemoryStore, MemoryStoreApi,
-    Procedure, RetrievalConfig,
+    Fact, FactSource, MemoryAccessContext, MemoryContinuity, MemoryProvenance, MemoryQueryContext,
+    MemoryRetrievalMode, MemoryRetriever, MemoryScope, MemorySensitivity, MemoryStatus,
+    MemoryStore, MemoryStoreApi, Procedure, RetrievalConfig,
 };
 use aura_core_types::{AgentId, FactId, ProcedureId};
 use chrono::Utc;
@@ -28,7 +32,8 @@ struct Scenario {
     query: String,
     active_skills: Vec<String>,
     allow_user_scope: bool,
-    allow_workspace_scope: bool,
+    #[serde(alias = "allow_workspace_scope")]
+    allow_project_scope: bool,
     expected_ids: Vec<String>,
     records: Vec<EvalRecord>,
 }
@@ -108,7 +113,18 @@ struct SuiteReport {
     thresholds: Thresholds,
     aura_passed: bool,
     aura_improvement_vs_salience: AuraImprovement,
+    scope_isolation: ScopeIsolationReport,
     reports: Vec<AgentReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScopeIsolationReport {
+    checks_passed: usize,
+    checks_total: usize,
+    relevant_recall_rate: f64,
+    forbidden_leakage_rate: f64,
+    recalled_keys: Vec<String>,
+    forbidden_keys: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,7 +177,7 @@ fn forbidden_ids(scenario: &Scenario) -> HashSet<String> {
             record.status != MemoryStatus::Active
                 || record.sensitivity == MemorySensitivity::Sensitive
                 || (record.scope == MemoryScope::User && !scenario.allow_user_scope)
-                || (record.scope == MemoryScope::Workspace && !scenario.allow_workspace_scope)
+                || (record.scope == MemoryScope::Project && !scenario.allow_project_scope)
         })
         .map(|record| record.id.clone())
         .collect()
@@ -175,6 +191,11 @@ async fn run_aura(suite: &EvalSuite, mode: MemoryRetrievalMode, agent_name: &str
 
     for scenario in &suite.scenarios {
         let agent_id = AgentId::generate();
+        let access = MemoryAccessContext {
+            project_id: Some(format!("eval-project:{}", scenario.id)),
+            user_id: Some("eval-user".to_string()),
+            include_legacy: false,
+        };
         let now = Utc::now();
         let mut memory_ids = HashMap::new();
 
@@ -186,7 +207,7 @@ async fn run_aura(suite: &EvalSuite, mode: MemoryRetrievalMode, agent_name: &str
                     store
                         .put_fact(&Fact {
                             fact_id,
-                            agent_id,
+                            agent_id: access.storage_id(agent_id, record.scope),
                             key: record.key.clone(),
                             value: serde_json::Value::String(record.value.clone()),
                             confidence: record.confidence,
@@ -206,7 +227,7 @@ async fn run_aura(suite: &EvalSuite, mode: MemoryRetrievalMode, agent_name: &str
                     store
                         .put_procedure(&Procedure {
                             procedure_id,
-                            agent_id,
+                            agent_id: access.storage_id(agent_id, record.scope),
                             name: record.key.clone(),
                             trigger: record.trigger.clone(),
                             steps: record.steps.clone(),
@@ -233,7 +254,8 @@ async fn run_aura(suite: &EvalSuite, mode: MemoryRetrievalMode, agent_name: &str
                     text: scenario.query.clone(),
                     active_skills: scenario.active_skills.clone(),
                     allow_user_scope: scenario.allow_user_scope,
-                    allow_workspace_scope: scenario.allow_workspace_scope,
+                    allow_project_scope: scenario.allow_project_scope,
+                    access: access.clone(),
                 },
                 mode,
             )
@@ -338,6 +360,132 @@ fn score_external(suite: &EvalSuite, comparison: ExternalComparison) -> AgentRep
     aggregate(comparison.agent, runs)
 }
 
+async fn evaluate_scope_isolation() -> ScopeIsolationReport {
+    let temp = tempfile::tempdir().expect("create scope benchmark directory");
+    let store: Arc<dyn MemoryStoreApi> = Arc::new(MemoryStore::new(test_db(temp.path())));
+    let agent_a = AgentId::generate();
+    let agent_b = AgentId::generate();
+    let project_x_user_u = MemoryAccessContext {
+        project_id: Some("project-x".to_string()),
+        user_id: Some("user-u".to_string()),
+        include_legacy: false,
+    };
+    let project_y_user_v = MemoryAccessContext {
+        project_id: Some("project-y".to_string()),
+        user_id: Some("user-v".to_string()),
+        include_legacy: false,
+    };
+    let now = Utc::now();
+    let seeds = [
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::Agent),
+            MemoryScope::Agent,
+            "marker_agent_a_private",
+        ),
+        (
+            project_x_user_u.storage_id(agent_b, MemoryScope::Agent),
+            MemoryScope::Agent,
+            "marker_agent_b_private",
+        ),
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::Project),
+            MemoryScope::Project,
+            "marker_project_x_shared",
+        ),
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::User),
+            MemoryScope::User,
+            "marker_user_u_personal",
+        ),
+        (
+            project_y_user_v.storage_id(agent_a, MemoryScope::Project),
+            MemoryScope::Project,
+            "marker_project_y_shared",
+        ),
+        (
+            project_y_user_v.storage_id(agent_a, MemoryScope::User),
+            MemoryScope::User,
+            "marker_user_v_personal",
+        ),
+        (agent_b, MemoryScope::Agent, "marker_legacy_unscoped"),
+    ];
+    for (partition, scope, key) in seeds {
+        store
+            .put_fact(&Fact {
+                fact_id: FactId::generate(),
+                agent_id: partition,
+                key: key.to_string(),
+                value: serde_json::Value::String(key.to_string()),
+                confidence: 0.99,
+                source: FactSource::Extracted,
+                importance: 0.9,
+                access_count: 0,
+                last_accessed: now,
+                created_at: now,
+                updated_at: now,
+                continuity: MemoryContinuity {
+                    scope,
+                    ..MemoryContinuity::default()
+                },
+            })
+            .expect("seed scope benchmark fact");
+    }
+
+    let packet = MemoryRetriever::new(
+        store,
+        RetrievalConfig {
+            max_facts: 20,
+            token_budget: 10_000,
+            ..RetrievalConfig::default()
+        },
+    )
+    .retrieve_with_query(
+        agent_b,
+        MemoryQueryContext {
+            text: "marker".to_string(),
+            allow_user_scope: true,
+            allow_project_scope: true,
+            access: project_x_user_u,
+            ..MemoryQueryContext::default()
+        },
+        MemoryRetrievalMode::QueryAware,
+    )
+    .await
+    .expect("run scope benchmark retrieval");
+
+    let recalled: HashSet<String> = packet.facts.into_iter().map(|fact| fact.key).collect();
+    let expected = [
+        "marker_agent_b_private",
+        "marker_project_x_shared",
+        "marker_user_u_personal",
+    ];
+    let forbidden = [
+        "marker_agent_a_private",
+        "marker_project_y_shared",
+        "marker_user_v_personal",
+        "marker_legacy_unscoped",
+    ];
+    let recalled_keys = expected
+        .iter()
+        .filter(|key| recalled.contains(**key))
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+    let forbidden_keys = forbidden
+        .iter()
+        .filter(|key| recalled.contains(**key))
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+    let checks_passed = recalled_keys.len() + forbidden.len() - forbidden_keys.len();
+    ScopeIsolationReport {
+        checks_passed,
+        checks_total: expected.len() + forbidden.len(),
+        relevant_recall_rate: recalled_keys.len() as f64 / expected.len() as f64,
+        forbidden_leakage_rate: forbidden_keys.len() as f64 / forbidden.len() as f64,
+        recalled_keys,
+        forbidden_keys,
+    }
+}
+
 fn arguments() -> (Option<PathBuf>, Vec<PathBuf>) {
     let mut output = None;
     let mut comparisons = Vec::new();
@@ -378,6 +526,7 @@ async fn main() {
         "aura-salience-baseline",
     )
     .await;
+    let scope_isolation = evaluate_scope_isolation().await;
     let thresholds = Thresholds {
         minimum_recall_at_k: 0.9,
         minimum_precision_at_k: 0.8,
@@ -387,7 +536,9 @@ async fn main() {
     let aura_passed = aura.recall_at_k >= thresholds.minimum_recall_at_k
         && aura.precision_at_k >= thresholds.minimum_precision_at_k
         && aura.forbidden_recall_rate <= thresholds.maximum_forbidden_recall_rate
-        && aura.average_estimated_tokens <= thresholds.maximum_average_estimated_tokens;
+        && aura.average_estimated_tokens <= thresholds.maximum_average_estimated_tokens
+        && scope_isolation.checks_passed == scope_isolation.checks_total
+        && scope_isolation.forbidden_leakage_rate == 0.0;
     let aura_improvement_vs_salience = AuraImprovement {
         recall_at_k_delta: aura.recall_at_k - salience_baseline.recall_at_k,
         precision_at_k_delta: aura.precision_at_k - salience_baseline.precision_at_k,
@@ -417,6 +568,7 @@ async fn main() {
         thresholds,
         aura_passed,
         aura_improvement_vs_salience,
+        scope_isolation,
         reports,
     };
     let json = serde_json::to_string_pretty(&report).expect("serialize benchmark report");

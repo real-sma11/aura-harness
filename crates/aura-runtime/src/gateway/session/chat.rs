@@ -726,6 +726,11 @@ async fn prepare_turn_context(
             aura_context_memory::MemoryQueryContext {
                 text: msg.content.clone(),
                 active_skills: active_skill_names.clone(),
+                access: aura_context_memory::MemoryAccessContext {
+                    project_id: session.project_id.clone(),
+                    user_id: (!session.user_id.trim().is_empty()).then(|| session.user_id.clone()),
+                    include_legacy: false,
+                },
                 ..Default::default()
             },
         )
@@ -740,6 +745,7 @@ async fn prepare_turn_context(
                     aura_agent_id: session.aura_agent_id.clone(),
                     aura_session_id: session.aura_session_id.clone(),
                     aura_org_id: session.aura_org_id.clone(),
+                    user_id: (!session.user_id.trim().is_empty()).then(|| session.user_id.clone()),
                 },
                 active_skill_names,
                 Some(session.session_id.clone()),

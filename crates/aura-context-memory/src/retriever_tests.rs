@@ -1,12 +1,13 @@
 use crate::retrieval::{MemoryQueryContext, MemoryRetriever, RetrievalConfig};
 use crate::store::{MemoryStore, MemoryStoreApi};
 use crate::types::{
-    AgentEvent, Fact, FactSource, MemoryContinuity, MemoryRetrievalMode, MemoryScope,
-    MemorySensitivity, MemoryStatus, Procedure,
+    AgentEvent, Fact, FactSource, MemoryAccessContext, MemoryContinuity, MemoryRetrievalMode,
+    MemoryScope, MemorySensitivity, MemoryStatus, Procedure,
 };
 use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
 use chrono::{Duration, Utc};
 use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 fn test_db(dir: &std::path::Path) -> Arc<DBWithThreadMode<MultiThreaded>> {
@@ -419,4 +420,110 @@ async fn retrieval_excludes_pending_sensitive_and_unapproved_scopes() {
     assert_eq!(packet.facts.len(), 1);
     assert_eq!(packet.facts[0].key, "build_command");
     assert_eq!(packet.trace.unwrap().candidate_count, 4);
+}
+
+#[tokio::test]
+async fn scoped_retrieval_shares_only_the_intended_three_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn MemoryStoreApi> = Arc::new(MemoryStore::new(test_db(dir.path())));
+    let agent_a = AgentId::generate();
+    let agent_b = AgentId::generate();
+    let project_x_user_u = MemoryAccessContext {
+        project_id: Some("project-x".into()),
+        user_id: Some("user-u".into()),
+        include_legacy: false,
+    };
+    let project_y_user_v = MemoryAccessContext {
+        project_id: Some("project-y".into()),
+        user_id: Some("user-v".into()),
+        include_legacy: false,
+    };
+
+    let seeds = [
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::Agent),
+            MemoryScope::Agent,
+            "marker_agent_a_project_x",
+        ),
+        (
+            project_x_user_u.storage_id(agent_b, MemoryScope::Agent),
+            MemoryScope::Agent,
+            "marker_agent_b_project_x",
+        ),
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::Project),
+            MemoryScope::Project,
+            "marker_project_x_shared",
+        ),
+        (
+            project_x_user_u.storage_id(agent_a, MemoryScope::User),
+            MemoryScope::User,
+            "marker_user_u_personal",
+        ),
+        (
+            project_y_user_v.storage_id(agent_a, MemoryScope::Project),
+            MemoryScope::Project,
+            "marker_project_y_shared",
+        ),
+        (
+            project_y_user_v.storage_id(agent_a, MemoryScope::User),
+            MemoryScope::User,
+            "marker_user_v_personal",
+        ),
+    ];
+    for (partition, scope, key) in seeds {
+        let mut fact = make_fact(partition, key, key, 0.9, 0.99);
+        fact.continuity.scope = scope;
+        store.put_fact(&fact).unwrap();
+    }
+    store
+        .put_fact(&make_fact(
+            agent_b,
+            "marker_legacy_global_agent",
+            "marker_legacy_global_agent",
+            0.9,
+            0.99,
+        ))
+        .unwrap();
+
+    let packet = MemoryRetriever::new(
+        store,
+        RetrievalConfig {
+            max_facts: 20,
+            token_budget: 10_000,
+            ..RetrievalConfig::default()
+        },
+    )
+    .retrieve_with_query(
+        agent_b,
+        MemoryQueryContext {
+            text: "marker".into(),
+            allow_user_scope: true,
+            allow_project_scope: true,
+            access: project_x_user_u,
+            ..MemoryQueryContext::default()
+        },
+        MemoryRetrievalMode::QueryAware,
+    )
+    .await
+    .unwrap();
+
+    let keys: HashSet<_> = packet.facts.iter().map(|fact| fact.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        HashSet::from([
+            "marker_agent_b_project_x",
+            "marker_project_x_shared",
+            "marker_user_u_personal",
+        ])
+    );
+    assert!(packet
+        .trace
+        .unwrap()
+        .selections
+        .iter()
+        .all(|selection| matches!(
+            selection.scope,
+            MemoryScope::Agent | MemoryScope::Project | MemoryScope::User
+        )));
 }

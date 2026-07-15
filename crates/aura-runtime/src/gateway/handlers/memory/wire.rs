@@ -5,9 +5,28 @@
 //! does not have to walk through several hundred lines of HTTP
 //! plumbing to find the type definitions.
 
-use aura_context_memory::MemoryContinuity;
+use aura_context_memory::{MemoryAccessContext, MemoryContinuity, MemoryScope};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Default)]
+pub(in crate::gateway) struct MemoryAccessParams {
+    pub project_id: Option<String>,
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub include_legacy: bool,
+    pub scope: Option<MemoryScope>,
+}
+
+impl MemoryAccessParams {
+    pub fn access(&self) -> MemoryAccessContext {
+        MemoryAccessContext {
+            project_id: self.project_id.clone().filter(|id| !id.trim().is_empty()),
+            user_id: self.user_id.clone().filter(|id| !id.trim().is_empty()),
+            include_legacy: self.include_legacy,
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub(in crate::gateway) struct CreateFactBody {
@@ -60,6 +79,8 @@ pub(in crate::gateway) struct BulkDeleteEventsBody {
 
 #[derive(Deserialize, Default)]
 pub(in crate::gateway) struct ProcedureListParams {
+    #[serde(flatten)]
+    pub access: MemoryAccessParams,
     pub skill: Option<String>,
     pub min_relevance: Option<f32>,
 }

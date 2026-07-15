@@ -111,8 +111,9 @@ mod tests {
     /// `"{template}::{instance}::{session}"` resolve to the underlying
     /// template `AgentId`. aura-os started emitting this form on chat
     /// routes to give every storage `session_id` its own harness WS /
-    /// record-log key while keeping memory shared at the template
-    /// level. The parser uses `split_once("::")`, so the entire
+    /// record-log key while keeping a canonical template identity for
+    /// deriving the appropriate project-agent memory partition. The
+    /// parser uses `split_once("::")`, so the entire
     /// `instance::session` tail is dropped in a single split — no
     /// special-casing for the third segment is required.
     #[test]

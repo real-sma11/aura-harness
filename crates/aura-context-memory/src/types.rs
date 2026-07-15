@@ -5,15 +5,96 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
-/// Visibility boundary for a memory. Agent scope is the backward-compatible
-/// default; broader scopes are reserved for explicit, policy-checked sharing.
+/// Visibility boundary for a memory.
+///
+/// `Agent` means one agent inside one project, `Project` is shared by the
+/// project's approved agents, and `User` follows the user across projects and
+/// agents. The storage namespace is derived from the active context rather
+/// than from this enum alone.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
     #[default]
     Agent,
     User,
-    Workspace,
+    #[serde(alias = "workspace")]
+    Project,
+}
+
+/// Identity boundary used to derive isolated RocksDB partitions.
+///
+/// The IDs are intentionally kept as opaque strings. `storage_id` hashes
+/// them into the existing 32-byte `AgentId` key prefix, which lets the v2
+/// scope model remain backward-compatible with the existing column families.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryAccessContext {
+    pub project_id: Option<String>,
+    pub user_id: Option<String>,
+    /// Management surfaces may show legacy, unscoped v1 records for review.
+    /// Runtime prompt retrieval never enables this flag.
+    pub include_legacy: bool,
+}
+
+impl MemoryAccessContext {
+    #[must_use]
+    pub fn storage_id(&self, agent_id: AgentId, scope: MemoryScope) -> AgentId {
+        let missing_scope_identity = match scope {
+            MemoryScope::Agent | MemoryScope::Project => self.project_id.is_none(),
+            MemoryScope::User => self.user_id.is_none(),
+        };
+        if missing_scope_identity {
+            return agent_id;
+        }
+        let namespace = match scope {
+            MemoryScope::Agent => format!(
+                "project-agent:{}:{}",
+                self.project_id.as_deref().unwrap_or_default(),
+                agent_id.to_hex()
+            ),
+            MemoryScope::Project => {
+                format!("project:{}", self.project_id.as_deref().unwrap_or_default())
+            }
+            MemoryScope::User => {
+                format!("user:{}", self.user_id.as_deref().unwrap_or_default())
+            }
+        };
+        let digest = blake3::hash(format!("aura-memory-v2:{namespace}").as_bytes());
+        AgentId::new(*digest.as_bytes())
+    }
+
+    #[must_use]
+    pub fn readable_partitions(
+        &self,
+        agent_id: AgentId,
+        allow_user_scope: bool,
+        allow_project_scope: bool,
+    ) -> Vec<AgentId> {
+        // Project-less callers preserve the v1 agent bucket. Project-aware
+        // callers fail closed and never read it unless a management surface
+        // explicitly asks to review legacy records. Keep narrow-to-broad
+        // precedence for same-key lookups instead of sorting opaque hashes.
+        let mut partitions = if self.project_id.is_some() {
+            vec![self.storage_id(agent_id, MemoryScope::Agent)]
+        } else {
+            vec![agent_id]
+        };
+        if allow_project_scope && self.project_id.is_some() {
+            let partition = self.storage_id(agent_id, MemoryScope::Project);
+            if !partitions.contains(&partition) {
+                partitions.push(partition);
+            }
+        }
+        if allow_user_scope && self.user_id.is_some() {
+            let partition = self.storage_id(agent_id, MemoryScope::User);
+            if !partitions.contains(&partition) {
+                partitions.push(partition);
+            }
+        }
+        if self.include_legacy && self.project_id.is_some() && !partitions.contains(&agent_id) {
+            partitions.push(agent_id);
+        }
+        partitions
+    }
 }
 
 /// Lifecycle state for a memory record.
@@ -46,6 +127,12 @@ pub struct MemoryProvenance {
     pub excerpt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extractor_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contributor_agent_id: Option<String>,
 }
 
 /// Backward-compatible metadata shared by every memory type.
@@ -93,10 +180,10 @@ pub struct AgentContinuityConfig {
     pub write_policy: MemoryWritePolicy,
     #[serde(default)]
     pub retrieval_mode: MemoryRetrievalMode,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub allow_user_scope: bool,
-    #[serde(default)]
-    pub allow_workspace_scope: bool,
+    #[serde(default = "default_true", alias = "allow_workspace_scope")]
+    pub allow_project_scope: bool,
 }
 
 impl Default for AgentContinuityConfig {
@@ -106,8 +193,8 @@ impl Default for AgentContinuityConfig {
             generate_memory: true,
             write_policy: MemoryWritePolicy::Automatic,
             retrieval_mode: MemoryRetrievalMode::QueryAware,
-            allow_user_scope: false,
-            allow_workspace_scope: false,
+            allow_user_scope: true,
+            allow_project_scope: true,
         }
     }
 }
@@ -205,6 +292,7 @@ pub struct MemorySelection {
     pub score: f32,
     pub relevance: f32,
     pub reason: String,
+    pub scope: MemoryScope,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -321,6 +409,8 @@ pub struct RefinedCandidate {
     pub confidence: f32,
     pub importance: f32,
     pub keep: bool,
+    #[serde(default)]
+    pub scope: MemoryScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,6 +424,26 @@ mod tests {
     use super::*;
     use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
     use chrono::Utc;
+
+    #[test]
+    fn readable_partitions_keep_narrow_to_broad_precedence() {
+        let agent_id = AgentId::generate();
+        let access = MemoryAccessContext {
+            project_id: Some("project-1".to_string()),
+            user_id: Some("user-1".to_string()),
+            include_legacy: true,
+        };
+
+        assert_eq!(
+            access.readable_partitions(agent_id, true, true),
+            vec![
+                access.storage_id(agent_id, MemoryScope::Agent),
+                access.storage_id(agent_id, MemoryScope::Project),
+                access.storage_id(agent_id, MemoryScope::User),
+                agent_id,
+            ]
+        );
+    }
 
     fn make_fact(key: &str, val: &str) -> Fact {
         let now = Utc::now();

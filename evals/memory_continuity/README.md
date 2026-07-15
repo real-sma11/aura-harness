@@ -1,6 +1,6 @@
 # Agent Continuity evaluation
 
-This suite measures the memory layer independently from the model that answers the final turn. It covers request-aware recall, procedure recall, active-skill routing, approval gates, sensitive-memory exclusion, correction/supersession, scope isolation, pinned context, token load, and retrieval latency.
+This suite measures the memory layer independently from the model that answers the final turn. It covers request-aware recall, procedure recall, active-skill routing, approval gates, sensitive-memory exclusion, correction/supersession, pinned context, token load, and retrieval latency. Version 2 also runs a physical partition test across two agents, two projects, two users, and the legacy store. It requires all intended personal/project/project-agent memories to be recalled and zero cross-boundary or legacy leakage.
 
 Run Aura's implementation from the repository root:
 
@@ -9,7 +9,7 @@ cargo run -p aura-context-memory --example continuity_eval -- \
   --output target/memory-continuity-report.json
 ```
 
-The report runs both `aura-query-aware-v1` and the prior `aura-salience-baseline`, then emits explicit recall, precision, and token-load deltas. The command exits non-zero if query-aware Aura misses any release guardrail: Recall@K below 90%, precision below 80%, any forbidden-memory recall, or an average retrieval payload above 800 estimated tokens.
+The report runs both `aura-query-aware-v1` and the prior `aura-salience-baseline`, then emits explicit recall, precision, token-load deltas, and a `scope_isolation` scorecard. The command exits non-zero if query-aware Aura misses any release guardrail: Recall@K below 90%, precision below 80%, any forbidden-memory recall, an average retrieval payload above 800 estimated tokens, or any physical scope-isolation failure.
 
 ## Compare Codex, Hermes, or another agent
 

@@ -634,6 +634,7 @@ fn write_report_serde_roundtrip() {
         facts_updated: 2,
         events_written: 1,
         candidates_dropped: 2,
+        ..crate::WriteReport::default()
     };
     let json = serde_json::to_string(&report).unwrap();
     let parsed: crate::WriteReport = serde_json::from_str(&json).unwrap();

@@ -1,12 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
   "scenarios": [
     {
       "id": "recall-test-command",
       "query": "Which test command should I run for this project?",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["test-command"],
       "records": [
         { "kind": "fact", "id": "test-command", "key": "test_command", "value": "cargo nextest run", "importance": 0.55, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -19,7 +19,7 @@
       "query": "Build the release binary with our build command",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["build-command"],
       "records": [
         { "kind": "fact", "id": "build-command", "key": "build_command", "value": "cargo build --release", "importance": 0.6, "confidence": 0.94, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -31,7 +31,7 @@
       "query": "Deploy the service with the release workflow",
       "active_skills": ["deploy"],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["deploy-release"],
       "records": [
         { "kind": "procedure", "id": "deploy-release", "key": "release_deploy", "value": "", "trigger": "deploy the service", "steps": ["build release", "run smoke tests", "publish"], "skill_name": "deploy", "importance": 0.7, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -43,7 +43,7 @@
       "query": "Run my knowledge capture workflow",
       "active_skills": ["notion"],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["notion-capture"],
       "records": [
         { "kind": "procedure", "id": "notion-capture", "key": "knowledge_capture", "value": "", "trigger": "capture research", "steps": ["summarize", "create page", "tag source"], "skill_name": "notion", "importance": 0.5, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -55,7 +55,7 @@
       "query": "What is the customer region, pricing plan, and API key?",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["customer-region"],
       "records": [
         { "kind": "fact", "id": "customer-region", "key": "customer_region", "value": "eu-west", "importance": 0.7, "confidence": 0.96, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -68,7 +68,7 @@
       "query": "Which frontend framework does the project use?",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["framework-current"],
       "records": [
         { "kind": "fact", "id": "framework-old", "key": "frontend_framework", "value": "React", "importance": 1.0, "confidence": 0.99, "status": "superseded", "sensitivity": "normal", "scope": "agent", "pinned": true },
@@ -80,7 +80,7 @@
       "query": "Use the build command and my response preference",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["isolated-build"],
       "records": [
         { "kind": "fact", "id": "isolated-build", "key": "build_command", "value": "pnpm build", "importance": 0.6, "confidence": 0.9, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false },
@@ -92,7 +92,7 @@
       "query": "Apply my response preference",
       "active_skills": [],
       "allow_user_scope": true,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["shared-response-preference"],
       "records": [
         { "kind": "fact", "id": "shared-response-preference", "key": "response_preference", "value": "concise", "importance": 0.8, "confidence": 0.95, "status": "active", "sensitivity": "normal", "scope": "user", "pinned": false },
@@ -100,14 +100,14 @@
       ]
     },
     {
-      "id": "workspace-scope-opt-in",
-      "query": "Follow the workspace release policy",
+      "id": "project-scope-opt-in",
+      "query": "Follow the project release policy",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": true,
-      "expected_ids": ["workspace-release-policy"],
+      "allow_project_scope": true,
+      "expected_ids": ["project-release-policy"],
       "records": [
-        { "kind": "fact", "id": "workspace-release-policy", "key": "release_policy", "value": "two approvals required", "importance": 0.9, "confidence": 0.98, "status": "active", "sensitivity": "normal", "scope": "workspace", "pinned": false },
+        { "kind": "fact", "id": "project-release-policy", "key": "release_policy", "value": "two approvals required", "importance": 0.9, "confidence": 0.98, "status": "active", "sensitivity": "normal", "scope": "project", "pinned": false },
         { "kind": "fact", "id": "personal-snack", "key": "favorite_snack", "value": "almonds", "importance": 1.0, "confidence": 0.99, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": false }
       ]
     },
@@ -116,7 +116,7 @@
       "query": "Start a new task",
       "active_skills": [],
       "allow_user_scope": false,
-      "allow_workspace_scope": false,
+      "allow_project_scope": false,
       "expected_ids": ["pinned-constraint"],
       "records": [
         { "kind": "fact", "id": "pinned-constraint", "key": "critical_constraint", "value": "never deploy on Friday", "importance": 0.9, "confidence": 0.99, "status": "active", "sensitivity": "normal", "scope": "agent", "pinned": true },

@@ -3,15 +3,17 @@
 use crate::error::MemoryError;
 use crate::extraction::{ConversationTurn, HeuristicExtractor};
 use crate::refinement::{LlmRefiner, RefinementRequestContext};
+use crate::safety::unsafe_for_prompt;
 use crate::store::MemoryStoreApi;
 use crate::turn_summary::TurnSummary;
 use crate::types::{
-    AgentEvent, CandidateType, Fact, FactSource, MemoryContinuity, MemoryProvenance,
-    MemorySensitivity, MemoryStatus, Procedure, RefinedCandidate,
+    AgentEvent, CandidateType, Fact, FactSource, MemoryAccessContext, MemoryContinuity,
+    MemoryProvenance, MemoryScope, MemorySensitivity, MemoryStatus, Procedure, RefinedCandidate,
 };
 use aura_core_types::{AgentEventId, AgentId, FactId, ProcedureId};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -51,6 +53,8 @@ pub struct WriteReport {
     pub procedures_written: usize,
     pub candidates_dropped: usize,
     pub sensitive_dropped: usize,
+    pub unsafe_dropped: usize,
+    pub conflicts_pending: usize,
 }
 
 impl MemoryWritePipeline {
@@ -112,6 +116,7 @@ impl MemoryWritePipeline {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ingest_with_provenance(
         &self,
         agent_id: AgentId,
@@ -137,6 +142,7 @@ impl MemoryWritePipeline {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ingest_with_provenance_and_request_context(
         &self,
         agent_id: AgentId,
@@ -159,6 +165,11 @@ impl MemoryWritePipeline {
         }
 
         // Stage 2: LLM extraction + refinement in one call
+        let memory_context = MemoryAccessContext {
+            project_id: request_context.aura_project_id.clone(),
+            user_id: request_context.user_id.clone(),
+            include_legacy: false,
+        };
         let refined = self
             .refiner
             .extract_and_refine_with_skills_and_context(
@@ -170,9 +181,14 @@ impl MemoryWritePipeline {
             .await?;
         report.candidates_refined = refined.len();
 
+        let mut touched_partitions = HashSet::new();
         for candidate in &refined {
             if candidate_is_sensitive(candidate) {
                 report.sensitive_dropped += 1;
+                continue;
+            }
+            if candidate_is_unsafe(candidate) {
+                report.unsafe_dropped += 1;
                 continue;
             }
             if !candidate.keep {
@@ -184,38 +200,52 @@ impl MemoryWritePipeline {
                 continue;
             }
 
+            let scope = effective_scope(candidate.scope, &memory_context);
+            let storage_id = memory_context.storage_id(agent_id, scope);
+            touched_partitions.insert(storage_id);
             match candidate.candidate_type {
                 CandidateType::Fact => {
                     self.write_fact(
+                        storage_id,
                         agent_id,
                         candidate,
                         &mut report,
                         source_session_id,
                         initial_status,
+                        scope,
+                        &memory_context,
                     )?;
                 }
                 CandidateType::Event => {
                     self.write_event(
+                        storage_id,
                         agent_id,
                         candidate,
                         &mut report,
                         source_session_id,
                         initial_status,
+                        scope,
+                        &memory_context,
                     )?;
                 }
                 CandidateType::Procedure => {
                     self.write_procedure(
+                        storage_id,
                         agent_id,
                         candidate,
                         &mut report,
                         source_session_id,
                         initial_status,
+                        scope,
+                        &memory_context,
                     )?;
                 }
             }
         }
 
-        self.enforce_capacity(agent_id)?;
+        for partition in touched_partitions {
+            self.enforce_capacity(partition)?;
+        }
 
         info!(
             extracted = report.candidates_extracted,
@@ -226,41 +256,67 @@ impl MemoryWritePipeline {
             procedures = report.procedures_written,
             dropped = report.candidates_dropped,
             sensitive_dropped = report.sensitive_dropped,
+            unsafe_dropped = report.unsafe_dropped,
+            conflicts_pending = report.conflicts_pending,
             "Memory write pipeline complete"
         );
 
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_fact(
         &self,
-        agent_id: AgentId,
+        storage_id: AgentId,
+        contributor_agent_id: AgentId,
         candidate: &RefinedCandidate,
         report: &mut WriteReport,
         source_session_id: Option<&str>,
         initial_status: MemoryStatus,
+        scope: MemoryScope,
+        memory_context: &MemoryAccessContext,
     ) -> Result<(), MemoryError> {
         let now = Utc::now();
 
         let existing = if initial_status == MemoryStatus::Active {
             self.store
-                .get_fact_by_key(agent_id, &candidate.key)
+                .get_fact_by_key(storage_id, &candidate.key)
                 .ok()
                 .flatten()
         } else {
             None
         };
         if let Some(mut existing) = existing {
-            if existing.value != candidate.value {
-                let replacement_id = FactId::generate();
-                existing.continuity.status = MemoryStatus::Superseded;
-                existing.continuity.superseded_by = Some(replacement_id.to_hex());
+            if existing.value == candidate.value {
+                existing.confidence = candidate.confidence;
+                existing.importance = candidate.importance;
                 existing.updated_at = now;
                 self.store.put_fact(&existing)?;
+                report.facts_updated += 1;
+            } else {
+                let replacement_id = FactId::generate();
+                let contributor_hex = contributor_agent_id.to_hex();
+                let cross_agent_shared_conflict = is_shared_scope(scope)
+                    && existing
+                        .continuity
+                        .provenance
+                        .contributor_agent_id
+                        .as_deref()
+                        != Some(contributor_hex.as_str());
+                let replacement_status = if cross_agent_shared_conflict {
+                    report.conflicts_pending += 1;
+                    MemoryStatus::Pending
+                } else {
+                    existing.continuity.status = MemoryStatus::Superseded;
+                    existing.continuity.superseded_by = Some(replacement_id.to_hex());
+                    existing.updated_at = now;
+                    self.store.put_fact(&existing)?;
+                    initial_status
+                };
 
                 let replacement = Fact {
                     fact_id: replacement_id,
-                    agent_id,
+                    agent_id: storage_id,
                     key: candidate.key.clone(),
                     value: candidate.value.clone(),
                     confidence: candidate.confidence,
@@ -275,23 +331,20 @@ impl MemoryWritePipeline {
                         turn_excerpt(candidate),
                         self.refiner.model_name(),
                         source_session_id,
-                        initial_status,
+                        replacement_status,
+                        scope,
+                        memory_context,
+                        contributor_agent_id,
                     ),
                 };
                 self.store.put_fact(&replacement)?;
                 report.facts_updated += 1;
                 report.facts_written += 1;
-            } else {
-                existing.confidence = candidate.confidence;
-                existing.importance = candidate.importance;
-                existing.updated_at = now;
-                self.store.put_fact(&existing)?;
-                report.facts_updated += 1;
             }
         } else {
             let fact = Fact {
                 fact_id: FactId::generate(),
-                agent_id,
+                agent_id: storage_id,
                 key: candidate.key.clone(),
                 value: candidate.value.clone(),
                 confidence: candidate.confidence,
@@ -307,6 +360,9 @@ impl MemoryWritePipeline {
                     self.refiner.model_name(),
                     source_session_id,
                     initial_status,
+                    scope,
+                    memory_context,
+                    contributor_agent_id,
                 ),
             };
             self.store.put_fact(&fact)?;
@@ -316,19 +372,23 @@ impl MemoryWritePipeline {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_event(
         &self,
-        agent_id: AgentId,
+        storage_id: AgentId,
+        contributor_agent_id: AgentId,
         candidate: &RefinedCandidate,
         report: &mut WriteReport,
         source_session_id: Option<&str>,
         initial_status: MemoryStatus,
+        scope: MemoryScope,
+        memory_context: &MemoryAccessContext,
     ) -> Result<(), MemoryError> {
         let now = Utc::now();
 
         let event = AgentEvent {
             event_id: AgentEventId::generate(),
-            agent_id,
+            agent_id: storage_id,
             event_type: "task_run".to_string(),
             summary: candidate.summary.clone().unwrap_or_default(),
             metadata: candidate.value.clone(),
@@ -342,6 +402,9 @@ impl MemoryWritePipeline {
                 self.refiner.model_name(),
                 source_session_id,
                 initial_status,
+                scope,
+                memory_context,
+                contributor_agent_id,
             ),
         };
         self.store.put_event(&event)?;
@@ -350,13 +413,17 @@ impl MemoryWritePipeline {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_procedure(
         &self,
-        agent_id: AgentId,
+        storage_id: AgentId,
+        contributor_agent_id: AgentId,
         candidate: &RefinedCandidate,
         report: &mut WriteReport,
         source_session_id: Option<&str>,
         initial_status: MemoryStatus,
+        scope: MemoryScope,
+        memory_context: &MemoryAccessContext,
     ) -> Result<(), MemoryError> {
         let now = Utc::now();
         let trigger = candidate
@@ -366,7 +433,7 @@ impl MemoryWritePipeline {
         let steps = candidate.steps.clone().unwrap_or_default();
 
         // Check for an existing procedure with the same name and update it.
-        let existing = self.store.list_procedures(agent_id)?;
+        let existing = self.store.list_procedures(storage_id)?;
         let existing_active = if initial_status == MemoryStatus::Active {
             existing
                 .into_iter()
@@ -374,19 +441,30 @@ impl MemoryWritePipeline {
         } else {
             None
         };
+        let mut conflict_pending = false;
         if let Some(mut proc) = existing_active {
-            proc.trigger = trigger;
-            proc.steps = steps;
-            proc.skill_name = candidate.skill_name.clone();
-            proc.updated_at = now;
-            self.store.put_procedure(&proc)?;
-            report.procedures_written += 1;
-            return Ok(());
+            let contributor_hex = contributor_agent_id.to_hex();
+            let cross_agent_shared_conflict = is_shared_scope(scope)
+                && proc.continuity.provenance.contributor_agent_id.as_deref()
+                    != Some(contributor_hex.as_str())
+                && (proc.trigger != trigger || proc.steps != steps);
+            if cross_agent_shared_conflict {
+                report.conflicts_pending += 1;
+                conflict_pending = true;
+            } else {
+                proc.trigger = trigger;
+                proc.steps = steps;
+                proc.skill_name = candidate.skill_name.clone();
+                proc.updated_at = now;
+                self.store.put_procedure(&proc)?;
+                report.procedures_written += 1;
+                return Ok(());
+            }
         }
 
         let procedure = Procedure {
             procedure_id: ProcedureId::generate(),
-            agent_id,
+            agent_id: storage_id,
             name: candidate.key.clone(),
             trigger,
             steps,
@@ -403,7 +481,14 @@ impl MemoryWritePipeline {
                 None,
                 self.refiner.model_name(),
                 source_session_id,
-                initial_status,
+                if conflict_pending {
+                    MemoryStatus::Pending
+                } else {
+                    initial_status
+                },
+                scope,
+                memory_context,
+                contributor_agent_id,
             ),
         };
         self.store.put_procedure(&procedure)?;
@@ -456,14 +541,19 @@ impl MemoryWritePipeline {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn continuity_for_candidate(
     candidate: &RefinedCandidate,
     excerpt: Option<String>,
     extractor_model: &str,
     source_session_id: Option<&str>,
     initial_status: MemoryStatus,
+    scope: MemoryScope,
+    memory_context: &MemoryAccessContext,
+    contributor_agent_id: AgentId,
 ) -> MemoryContinuity {
     MemoryContinuity {
+        scope,
         status: initial_status,
         sensitivity: if candidate_is_sensitive(candidate) {
             MemorySensitivity::Sensitive
@@ -474,10 +564,24 @@ fn continuity_for_candidate(
             session_id: source_session_id.map(str::to_string),
             excerpt,
             extractor_model: Some(extractor_model.to_string()),
-            ..MemoryProvenance::default()
+            project_id: memory_context.project_id.clone(),
+            user_id: memory_context.user_id.clone(),
+            contributor_agent_id: Some(contributor_agent_id.to_hex()),
         },
         ..MemoryContinuity::default()
     }
+}
+
+fn effective_scope(scope: MemoryScope, context: &MemoryAccessContext) -> MemoryScope {
+    match scope {
+        MemoryScope::Project if context.project_id.is_none() => MemoryScope::Agent,
+        MemoryScope::User if context.user_id.is_none() => MemoryScope::Agent,
+        other => other,
+    }
+}
+
+fn is_shared_scope(scope: MemoryScope) -> bool {
+    matches!(scope, MemoryScope::Project | MemoryScope::User)
 }
 
 fn turn_excerpt(candidate: &RefinedCandidate) -> Option<String> {
@@ -506,4 +610,13 @@ fn candidate_is_sensitive(candidate: &RefinedCandidate) -> bool {
     ]
     .iter()
     .any(|needle| haystack.contains(needle))
+}
+
+fn candidate_is_unsafe(candidate: &RefinedCandidate) -> bool {
+    unsafe_for_prompt(&format!(
+        "{} {} {}",
+        candidate.key,
+        candidate.value,
+        candidate.summary.as_deref().unwrap_or_default()
+    ))
 }

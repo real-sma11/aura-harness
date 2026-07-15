@@ -7,7 +7,10 @@
 
 use crate::error::MemoryError;
 use crate::store::MemoryStoreApi;
-use crate::types::{AgentEvent, Fact, FactSource};
+use crate::types::{
+    AgentEvent, Fact, FactSource, MemoryContinuity, MemoryProvenance, MemorySensitivity,
+    MemoryStatus,
+};
 use aura_core_types::{AgentEventId, AgentId, FactId};
 use aura_model_reasoner::{Message, ModelProvider, ModelRequest};
 use chrono::Utc;
@@ -211,12 +214,13 @@ impl MemoryConsolidator {
         // Read phase — blocking
         let store = Arc::clone(&self.store);
         let threshold = self.config.max_events_before_compression;
-        let all_events = {
+        let mut all_events = {
             let s = Arc::clone(&store);
             tokio::task::spawn_blocking(move || s.list_events(agent_id, 100_000))
                 .await
                 .map_err(|e| MemoryError::BlockingTaskFailed(e.to_string()))??
         };
+        all_events.retain(|event| consolidatable(&event.continuity));
 
         if all_events.len() <= threshold {
             return Ok(());
@@ -252,6 +256,7 @@ impl MemoryConsolidator {
 
         // Write phase — blocking
         let s = Arc::clone(&store);
+        let summary_continuity = consolidated_continuity(&oldest[0].continuity);
         let (compressed, deleted) = tokio::task::spawn_blocking(move || {
             let now = Utc::now();
             for summary in &summaries {
@@ -268,7 +273,7 @@ impl MemoryConsolidator {
                     access_count: 0,
                     last_accessed: now,
                     timestamp: now,
-                    continuity: crate::types::MemoryContinuity::default(),
+                    continuity: summary_continuity.clone(),
                 };
                 s.put_event(&event)?;
             }
@@ -333,7 +338,7 @@ impl MemoryConsolidator {
     ) -> Result<(), MemoryError> {
         // Read phase — blocking
         let store = Arc::clone(&self.store);
-        let (facts, recent_events) = {
+        let (mut facts, mut recent_events) = {
             let s = Arc::clone(&store);
             tokio::task::spawn_blocking(move || {
                 let facts = s.list_facts(agent_id)?;
@@ -343,6 +348,8 @@ impl MemoryConsolidator {
             .await
             .map_err(|e| MemoryError::BlockingTaskFailed(e.to_string()))??
         };
+        facts.retain(|fact| consolidatable(&fact.continuity));
+        recent_events.retain(|event| consolidatable(&event.continuity));
 
         if facts.len() < 2 {
             return Ok(());
@@ -504,7 +511,7 @@ fn apply_evolution(
                     last_accessed: now,
                     created_at: now,
                     updated_at: now,
-                    continuity: crate::types::MemoryContinuity::default(),
+                    continuity: consolidated_continuity(&facts[0].continuity),
                 };
                 store.put_fact(&fact)?;
                 insights += 1;
@@ -517,6 +524,25 @@ fn apply_evolution(
     }
 
     Ok((merged, evolved, insights))
+}
+
+fn consolidatable(continuity: &MemoryContinuity) -> bool {
+    continuity.status == MemoryStatus::Active && continuity.sensitivity == MemorySensitivity::Normal
+}
+
+fn consolidated_continuity(source: &MemoryContinuity) -> MemoryContinuity {
+    MemoryContinuity {
+        scope: source.scope,
+        status: MemoryStatus::Active,
+        sensitivity: MemorySensitivity::Normal,
+        pinned: false,
+        provenance: MemoryProvenance {
+            project_id: source.provenance.project_id.clone(),
+            user_id: source.provenance.user_id.clone(),
+            ..MemoryProvenance::default()
+        },
+        superseded_by: None,
+    }
 }
 
 // ============================================================================
@@ -594,6 +620,7 @@ changes with clear benefit.";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MemoryScope;
 
     #[test]
     fn parse_compress_response_with_summaries() {
@@ -682,5 +709,47 @@ mod tests {
     #[test]
     fn extract_float_value_missing() {
         assert!(extract_float_value("no match", "confidence=").is_none());
+    }
+
+    #[test]
+    fn consolidation_preserves_visibility_without_claiming_single_source() {
+        let source = MemoryContinuity {
+            scope: MemoryScope::Project,
+            status: MemoryStatus::Active,
+            sensitivity: MemorySensitivity::Normal,
+            pinned: true,
+            provenance: MemoryProvenance {
+                session_id: Some("session-1".to_string()),
+                excerpt: Some("source excerpt".to_string()),
+                extractor_model: Some("model-1".to_string()),
+                project_id: Some("project-1".to_string()),
+                user_id: Some("user-1".to_string()),
+                contributor_agent_id: Some("agent-1".to_string()),
+            },
+            superseded_by: Some("replacement".to_string()),
+        };
+
+        let result = consolidated_continuity(&source);
+
+        assert_eq!(result.scope, MemoryScope::Project);
+        assert_eq!(result.provenance.project_id.as_deref(), Some("project-1"));
+        assert_eq!(result.provenance.user_id.as_deref(), Some("user-1"));
+        assert!(result.provenance.session_id.is_none());
+        assert!(result.provenance.contributor_agent_id.is_none());
+        assert!(!result.pinned);
+        assert!(result.superseded_by.is_none());
+    }
+
+    #[test]
+    fn consolidation_excludes_unapproved_or_sensitive_memory() {
+        let mut continuity = MemoryContinuity::default();
+        assert!(consolidatable(&continuity));
+
+        continuity.status = MemoryStatus::Pending;
+        assert!(!consolidatable(&continuity));
+
+        continuity.status = MemoryStatus::Active;
+        continuity.sensitivity = MemorySensitivity::Sensitive;
+        assert!(!consolidatable(&continuity));
     }
 }
