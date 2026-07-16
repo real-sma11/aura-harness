@@ -206,6 +206,13 @@ impl ToolResolver {
         self
     }
 
+    /// Attach the active aura-os project id for project-scoped agent delivery.
+    #[must_use]
+    pub fn with_caller_project_id(mut self, project_id: impl Into<String>) -> Self {
+        self.inner = self.inner.with_caller_project_id(project_id);
+        self
+    }
+
     /// Attach the caller's resolved model id so cross-agent tools
     /// (`send_to_agent`, `delegate_task`) forward it to the target
     /// agent's turn. See [`ToolExecutor::with_caller_model_id`] for the

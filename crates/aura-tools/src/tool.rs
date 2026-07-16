@@ -45,6 +45,10 @@ pub struct ToolContext {
     /// (which carries `RuntimeRequest.agent_identity.template_id` when set,
     /// otherwise the raw runtime agent id).
     pub caller_external_agent_id: Option<String>,
+    /// Project that owns the caller's active conversation. Cross-agent
+    /// delivery forwards this value to aura-os-server so an agent reused
+    /// across projects receives the message in the originating project.
+    pub caller_project_id: Option<String>,
     /// Phase 5: caller's scope + capability grants. Cross-agent tools (e.g.
     /// `spawn_agent`) enforce strict-subset semantics against this bundle.
     pub caller_permissions: Option<AgentPermissions>,
@@ -112,6 +116,7 @@ pub trait AgentControlHook: Send + Sync {
         target_agent_id: &str,
         parent_agent_id: Option<&str>,
         originating_user_id: Option<&str>,
+        project_id: Option<&str>,
         content: &str,
         attachments: Option<serde_json::Value>,
         model: Option<&str>,
@@ -173,6 +178,7 @@ impl ToolContext {
             config,
             caller_agent_id: None,
             caller_external_agent_id: None,
+            caller_project_id: None,
             caller_permissions: None,
             caller_tool_permissions: None,
             user_tool_defaults: UserToolDefaults::default(),

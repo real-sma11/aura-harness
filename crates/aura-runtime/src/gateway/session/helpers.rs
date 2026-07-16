@@ -518,6 +518,15 @@ pub(super) async fn build_kernel_with_config(
         }
     }
 
+    // Preserve project continuity when this agent delegates to another
+    // project member. Agents can belong to several projects, so omitting
+    // this value lets the server fall back to the target's most-recent chat.
+    if let Some(project_id) = session.project_id.as_deref() {
+        if !project_id.trim().is_empty() {
+            resolver = resolver.with_caller_project_id(project_id.to_string());
+        }
+    }
+
     // Thread this session's resolved model into the tool context so
     // cross-agent tools (`send_to_agent`, `delegate_task`) forward it
     // to the target agent's turn. Cross-agent recipients usually have

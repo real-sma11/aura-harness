@@ -45,6 +45,8 @@ pub struct ToolExecutor {
     /// harness hash. See the field doc on `ToolContext` for the full
     /// rationale and the matching server-side wiring.
     caller_external_agent_id: Option<String>,
+    /// Active aura-os project id for project-scoped cross-agent delivery.
+    caller_project_id: Option<String>,
     /// Caller's resolved model id, forwarded into
     /// [`ToolContext::caller_model_id`] so cross-agent tools can ship
     /// the caller's model to the target agent's turn (the recipient
@@ -77,6 +79,7 @@ impl ToolExecutor {
             parent_chain: Vec::new(),
             originating_user_id: None,
             caller_external_agent_id: None,
+            caller_project_id: None,
             caller_model_id: None,
         }
     }
@@ -167,6 +170,17 @@ impl ToolExecutor {
         let value = agent_id.into();
         if !value.trim().is_empty() {
             self.caller_external_agent_id = Some(value);
+        }
+        self
+    }
+
+    /// Set the active aura-os project for cross-agent delivery. Blank values
+    /// are ignored so direct, project-less chats retain their legacy route.
+    #[must_use]
+    pub fn with_caller_project_id(mut self, project_id: impl Into<String>) -> Self {
+        let value = project_id.into();
+        if !value.trim().is_empty() {
+            self.caller_project_id = Some(value);
         }
         self
     }
@@ -266,6 +280,7 @@ impl ToolExecutor {
         let mut tool_ctx = ToolContext::new(sandbox, self.config.clone());
         tool_ctx.caller_agent_id = Some(ctx.agent_id);
         tool_ctx.caller_external_agent_id = self.caller_external_agent_id.clone();
+        tool_ctx.caller_project_id = self.caller_project_id.clone();
         tool_ctx.caller_model_id = self.caller_model_id.clone();
         tool_ctx.caller_permissions = self.caller_permissions.clone();
         tool_ctx.caller_tool_permissions = self.caller_tool_permissions.clone();
