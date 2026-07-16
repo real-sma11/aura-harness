@@ -720,15 +720,37 @@ async fn prepare_turn_context(
     }
     if let Some(ref mm) = ctx.memory_manager {
         let mem_id = session.memory_agent_id();
-        mm.prepare_context(mem_id, &mut config.system_prompt).await;
-        config
-            .observers
-            .push(aura_engine::memory_observer::MemoryTurnObserver::new(
+        mm.prepare_context_with_query(
+            mem_id,
+            &mut config.system_prompt,
+            aura_context_memory::MemoryQueryContext {
+                text: msg.content.clone(),
+                active_skills: active_skill_names.clone(),
+                access: aura_context_memory::MemoryAccessContext {
+                    project_id: session.project_id.clone(),
+                    user_id: (!session.user_id.trim().is_empty()).then(|| session.user_id.clone()),
+                    include_legacy: false,
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        config.observers.push(
+            aura_engine::memory_observer::MemoryTurnObserver::new_with_request_context(
                 Arc::clone(mm),
                 mem_id,
-                session.auth_token.clone(),
+                aura_context_memory::RefinementRequestContext {
+                    auth_token: session.auth_token.clone(),
+                    aura_project_id: session.project_id.clone(),
+                    aura_agent_id: session.aura_agent_id.clone(),
+                    aura_session_id: session.aura_session_id.clone(),
+                    aura_org_id: session.aura_org_id.clone(),
+                    user_id: (!session.user_id.trim().is_empty()).then(|| session.user_id.clone()),
+                },
                 active_skill_names,
-            ));
+                Some(session.session_id.clone()),
+            ),
+        );
     }
 
     let tools = session.tool_definitions.clone();

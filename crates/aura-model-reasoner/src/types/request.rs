@@ -36,8 +36,8 @@ pub struct ThinkingConfig {
 pub enum ThinkingEffort {
     /// Extended thinking disabled for this request.
     Off,
-    /// Lowest user-selectable tier. Maps to OpenAI's `minimal`
-    /// `reasoning_effort`; for Anthropic it requests the smallest
+    /// Lowest user-selectable tier. Aura Router maps it to `none` for
+    /// current OpenAI models; for Anthropic it requests the smallest
     /// thinking budget (folding to `Low`-equivalent behaviour because
     /// Anthropic has no sub-`Low` tier).
     Minimal,

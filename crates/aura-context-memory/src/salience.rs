@@ -122,6 +122,7 @@ mod tests {
             last_accessed: last,
             created_at: now,
             updated_at: now,
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 
@@ -137,6 +138,7 @@ mod tests {
             access_count: 0,
             last_accessed: now,
             timestamp: now - Duration::hours(hours_ago),
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 
@@ -156,6 +158,7 @@ mod tests {
             updated_at: now,
             skill_name: None,
             skill_relevance: None,
+            continuity: crate::types::MemoryContinuity::default(),
         }
     }
 

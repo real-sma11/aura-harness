@@ -16,6 +16,7 @@ mod wire;
 
 pub(in crate::gateway) use handlers::{
     bulk_delete_events, consolidate, create_event, create_fact, create_procedure, delete_event,
-    delete_fact, delete_procedure, get_fact, get_fact_by_key, get_procedure, list_events,
-    list_facts, list_procedures, snapshot, stats, update_fact, update_procedure, wipe,
+    delete_fact, delete_procedure, get_continuity_config, get_fact, get_fact_by_key, get_procedure,
+    latest_retrieval_trace, list_events, list_facts, list_procedures, snapshot, stats,
+    update_continuity_config, update_fact, update_procedure, wipe,
 };

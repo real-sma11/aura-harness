@@ -366,6 +366,7 @@ dependencies = [
  "aura-core-types",
  "aura-model-reasoner",
  "aura-store-db",
+ "blake3",
  "chrono",
  "rocksdb",
  "serde",

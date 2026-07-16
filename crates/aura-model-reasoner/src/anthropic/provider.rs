@@ -2212,7 +2212,11 @@ fn build_api_request(
                 prompt_caching_enabled,
             ))
         },
-        tool_choice: convert_tool_choice(&request.tool_choice, request.parallel_tool_use),
+        tool_choice: if request.tools.is_empty() {
+            None
+        } else {
+            convert_tool_choice(&request.tool_choice, request.parallel_tool_use)
+        },
         max_tokens: request.max_tokens.get(),
         temperature: if thinking.is_some() {
             Some(1.0)
@@ -2881,10 +2885,14 @@ impl ModelProvider for AnthropicProvider {
                             prompt_caching_enabled,
                         ))
                     },
-                    tool_choice: convert_tool_choice(
-                        &request_ref.tool_choice,
-                        request_ref.parallel_tool_use,
-                    ),
+                    tool_choice: if request_ref.tools.is_empty() {
+                        None
+                    } else {
+                        convert_tool_choice(
+                            &request_ref.tool_choice,
+                            request_ref.parallel_tool_use,
+                        )
+                    },
                     max_tokens: request_ref.max_tokens.get(),
                     temperature: if thinking.is_some() {
                         Some(1.0)
@@ -4073,6 +4081,27 @@ mod emergency_body_cap_tests {
 mod request_diagnostics_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn api_request_omits_tool_choice_when_tools_are_empty() {
+        let request = ModelRequest::builder("aura-gpt-5-4-nano", "system")
+            .max_tokens(1_024)
+            .try_build()
+            .unwrap();
+        let api_request = build_api_request(
+            &request,
+            "aura-gpt-5-4-nano",
+            None,
+            false,
+            false,
+            None,
+            None,
+        );
+        let body = serde_json::to_value(api_request).unwrap();
+
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
 
     #[test]
     fn summarize_anthropic_request_extracts_safe_fingerprint() {

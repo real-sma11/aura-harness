@@ -124,6 +124,7 @@ impl RocksStore {
             cf::MEMORY_EVENTS,
             cf::MEMORY_PROCEDURES,
             cf::MEMORY_EVENT_INDEX,
+            cf::MEMORY_CONFIG,
             cf::AGENT_SKILLS,
             cf::RUNTIME_CAPABILITIES,
             cf::USER_TOOL_DEFAULTS,
@@ -222,6 +223,7 @@ impl RocksStore {
                 | cf::INBOX
                 | cf::MEMORY_FACTS
                 | cf::MEMORY_EVENTS
+                | cf::MEMORY_CONFIG
                 | cf::MEMORY_PROCEDURES
                 | cf::AGENT_SKILLS
                 | cf::RUNTIME_CAPABILITIES

@@ -15,7 +15,8 @@ pub fn context_window_for_model(model: &str) -> u64 {
         m if m.contains("sonnet-5") => 1_000_000,
         m if m.contains("haiku-4") => 200_000,
         m if m.starts_with("claude") => 200_000,
-        m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_000_000,
+        m if m.contains("gpt-5.6") || m.contains("gpt-5-6") => 1_050_000,
+        m if m.contains("gpt-5.5") || m.contains("gpt-5-5") => 1_050_000,
         m if m.contains("gpt-5.4-mini")
             || m.contains("gpt-5-4-mini")
             || m.contains("gpt-5.4-nano")
@@ -65,7 +66,10 @@ mod tests {
 
     #[test]
     fn openai_gpt5_aura_aliases() {
-        assert_eq!(context_window_for_model("aura-gpt-5-5"), 1_000_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-6-sol"), 1_050_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-6-terra"), 1_050_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-6-luna"), 1_050_000);
+        assert_eq!(context_window_for_model("aura-gpt-5-5"), 1_050_000);
         assert_eq!(context_window_for_model("aura-gpt-5-4"), 1_050_000);
         assert_eq!(context_window_for_model("aura-gpt-5-4-mini"), 400_000);
         assert_eq!(context_window_for_model("aura-gpt-5-4-nano"), 400_000);
@@ -73,7 +77,11 @@ mod tests {
 
     #[test]
     fn openai_gpt5_direct_names() {
-        assert_eq!(context_window_for_model("gpt-5.5"), 1_000_000);
+        assert_eq!(context_window_for_model("gpt-5.6"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.6-sol"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.6-terra"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.6-luna"), 1_050_000);
+        assert_eq!(context_window_for_model("gpt-5.5"), 1_050_000);
         assert_eq!(context_window_for_model("gpt-5.4"), 1_050_000);
         assert_eq!(context_window_for_model("gpt-5.4-mini"), 400_000);
         assert_eq!(context_window_for_model("gpt-5.4-nano"), 400_000);

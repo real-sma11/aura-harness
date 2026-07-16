@@ -507,6 +507,7 @@ impl Scheduler {
                     agent_id,
                     None,
                     Vec::new(),
+                    None,
                 ));
         }
         let agent_loop = AgentLoop::new(config);

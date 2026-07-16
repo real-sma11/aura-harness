@@ -4,11 +4,10 @@
  * User-selected reasoning-effort tier carried end-to-end from the chat
  * model picker to the router.
  *
- * Provider-accurate **superset** — each model only exposes the subset
- * it supports (gated in the aura-os model catalog). `Minimal` is
- * OpenAI's lowest `reasoning_effort` tier; `Max` is Anthropic's largest
- * thinking budget (OpenAI has no `max`, so the router clamps it to
- * `high`). Mirror of `aura_os::aura_protocol::ReasoningEffort` — both
- * copies of the wire contract must match.
+ * Provider-neutral **superset** — each model only exposes the subset it
+ * supports (gated in the aura-os model catalog). Aura Router maps `Minimal`
+ * to `none` for current OpenAI models; GPT-5.6 also exposes distinct `XHigh`
+ * and `Max` tiers. Mirror of `aura_os::aura_protocol::ReasoningEffort` —
+ * both copies of the wire contract must match.
  */
-export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "max";
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

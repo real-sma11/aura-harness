@@ -59,6 +59,8 @@ pub mod cf {
     pub const MEMORY_PROCEDURES: &str = "memory_procedures";
     /// Memory: event ID → timestamp secondary index
     pub const MEMORY_EVENT_INDEX: &str = "memory_event_index";
+    /// Memory: per-agent Agent Continuity configuration
+    pub const MEMORY_CONFIG: &str = "memory_config";
     /// Skill installations per agent
     pub const AGENT_SKILLS: &str = "agent_skills";
     /// Persisted runtime capability ledger per agent

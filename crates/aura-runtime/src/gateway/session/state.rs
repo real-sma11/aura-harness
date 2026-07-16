@@ -632,6 +632,7 @@ fn thinking_effort_from_wire(effort: ReasoningEffort) -> ThinkingEffort {
         ReasoningEffort::Low => ThinkingEffort::Low,
         ReasoningEffort::Medium => ThinkingEffort::Medium,
         ReasoningEffort::High => ThinkingEffort::High,
+        ReasoningEffort::XHigh => ThinkingEffort::XHigh,
         ReasoningEffort::Max => ThinkingEffort::Max,
     }
 }

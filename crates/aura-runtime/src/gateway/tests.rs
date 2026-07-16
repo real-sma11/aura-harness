@@ -2,8 +2,8 @@ use super::*;
 use aura_agent::KernelModelGateway;
 use aura_agent_kernel::{ExecutorRouter, Kernel, KernelConfig};
 use aura_context_memory::{
-    ConsolidationConfig, MemoryManager, ProcedureConfig, RefinerConfig, RetrievalConfig,
-    WriteConfig,
+    ConsolidationConfig, MemoryAccessContext, MemoryManager, MemoryQueryContext, ProcedureConfig,
+    RefinerConfig, RetrievalConfig, WriteConfig,
 };
 use aura_context_skills::{SkillInstallStore, SkillLoader, SkillManager};
 use aura_core_types::AgentId;
@@ -11,6 +11,7 @@ use aura_model_reasoner::MockProvider;
 use aura_store_db::RocksStore;
 use axum::body::Body;
 use axum::http::{request::Builder as RequestBuilder, Request};
+use base64::Engine as _;
 use tower::util::ServiceExt;
 
 /// Test bearer token injected by [`authed_request`].
@@ -715,6 +716,305 @@ async fn test_memory_delete_fact() {
     assert!(facts.is_empty());
 }
 
+#[tokio::test]
+async fn test_memory_api_enforces_project_agent_project_and_user_partitions() {
+    let state = test_router_state_with_managers();
+    let agent_a = AgentId::generate();
+    let agent_b = AgentId::generate();
+    let app = create_router(state);
+
+    for (agent_id, key, scope) in [
+        (agent_a, "agent_a_private", "agent"),
+        (agent_a, "project_shared", "project"),
+        (agent_a, "user_personal", "user"),
+        (agent_b, "agent_b_private", "agent"),
+    ] {
+        let body = serde_json::json!({
+            "key": key,
+            "value": key,
+            "continuity": {
+                "scope": scope,
+                "status": "active",
+                "sensitivity": "normal",
+                "pinned": false,
+                "provenance": {}
+            }
+        });
+        let request = authed_request()
+            .method("POST")
+            .uri(format!(
+                "/memory/{}/facts?project_id=project-x&user_id=user-u",
+                agent_id.to_hex()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    let legacy = serde_json::json!({ "key": "legacy_unscoped", "value": "legacy" });
+    let request = authed_request()
+        .method("POST")
+        .uri(format!("/memory/{}/facts", agent_b.to_hex()))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&legacy).unwrap()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let request = authed_request()
+        .uri(format!(
+            "/memory/{}/snapshot?project_id=project-x&user_id=user-u",
+            agent_b.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let packet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let keys: std::collections::HashSet<_> = packet["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|fact| fact["key"].as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        std::collections::HashSet::from(["agent_b_private", "project_shared", "user_personal"])
+    );
+
+    let request = authed_request()
+        .uri(format!(
+            "/memory/{}/snapshot?project_id=project-y&user_id=user-u",
+            agent_b.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let packet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let keys: Vec<_> = packet["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|fact| fact["key"].as_str())
+        .collect();
+    assert_eq!(keys, vec!["user_personal"]);
+
+    let request = authed_request()
+        .uri(format!(
+            "/memory/{}/snapshot?project_id=project-x&user_id=user-u&include_legacy=true",
+            agent_b.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let packet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(packet["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|fact| fact["key"] == "legacy_unscoped"));
+
+    let conflicting_personal = serde_json::json!({
+        "key": "user_personal",
+        "value": "contradictory preference",
+        "continuity": {
+            "scope": "user",
+            "status": "active",
+            "sensitivity": "normal",
+            "pinned": false,
+            "provenance": {}
+        }
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri(format!(
+            "/memory/{}/facts?project_id=project-x&user_id=user-u",
+            agent_b.to_hex()
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&conflicting_personal).unwrap(),
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let fact: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(fact["continuity"]["status"], "pending");
+}
+
+#[tokio::test]
+async fn test_memory_continuity_config_roundtrip_and_empty_trace() {
+    let state = test_router_state_with_managers();
+    let agent_id = AgentId::generate();
+    let app = create_router(state);
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let default_config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(default_config["use_memory"], true);
+    assert_eq!(default_config["retrieval_mode"], "query_aware");
+
+    let config = serde_json::json!({
+        "use_memory": true,
+        "generate_memory": true,
+        "write_policy": "approval",
+        "retrieval_mode": "query_aware",
+        "allow_user_scope": false,
+        "allow_project_scope": false
+    });
+    let req = authed_request()
+        .method("PUT")
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&config).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/continuity",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let persisted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(persisted["write_policy"], "approval");
+
+    let req = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/retrieval/latest",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::Value::Null
+    );
+}
+
+#[tokio::test]
+async fn test_memory_retrieval_trace_is_scoped_to_project_agent_partition() {
+    let state = test_router_state_with_managers();
+    let manager = state.memory_manager.as_ref().unwrap().clone();
+    let agent_id = AgentId::generate();
+    let app = create_router(state);
+
+    let body = serde_json::json!({
+        "key": "release_train",
+        "value": "Tuesday",
+        "continuity": {
+            "scope": "project",
+            "status": "active",
+            "sensitivity": "normal",
+            "pinned": false,
+            "provenance": {}
+        }
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri(format!(
+            "/memory/{}/facts?project_id=project-x&user_id=user-u",
+            agent_id.to_hex()
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut prompt = String::new();
+    manager
+        .prepare_context_with_query(
+            agent_id,
+            &mut prompt,
+            MemoryQueryContext {
+                text: "When is the release train?".to_string(),
+                access: MemoryAccessContext {
+                    project_id: Some("project-x".to_string()),
+                    user_id: Some("user-u".to_string()),
+                    include_legacy: false,
+                },
+                ..MemoryQueryContext::default()
+            },
+        )
+        .await;
+    assert!(prompt.contains("Tuesday"));
+
+    let request = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/retrieval/latest?project_id=project-x&user_id=user-u",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let trace: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(trace["selected_count"], 1);
+
+    let request = authed_request()
+        .uri(format!(
+            "/api/agents/{}/memory/retrieval/latest?project_id=project-y&user_id=user-u",
+            agent_id.to_hex()
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        serde_json::Value::Null
+    );
+}
+
 // ============================================================================
 // Memory Events
 // ============================================================================
@@ -1172,6 +1472,8 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/files"),
     ("GET", "/api/read-file"),
     ("GET", "/workspace/resolve"),
+    ("POST", "/workspace/import"),
+    ("DELETE", "/workspace/deadbeef"),
     ("POST", "/tx"),
     ("GET", "/tx/status/deadbeef/abcd"),
     ("GET", "/agents/deadbeef/head"),
@@ -1202,6 +1504,9 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("GET", "/memory/deadbeef/snapshot"),
     ("POST", "/memory/deadbeef/wipe"),
     ("GET", "/memory/deadbeef/stats"),
+    ("GET", "/memory/deadbeef/continuity"),
+    ("PUT", "/memory/deadbeef/continuity"),
+    ("GET", "/memory/deadbeef/retrieval/latest"),
     ("POST", "/memory/deadbeef/consolidate"),
     // Memory aliases
     ("GET", "/api/agents/deadbeef/memory"),
@@ -1222,6 +1527,9 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/agents/deadbeef/memory/procedures/some-id"),
     ("DELETE", "/api/agents/deadbeef/memory/procedures/some-id"),
     ("GET", "/api/agents/deadbeef/memory/stats"),
+    ("GET", "/api/agents/deadbeef/memory/continuity"),
+    ("PUT", "/api/agents/deadbeef/memory/continuity"),
+    ("GET", "/api/agents/deadbeef/memory/retrieval/latest"),
     ("POST", "/api/agents/deadbeef/memory/consolidate"),
     // Skills
     ("GET", "/api/skills"),
@@ -2193,6 +2501,106 @@ async fn test_list_files_rejects_path_traversal() {
         StatusCode::FORBIDDEN,
         "listing above the workspace root must be refused"
     );
+}
+
+#[tokio::test]
+async fn test_workspace_import_and_delete_use_stable_workspace_key() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let workspace_key = "36d4494f-75df-4c02-84d5-07aef06d2569";
+    let body = serde_json::json!({
+        "workspace_key": workspace_key,
+        "files": [
+            {
+                "relative_path": "src/main.ts",
+                "contents_base64": base64::engine::general_purpose::STANDARD.encode("hello"),
+            },
+            {
+                "relative_path": "README.md",
+                "contents_base64": base64::engine::general_purpose::STANDARD.encode("read me"),
+            }
+        ]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let workspace = tmp.path().join("workspaces").join(workspace_key);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/main.ts")).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+        "read me"
+    );
+
+    let request = authed_request()
+        .method("DELETE")
+        .uri(format!("/workspace/{workspace_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!workspace.exists());
+}
+
+#[tokio::test]
+async fn test_workspace_import_rejects_path_traversal() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let body = serde_json::json!({
+        "workspace_key": "safe-project-id",
+        "files": [{
+            "relative_path": "../outside.txt",
+            "contents_base64": base64::engine::general_purpose::STANDARD.encode("secret"),
+        }]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!tmp.path().join("outside.txt").exists());
+}
+
+#[tokio::test]
+async fn test_workspace_lifecycle_rejects_key_that_slugifies_to_root() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let body = serde_json::json!({
+        "workspace_key": "...",
+        "files": [{
+            "relative_path": "outside.txt",
+            "contents_base64": base64::engine::general_purpose::STANDARD.encode("secret"),
+        }]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!tmp.path().join("workspaces/outside.txt").exists());
+
+    let request = authed_request()
+        .method("DELETE")
+        .uri("/workspace/...")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(tmp.path().join("workspaces").is_dir());
 }
 
 // ============================================================================

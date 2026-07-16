@@ -19,6 +19,7 @@ fn test_db(dir: &std::path::Path) -> Arc<DBWithThreadMode<MultiThreaded>> {
         ColumnFamilyDescriptor::new("memory_events", Options::default()),
         ColumnFamilyDescriptor::new("memory_procedures", Options::default()),
         ColumnFamilyDescriptor::new("memory_event_index", Options::default()),
+        ColumnFamilyDescriptor::new("memory_config", Options::default()),
         ColumnFamilyDescriptor::new("agent_skills", Options::default()),
     ];
 
@@ -633,6 +634,7 @@ fn write_report_serde_roundtrip() {
         facts_updated: 2,
         events_written: 1,
         candidates_dropped: 2,
+        ..crate::WriteReport::default()
     };
     let json = serde_json::to_string(&report).unwrap();
     let parsed: crate::WriteReport = serde_json::from_str(&json).unwrap();

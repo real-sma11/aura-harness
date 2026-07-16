@@ -247,6 +247,7 @@ impl ProcedureExtractor {
             updated_at: now,
             skill_name: sequence.skill_name.clone(),
             skill_relevance,
+            continuity: crate::types::MemoryContinuity::default(),
         };
 
         self.store.put_procedure(&procedure)?;

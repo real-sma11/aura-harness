@@ -121,6 +121,8 @@ async fn start_council_run_handler(
                 let status = match code {
                     "council_no_members"
                     | "invalid_council_request"
+                    | "invalid_second_opinion_request"
+                    | "second_opinion_no_references"
                     | "invalid_workspace"
                     | "invalid_provider_config"
                     | "tool_permissions_load_failed" => StatusCode::BAD_REQUEST,

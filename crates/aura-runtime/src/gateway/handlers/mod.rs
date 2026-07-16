@@ -15,7 +15,8 @@
 //!   task-run kickoffs.
 //! - [`run_ws`] — `WS /stream/:run_id` upgrade and event-only
 //!   forwarder for DevLoop / TaskRun automatons.
-//! - [`files`] — `/api/files`, `/api/read-file`, `/workspace/resolve`.
+//! - [`files`] — `/api/files`, `/api/read-file`, and hosted workspace
+//!   resolve/import/delete lifecycle endpoints.
 //! - [`tx`] — `/tx`, `/tx/status/:agent_id/:tx_id`, `/agents/:id/head`,
 //!   `/agents/:id/record`.
 //! - [`memory`] — memory CRUD (canonical paths + aura-os `/api/*`
