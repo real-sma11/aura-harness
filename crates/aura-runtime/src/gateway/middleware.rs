@@ -50,7 +50,10 @@ use tracing::{warn, Level};
 use crate::terminal;
 
 use super::auth_mw;
-use super::handlers::files::{list_files_handler, read_file_handler, resolve_workspace_handler};
+use super::handlers::files::{
+    delete_workspace_handler, import_workspace_handler, list_files_handler, read_file_handler,
+    resolve_workspace_handler,
+};
 use super::handlers::memory;
 use super::handlers::processes::{
     create_process_handler, delete_process_handler, get_process_handler, list_process_runs_handler,
@@ -98,6 +101,7 @@ pub fn create_router(state: RouterState) -> Router {
     // bottom of this function. Phase 9 of the security audit.
     let body_limit_1k = DefaultBodyLimit::max(1024);
     let body_limit_16k = DefaultBodyLimit::max(16 * 1024);
+    let body_limit_12m = DefaultBodyLimit::max(12 * 1024 * 1024);
     let body_limit_4k = DefaultBodyLimit::max(4 * 1024);
 
     let public = Router::new().route("/health", get(health_handler).route_layer(body_limit_1k));
@@ -138,6 +142,14 @@ pub fn create_router(state: RouterState) -> Router {
         .route(
             "/workspace/resolve",
             get(resolve_workspace_handler).route_layer(body_limit_16k),
+        )
+        .route(
+            "/workspace/import",
+            post(import_workspace_handler).route_layer(body_limit_12m),
+        )
+        .route(
+            "/workspace/:workspace_key",
+            axum::routing::delete(delete_workspace_handler).route_layer(body_limit_16k),
         )
         .route(
             "/tx/status/:agent_id/:tx_id",

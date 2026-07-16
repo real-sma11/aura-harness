@@ -11,6 +11,7 @@ use aura_model_reasoner::MockProvider;
 use aura_store_db::RocksStore;
 use axum::body::Body;
 use axum::http::{request::Builder as RequestBuilder, Request};
+use base64::Engine as _;
 use tower::util::ServiceExt;
 
 /// Test bearer token injected by [`authed_request`].
@@ -1471,6 +1472,8 @@ const PROTECTED_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/files"),
     ("GET", "/api/read-file"),
     ("GET", "/workspace/resolve"),
+    ("POST", "/workspace/import"),
+    ("DELETE", "/workspace/deadbeef"),
     ("POST", "/tx"),
     ("GET", "/tx/status/deadbeef/abcd"),
     ("GET", "/agents/deadbeef/head"),
@@ -2498,6 +2501,106 @@ async fn test_list_files_rejects_path_traversal() {
         StatusCode::FORBIDDEN,
         "listing above the workspace root must be refused"
     );
+}
+
+#[tokio::test]
+async fn test_workspace_import_and_delete_use_stable_workspace_key() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let workspace_key = "36d4494f-75df-4c02-84d5-07aef06d2569";
+    let body = serde_json::json!({
+        "workspace_key": workspace_key,
+        "files": [
+            {
+                "relative_path": "src/main.ts",
+                "contents_base64": base64::engine::general_purpose::STANDARD.encode("hello"),
+            },
+            {
+                "relative_path": "README.md",
+                "contents_base64": base64::engine::general_purpose::STANDARD.encode("read me"),
+            }
+        ]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let workspace = tmp.path().join("workspaces").join(workspace_key);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src/main.ts")).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("README.md")).unwrap(),
+        "read me"
+    );
+
+    let request = authed_request()
+        .method("DELETE")
+        .uri(format!("/workspace/{workspace_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(!workspace.exists());
+}
+
+#[tokio::test]
+async fn test_workspace_import_rejects_path_traversal() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let body = serde_json::json!({
+        "workspace_key": "safe-project-id",
+        "files": [{
+            "relative_path": "../outside.txt",
+            "contents_base64": base64::engine::general_purpose::STANDARD.encode("secret"),
+        }]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!tmp.path().join("outside.txt").exists());
+}
+
+#[tokio::test]
+async fn test_workspace_lifecycle_rejects_key_that_slugifies_to_root() {
+    let (state, tmp) = test_router_state_with_workspace();
+    let app = create_router(state);
+    let body = serde_json::json!({
+        "workspace_key": "...",
+        "files": [{
+            "relative_path": "outside.txt",
+            "contents_base64": base64::engine::general_purpose::STANDARD.encode("secret"),
+        }]
+    });
+    let request = authed_request()
+        .method("POST")
+        .uri("/workspace/import")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!tmp.path().join("workspaces/outside.txt").exists());
+
+    let request = authed_request()
+        .method("DELETE")
+        .uri("/workspace/...")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(tmp.path().join("workspaces").is_dir());
 }
 
 // ============================================================================
