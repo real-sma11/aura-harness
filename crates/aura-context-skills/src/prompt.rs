@@ -11,6 +11,8 @@ pub struct SkillPromptEntry<'a> {
     pub description: &'a str,
     pub body: &'a str,
     pub dir_path: &'a Path,
+    pub agent_target_id: Option<&'a str>,
+    pub agent_target_name: Option<&'a str>,
 }
 
 /// Render a list of skill metadata entries as an `<available_skills>` XML block
@@ -63,6 +65,23 @@ pub fn render_full_skills_xml(skills: &[SkillPromptEntry<'_>]) -> String {
         let _ = write!(buf, "{}", xml_escape(s.description));
         if !s.body.is_empty() {
             let _ = write!(buf, "\n\n{}", xml_escape(s.body));
+        }
+        if let Some(target_id) = s.agent_target_id.filter(|id| !id.trim().is_empty()) {
+            let target_name = s
+                .agent_target_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("Project agent");
+            let _ = write!(
+                buf,
+                "\n\n<skill_agent_target name=\"{}\" agent_id=\"{}\"/>\
+                 \nThis collaborator was selected by the user for this skill. \
+                 When the skill instructions require delegation, call `send_to_agent` \
+                 with this exact agent_id and do not substitute another agent. \
+                 The target must be attached to the current project. After a successful \
+                 delivery, end the turn and wait for the asynchronous reply.",
+                xml_escape(target_name),
+                xml_escape(target_id),
+            );
         }
         buf.push_str("</agent_skill>\n");
     }
@@ -206,5 +225,25 @@ mod tests {
         let xml = render_skills_xml(&meta);
         assert!(xml.contains("name=\"alpha\""));
         assert!(xml.contains("name=\"beta\""));
+    }
+
+    #[test]
+    fn full_skill_prompt_includes_exact_agent_target_binding() {
+        let entries = [SkillPromptEntry {
+            name: "request-review",
+            description: "Ask the reviewer",
+            body: "Send the current change for review.",
+            dir_path: Path::new("/skills/request-review"),
+            agent_target_id: Some("agent-123"),
+            agent_target_name: Some("Security <Reviewer>"),
+        }];
+
+        let xml = render_full_skills_xml(&entries);
+
+        assert!(xml.contains(
+            "<skill_agent_target name=\"Security &lt;Reviewer&gt;\" agent_id=\"agent-123\"/>"
+        ));
+        assert!(xml.contains("call `send_to_agent` with this exact agent_id"));
+        assert!(xml.contains("wait for the asynchronous reply"));
     }
 }

@@ -138,6 +138,14 @@ pub(in crate::gateway) struct CreateSkillBody {
     pub body: String,
     #[serde(default)]
     pub user_invocable: bool,
+    #[serde(default)]
+    pub agent_target: Option<SkillAgentTargetBody>,
+}
+
+#[derive(Deserialize)]
+pub(in crate::gateway) struct SkillAgentTargetBody {
+    pub agent_id: String,
+    pub name: String,
 }
 
 /// `POST /api/skills` — create a new skill (writes SKILL.md to personal dir).
@@ -152,12 +160,22 @@ pub(in crate::gateway) async fn create_skill(
             Json(serde_json::json!({ "error": "lock poisoned" })),
         )
     })?;
+    let target_id = body
+        .agent_target
+        .as_ref()
+        .map(|target| target.agent_id.as_str());
+    let target_name = body
+        .agent_target
+        .as_ref()
+        .map(|target| target.name.as_str());
     let skill = guard
-        .create(
+        .create_with_agent_target(
             &body.name,
             &body.description,
             &body.body,
             body.user_invocable,
+            target_id,
+            target_name,
         )
         .map_err(skill_err)?;
     Ok((

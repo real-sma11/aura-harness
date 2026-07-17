@@ -48,6 +48,27 @@ pub struct SkillFrontmatter {
     /// Preferred model for this skill.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Aura agent template id selected as this skill's direct collaborator.
+    ///
+    /// This is intentionally an agent id rather than a project binding id:
+    /// the same agent can be attached to several projects, while the Aura
+    /// server still verifies that the target belongs to the current project
+    /// before accepting a delivery.
+    #[serde(
+        rename = "agent-target-id",
+        alias = "agent_target_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_target_id: Option<String>,
+    /// Display-name snapshot for the configured collaborator. The id above is
+    /// authoritative; this label keeps the injected instruction readable if
+    /// the target cannot be resolved while editing the skill.
+    #[serde(
+        rename = "agent-target-name",
+        alias = "agent_target_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_target_name: Option<String>,
     /// Effort / reasoning-effort hint (e.g. "low", "high").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
