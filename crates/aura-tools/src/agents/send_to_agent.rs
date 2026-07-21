@@ -193,6 +193,7 @@ impl Tool for SendToAgentTool {
                 &input.agent_id,
                 parent.as_deref(),
                 ctx.originating_user_id.as_deref(),
+                ctx.caller_project_id.as_deref(),
                 &input.content,
                 input.attachments.clone(),
                 ctx.caller_model_id.as_deref(),
@@ -305,6 +306,7 @@ mod tests {
             _target_agent_id: &str,
             _parent_agent_id: Option<&str>,
             _originating_user_id: Option<&str>,
+            _project_id: Option<&str>,
             _content: &str,
             _attachments: Option<serde_json::Value>,
             _model: Option<&str>,
@@ -502,6 +504,7 @@ mod tests {
     /// agent's REST URL.
     struct CapturingHook {
         captured_parent: std::sync::Mutex<Option<String>>,
+        captured_project: std::sync::Mutex<Option<String>>,
         captured_model: std::sync::Mutex<Option<String>>,
     }
 
@@ -509,6 +512,7 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 captured_parent: std::sync::Mutex::new(None),
+                captured_project: std::sync::Mutex::new(None),
                 captured_model: std::sync::Mutex::new(None),
             })
         }
@@ -517,6 +521,9 @@ mod tests {
         }
         fn captured_model(&self) -> Option<String> {
             self.captured_model.lock().unwrap().clone()
+        }
+        fn captured_project(&self) -> Option<String> {
+            self.captured_project.lock().unwrap().clone()
         }
     }
 
@@ -527,11 +534,13 @@ mod tests {
             _target_agent_id: &str,
             parent_agent_id: Option<&str>,
             _originating_user_id: Option<&str>,
+            project_id: Option<&str>,
             _content: &str,
             _attachments: Option<serde_json::Value>,
             model: Option<&str>,
         ) -> Result<(), String> {
             *self.captured_parent.lock().unwrap() = parent_agent_id.map(str::to_string);
+            *self.captured_project.lock().unwrap() = project_id.map(str::to_string);
             *self.captured_model.lock().unwrap() = model.map(str::to_string);
             Ok(())
         }
@@ -606,6 +615,28 @@ mod tests {
             outcome.parent_agent_id.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
+    }
+
+    #[tokio::test]
+    async fn send_to_agent_forwards_the_callers_project() {
+        let hook = CapturingHook::new();
+        let mut tctx = ctx(AgentPermissions {
+            scope: AgentScope::default(),
+            capabilities: vec![Capability::ControlAgent],
+        });
+        tctx.caller_project_id = Some("project-123".into());
+        tctx.agent_control_hook = Some(hook.clone());
+
+        let result = SendToAgentTool
+            .execute(
+                &tctx,
+                serde_json::json!({ "agent_id": "target-id", "content": "hi" }),
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.ok);
+        assert_eq!(hook.captured_project().as_deref(), Some("project-123"));
     }
 
     /// Companion test: when the runtime has NOT wired

@@ -89,6 +89,29 @@ Step 2: Push
     }
 
     #[test]
+    fn parses_canonical_and_aura_agent_target_fields() {
+        for (id_field, name_field) in [
+            ("agent-target-id", "agent-target-name"),
+            ("agent_target_id", "agent_target_name"),
+        ] {
+            let content = format!(
+                "---\nname: request-review\ndescription: Ask a collaborator\n\
+                 {id_field}: 00000000-0000-0000-0000-000000000002\n\
+                 {name_field}: Security Reviewer\n---\nDelegate the review."
+            );
+            let (frontmatter, _) = parse_skill_md(&content).unwrap();
+            assert_eq!(
+                frontmatter.agent_target_id.as_deref(),
+                Some("00000000-0000-0000-0000-000000000002")
+            );
+            assert_eq!(
+                frontmatter.agent_target_name.as_deref(),
+                Some("Security Reviewer")
+            );
+        }
+    }
+
+    #[test]
     fn missing_frontmatter_delimiter() {
         let content = "no frontmatter here";
         assert!(parse_skill_md(content).is_err());

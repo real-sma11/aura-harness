@@ -38,16 +38,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
+      - name: Compute Docker tags
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
-            type=ref,event=tag
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:sha-${short_sha}"
+            if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+              echo "${IMAGE_NAME}:latest"
+              echo "${IMAGE_NAME}:main"
+            elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              echo "${IMAGE_NAME}:${GITHUB_REF_NAME}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -59,7 +65,6 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

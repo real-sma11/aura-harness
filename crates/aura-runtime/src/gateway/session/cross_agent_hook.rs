@@ -178,6 +178,7 @@ impl AgentControlHook for AuraServerAgentHook {
         target_agent_id: &str,
         parent_agent_id: Option<&str>,
         _originating_user_id: Option<&str>,
+        project_id: Option<&str>,
         content: &str,
         attachments: Option<Value>,
         model: Option<&str>,
@@ -221,7 +222,7 @@ impl AgentControlHook for AuraServerAgentHook {
                 // server prefers this value when present.
                 "model": model,
                 "commands": null,
-                "project_id": null,
+                "project_id": project_id,
                 "attachments": attachments,
                 "new_session": false,
                 "originating_agent_id": parent_agent_id,
@@ -294,6 +295,7 @@ impl AgentControlHook for AuraServerAgentHook {
 
         self.deliver_message(
             target_agent_id,
+            None,
             None,
             None,
             &format!("Delegated task:\n\n{task}"),
@@ -547,6 +549,7 @@ mod tests {
             "target-agent",
             Some("caller-agent"),
             Some("user-root"),
+            Some("project-123"),
             "hello",
             None,
             Some("aura-claude-sonnet-4-6"),
@@ -561,6 +564,11 @@ mod tests {
             "deliver_message must forward parent_agent_id as `originating_agent_id` so \
              aura-os-server can post the target's reply back into the caller's session; \
              got: {body}"
+        );
+        assert_eq!(
+            body.get("project_id").and_then(Value::as_str),
+            Some("project-123"),
+            "deliver_message must preserve the originating project; got: {body}"
         );
         assert_eq!(
             body.get("content").and_then(Value::as_str),
@@ -592,7 +600,7 @@ mod tests {
         let base_url = spawn_capturing_chat_stream_mock(captured.clone()).await;
 
         let hook = AuraServerAgentHook::new(base_url, Some("test-jwt".into()));
-        hook.deliver_message("target-agent", None, None, "hello", None, None)
+        hook.deliver_message("target-agent", None, None, None, "hello", None, None)
             .await
             .expect("deliver_message call");
 
@@ -636,6 +644,7 @@ mod tests {
             "target-agent",
             Some("caller-agent"),
             Some("user-root"),
+            None,
             "hello",
             None,
             None,
